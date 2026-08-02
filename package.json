@@ -1,0 +1,20 @@
+{
+    "name": "svsh",
+    "version": "0.1.0",
+    "description": "StableBook - simple scheduling, contacts and invoicing for a riding stable",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "db:create": "createdb svsh || true",
+        "db:schema": "psql svsh -f db/schema.sql",
+        "db:seed": "node db/seed.js",
+        "db:reset": "dropdb --if-exists svsh && createdb svsh && npm run db:schema && npm run db:seed",
+        "db:import-term": "node db/import_term.js"
+    },
+    "license": "UNLICENSED",
+    "dependencies": {
+        "express": "^4.21.2",
+        "pg": "^8.13.1",
+        "pdfkit": "^0.15.2"
+    }
+}

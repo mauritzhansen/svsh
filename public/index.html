@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#4a6741">
+    <title>SVSH — Sweet Valley School of Horsemanship</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%B4%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+    <header id="topbar" class="hidden">
+        <div class="topbar-title">🐴 SVSH</div>
+        <div class="topbar-user" id="topbar-user"></div>
+    </header>
+
+    <main id="view"></main>
+
+    <nav id="bottomnav" class="hidden">
+        <button data-nav="calendar"><span class="nav-icon">📅</span>Calendar</button>
+        <button data-nav="contacts"><span class="nav-icon">👥</span>Contacts</button>
+        <button data-nav="invoices"><span class="nav-icon">🧾</span>Invoices</button>
+        <button data-nav="reports"><span class="nav-icon">📊</span>Reports</button>
+        <button data-nav="settings"><span class="nav-icon">⚙️</span>Settings</button>
+    </nav>
+
+    <div id="dialog-backdrop" class="hidden">
+        <div id="dialog"></div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

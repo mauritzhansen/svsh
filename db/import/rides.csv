@@ -1,0 +1,38 @@
+ride_id,day,start_time,end_time,duration_min,level,instructors,instructor_alternates,assistant_instructors,assistant_alternates,student_count,student_ids,students_to_collect,flags
+MON-01,monday,12:00,13:00,60,int-adv,Gisela,,,,1,amanda,,
+MON-02,monday,13:15,14:30,75,beg,Tamara,,Elri,,2,azania|micaiah,,
+MON-03,monday,14:55,16:10,75,beg-int,Naomi,,Elri,,3,aira|cairo|vicky,aira|cairo,
+MON-04,monday,15:00,16:00,60,int,Hannah,,,,1,lily-s,,
+MON-05,monday,15:00,16:00,60,beg,Tamara,,,,1,ethan,,Unresolved '(Tara)' in source.
+MON-06,monday,16:30,17:45,75,int,Tamara,,Elri,,3,paige|aeryn|elizabeth,,
+MON-07,monday,16:30,17:45,75,int,Naomi,,,,3,layla|nolan|maya-haley,,'Maya Haley' may be two students.
+MON-08,monday,16:30,18:00,90,adv,Gisela,,,,2,morgan|lia,,
+TUE-01,tuesday,13:30,14:30,60,beg,Tamara,,,,1,emily-s,,
+TUE-02,tuesday,15:00,16:15,75,int,Gisela,,,,3,ella-c|chloe|rio,,
+TUE-03,tuesday,15:00,16:15,75,beg-int,Naomi|Hannah,,Elri,,4,olivia|agnes|kaia-j|indigo,agnes|kaia-j,
+TUE-04,tuesday,15:00,16:00,60,int,Tamara,,,,1,asher,,
+TUE-05,tuesday,16:00,17:15,75,int,Naomi,,,,2,kerry|kaia-g,,
+TUE-06,tuesday,16:30,17:45,75,beg-int,Tamara,,Elri,,3,isa|ella-j|charlie,,
+TUE-07,tuesday,16:15,18:00,105,adv,Gisela,,,,3,emelie|taheera|ella-p,,
+WED-01,wednesday,14:00,15:00,60,int,Naomi,,,,1,manal,,
+WED-02,wednesday,15:00,16:15,75,beg-int,Tamara,,Elri|Rhiannon,,3,frankie|sierra|paizley,,
+WED-03,wednesday,15:00,16:15,75,int,Naomi|Gisela,,,,5,lara|mia|layla|nolan|norah,,
+WED-04,wednesday,16:30,18:30,120,adv,Gisela,,,,2,salamander|halo,,
+WED-05,wednesday,16:30,17:45,75,int,Naomi,,,,3,elisa|amalia|paula,,
+THU-01,thursday,13:00,14:15,75,adv,Naomi,Thandi,,,3,maya|zara|lilly-a,,Instructor is Naomi OR Thandi (slash in source). | 'Lilly A' bracketed in source — treated as tentative addition.
+THU-02,thursday,13:45,14:45,60,int,Gisela,,,,1,sean,,
+THU-03,thursday,13:30,14:45,75,beg-int,Tamara,,Elri,,3,shaylah|olympia|tilda,,
+THU-04,thursday,15:00,16:00,60,beg,Gisela|Tamara,,Elri|Rhiannon,Carla,6,dalia|aira|eliza|ayaan|gwynn|akul,dalia|aira|ayaan|gwynn|akul,"Rhiannon OR Carla as second assistant (slash in source). | Largest ride of the week: 6 riders, 5 of them collected from school."
+THU-05,thursday,15:00,16:15,75,int,Naomi,,,,2,ines|alexandra,,
+THU-06,thursday,16:30,17:45,75,int,Thandi,,,,2,manal|rio,,
+THU-07,thursday,16:30,17:45,75,int,Tamara,,,,3,philline|erin|sienna-l,,
+THU-08,thursday,16:30,17:45,75,int,Naomi,,,,2,everly|emily-p,,
+FRI-01,friday,14:00,15:15,75,beg,Naomi,,Elri,,3,kate|matilda|sebastian,,
+FRI-02,friday,14:00,15:15,75,beg-int,Tamara,,Elri,,2,meaghan|aria,,
+FRI-03,friday,14:00,15:00,60,adv,Gisela,,,,1,grace-k,,
+FRI-04,friday,15:15,16:15,60,adv,Gisela,,,,1,azara,,
+FRI-05,friday,15:15,16:10,55,int,Naomi,,,,2,sienna-a|emily-m,,
+FRI-06,friday,16:30,17:45,75,int,Tamara,,,,3,leah|anna|lily-a,,
+FRI-07,friday,16:30,18:00,90,adv,Gisela,,,,2,lia|grace-a,,Unresolved '(Ice)' in source — likely a horse.
+SAT-01,saturday,09:00,10:15,75,beg-int,Naomi,,,,2,meredith|isabella,,
+SAT-02,saturday,10:30,11:30,60,adv,Naomi,,,,1,amy,,
