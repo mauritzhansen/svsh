@@ -56,6 +56,52 @@ Same pattern as other self-hosted projects: run `node server.js` behind an
 nginx reverse proxy (which should terminate TLS), with PostgreSQL on the same
 box. Back up with a nightly `pg_dump svsh`.
 
+### Database role (one-time per environment)
+
+The app and all db scripts connect explicitly as the `svsh` Postgres role
+(`postgres://svsh@localhost/svsh` by default, or set `DATABASE_URL`), so
+ambient `PGUSER`/`PGDATABASE` from other projects can't interfere. Set up once
+per environment (local or server), as a superuser:
+
+```sql
+CREATE ROLE svsh LOGIN;              -- add PASSWORD '...' on servers
+ALTER DATABASE svsh OWNER TO svsh;
+-- if the db pre-dates the role, transfer existing objects too:
+-- ALTER TABLE <each table> OWNER TO svsh; ALTER SEQUENCE <each> OWNER TO svsh;
+```
+
+All objects must stay owned by `svsh`; always run `db:migrate` as `svsh` so
+newly created tables keep consistent ownership.
+
+### Database updates (migrations)
+
+The database is updated with numbered SQL files in `db/migrations/`, applied
+once each and tracked in `schema_migrations`:
+
+```bash
+npm run db:migrate     # apply pending migrations (run on the server after git pull)
+```
+
+Conventions:
+- Every schema change goes BOTH into `db/schema.sql` (canonical, used by fresh
+  installs / `db:reset`) AND into a new `db/migrations/NNN_name.sql` file.
+- Content updates (INSERT/UPDATE fixes) go into migration files only.
+- Fresh installs (`npm run db:reset`) load `schema.sql` and then baseline all
+  migration files as already-applied (`node db/migrate.js --baseline`).
+
+Deploying to production — code AND database together — is one command from
+your machine:
+
+```bash
+git push prod master
+```
+
+The server's post-receive hook checks out the code, runs `npm ci`, applies any
+new `db/migrations/*.sql` (same `schema_migrations` tracking as `db:migrate`,
+using the app's `DATABASE_URL` from `/etc/svsh.env`), restarts the service and
+verifies it came up — all shown live in the push output. `npm run db:migrate`
+is for local development; SSH-ing in manually is only for troubleshooting.
+
 ## Data model (short version)
 
 - `slots` — one horse at one date/time; status `open`, `booked` (has a contact), `blocked`, or `cancelled` (hidden tombstone for a removed occurrence of a fixed slot).

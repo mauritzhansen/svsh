@@ -229,6 +229,30 @@ CREATE TABLE term_passes (
     CHECK (period_start <= period_end)
 );
 
+-- Simple to-dos; dated (and optionally timed) ones double as the day's
+-- activities in the calendar's first column. Done items go to the archive.
+CREATE TABLE todos (
+    id BIGSERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    todo_date DATE,
+    todo_time TIME,
+    done_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- School directory: external service contacts (vet, farrier, handyman, ...).
+-- Instructors appear in the directory from the guides table -- don't duplicate
+-- them here; riders/parents live in contacts.
+CREATE TABLE service_contacts (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 INSERT INTO settings (key, value) VALUES
     ('business_name', 'Sweet Valley School of Horsemanship'),
     ('business_address', ''),

@@ -274,7 +274,9 @@ td.empty-cell:active { background: var(--green-light); }
 }
 .horse-block-btn:hover { opacity: 1; }
 th.blocked-th { background: var(--blocked-bg); color: #777; }
-td.unassigned-cell { min-width: 170px; vertical-align: top; background: #fbfaf6; }
+th.unassigned-col { background: #dbe3ec; }
+td.unassigned-cell { min-width: 170px; vertical-align: top; background: #eef2f7; cursor: pointer; }
+td.unassigned-cell:hover { background: #e2e9f2; }
 td.unassigned-cell .slot .slot-line { max-width: none; white-space: normal; }
 td.filler-cell { background: #fbfaf6; }
 
@@ -467,3 +469,21 @@ table.plain td.num, table.plain th.num { text-align: right; }
     max-width: 90vw;
 }
 #toast.error { background: var(--danger); }
+
+/* ---------- Day activities (to-dos) column ---------- */
+th.todo-col, td.todo-cell { min-width: 88px; width: 88px; }
+th.todo-col { background: #f0e6c0; }
+td.todo-cell { background: #faf3da; vertical-align: top; cursor: pointer; }
+.todo-slot {
+    background: #fff7dd;
+    border: 1px solid #e4d59a;
+    color: #6d5a12;
+    font-size: 11.5px;
+    border-radius: 6px;
+    margin-bottom: 3px;
+    padding: 4px 5px;
+    border-left: 3px solid #d4b942;
+}
+.todo-slot .slot-line { white-space: normal; max-width: none; }
+.todo-check { flex-shrink: 0; }
+.li-sub.overdue { color: var(--danger); font-weight: 600; }

@@ -5,11 +5,12 @@
     "main": "server.js",
     "scripts": {
         "start": "node server.js",
-        "db:create": "createdb svsh || true",
-        "db:schema": "psql svsh -f db/schema.sql",
+        "db:create": "createdb -O svsh svsh || true",
+        "db:schema": "psql -U svsh svsh -f db/schema.sql",
         "db:seed": "node db/seed.js",
-        "db:reset": "dropdb --if-exists svsh && createdb svsh && npm run db:schema && npm run db:seed",
-        "db:import-term": "node db/import_term.js"
+        "db:reset": "dropdb --if-exists svsh && createdb -O svsh svsh && npm run db:schema && node db/migrate.js --baseline && npm run db:seed",
+        "db:import-term": "node db/import_term.js",
+        "db:migrate": "node db/migrate.js"
     },
     "license": "UNLICENSED",
     "dependencies": {

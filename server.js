@@ -8,7 +8,7 @@ const pg = require('pg');
 pg.types.setTypeParser(1082, (v) => v);
 
 const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL || 'postgres://localhost/svsh'
+    connectionString: process.env.DATABASE_URL || 'postgres://svsh@localhost/svsh'
 });
 
 const app = express();
@@ -1224,6 +1224,128 @@ app.post('/api/credits/consume', requireAuth, async (req, res) => {
     }
 });
 
+// ---------- To-dos ----------
+app.get('/api/todos', requireAuth, async (req, res) => {
+    try {
+        if (req.query.done === '1') {
+            const { rows } = await pool.query(
+                `SELECT * FROM todos WHERE done_at IS NOT NULL
+                  ORDER BY done_at DESC LIMIT 300`);
+            return res.json({ todos: rows });
+        }
+        const { rows } = await pool.query(
+            `SELECT * FROM todos WHERE done_at IS NULL
+              ORDER BY todo_date NULLS LAST, todo_time NULLS FIRST, created_at`);
+        const { rows: cnt } = await pool.query(
+            'SELECT count(*)::int AS n FROM todos WHERE done_at IS NOT NULL');
+        res.json({ todos: rows, done_count: cnt[0].n });
+    } catch (err) {
+        handleError(res, err, 'Loading to-dos');
+    }
+});
+
+app.post('/api/todos', requireAuth, async (req, res) => {
+    try {
+        const { title, todo_date, todo_time } = req.body || {};
+        if (!String(title || '').trim()) return res.status(400).json({ error: 'A title is required.' });
+        if (todo_date && !DATE_RE.test(todo_date)) return res.status(400).json({ error: 'Invalid date.' });
+        if (todo_time && !TIME_RE.test(todo_time)) return res.status(400).json({ error: 'Invalid time.' });
+        const { rows } = await pool.query(
+            `INSERT INTO todos (title, todo_date, todo_time) VALUES ($1, $2, $3) RETURNING *`,
+            [String(title).trim(), todo_date || null, todo_time || null]);
+        res.json({ todo: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Creating to-do');
+    }
+});
+
+app.put('/api/todos/:id', requireAuth, async (req, res) => {
+    try {
+        const { title, todo_date, todo_time, done } = req.body || {};
+        if (todo_date && !DATE_RE.test(todo_date)) return res.status(400).json({ error: 'Invalid date.' });
+        if (todo_time && !TIME_RE.test(todo_time)) return res.status(400).json({ error: 'Invalid time.' });
+        const { rows } = await pool.query(
+            `UPDATE todos SET
+                title = COALESCE($2, title),
+                todo_date = CASE WHEN $3 THEN $4::date ELSE todo_date END,
+                todo_time = CASE WHEN $5 THEN $6::time ELSE todo_time END,
+                done_at = CASE WHEN $7 THEN (CASE WHEN $8 THEN now() ELSE NULL END) ELSE done_at END
+             WHERE id = $1 RETURNING *`,
+            [req.params.id, title,
+             todo_date !== undefined, todo_date || null,
+             todo_time !== undefined, todo_time || null,
+             done !== undefined, !!done]);
+        if (!rows[0]) return res.status(404).json({ error: 'To-do not found.' });
+        res.json({ todo: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Updating to-do');
+    }
+});
+
+app.delete('/api/todos/:id', requireAuth, async (req, res) => {
+    try {
+        const { rowCount } = await pool.query('DELETE FROM todos WHERE id = $1', [req.params.id]);
+        if (!rowCount) return res.status(404).json({ error: 'To-do not found.' });
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Deleting to-do');
+    }
+});
+
+// ---------- School directory (external service contacts) ----------
+app.get('/api/service-contacts', requireAuth, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM service_contacts ORDER BY category, name');
+        res.json({ service_contacts: rows });
+    } catch (err) {
+        handleError(res, err, 'Loading directory');
+    }
+});
+
+app.post('/api/service-contacts', requireRole('helper'), async (req, res) => {
+    try {
+        const { name, category, phone, email, notes } = req.body || {};
+        if (!String(name || '').trim()) return res.status(400).json({ error: 'A name is required.' });
+        const { rows } = await pool.query(
+            `INSERT INTO service_contacts (name, category, phone, email, notes)
+             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            [String(name).trim(), category || '', phone || '', email || '', notes || '']);
+        res.json({ service_contact: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Creating directory entry');
+    }
+});
+
+app.put('/api/service-contacts/:id', requireRole('helper'), async (req, res) => {
+    try {
+        const { name, category, phone, email, notes } = req.body || {};
+        const { rows } = await pool.query(
+            `UPDATE service_contacts SET
+                name = COALESCE($2, name),
+                category = COALESCE($3, category),
+                phone = COALESCE($4, phone),
+                email = COALESCE($5, email),
+                notes = COALESCE($6, notes)
+             WHERE id = $1 RETURNING *`,
+            [req.params.id, name, category, phone, email, notes]);
+        if (!rows[0]) return res.status(404).json({ error: 'Directory entry not found.' });
+        res.json({ service_contact: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Updating directory entry');
+    }
+});
+
+app.delete('/api/service-contacts/:id', requireRole('helper'), async (req, res) => {
+    try {
+        const { rowCount } = await pool.query('DELETE FROM service_contacts WHERE id = $1', [req.params.id]);
+        if (!rowCount) return res.status(404).json({ error: 'Directory entry not found.' });
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Deleting directory entry');
+    }
+});
+
 // ---------- Reports ----------
 // Rides per ride type per horse in a period. A horse "worked" when it carried
 // a booked rider or a guide; open seats and blocked entries don't count.
@@ -1724,5 +1846,5 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`StableBook running on http://localhost:${PORT}`);
+    console.log(`SVSH running on http://localhost:${PORT}`);
 });

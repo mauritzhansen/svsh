@@ -177,6 +177,7 @@
         if (parts[0] === 'contacts' && parts[1]) return renderContactDetail(parts[1]);
         if (parts[0] === 'contacts') return renderContacts();
         if (parts[0] === 'invoices') return renderInvoices();
+        if (parts[0] === 'todos') return renderTodos();
         if (parts[0] === 'reports') return renderReports();
         if (parts[0] === 'fixed') return renderFixed();
         if (parts[0] === 'settings') return renderSettings();
@@ -386,12 +387,14 @@
             openRideDialog(null, { date, time: (state.settings.day_start || '08:00'), dayRides }));
 
         try {
-            const [ridesData, creditsData] = await Promise.all([
+            const [ridesData, creditsData, todosData] = await Promise.all([
                 api('GET', `/api/rides?from=${date}&to=${date}`),
-                api('GET', '/api/credits')
+                api('GET', '/api/credits'),
+                api('GET', '/api/todos')
             ]);
             dayRides = ridesData.rides;
-            drawDayGrid(dayRides, date);
+            const dayTodos = todosData.todos.filter((t) => t.todo_date === date);
+            drawDayGrid(dayRides, date, dayTodos);
             const $cb = document.getElementById('credit-bar');
             if ($cb && creditsData.credits.length) {
                 $cb.innerHTML = `
@@ -453,7 +456,8 @@
         });
     }
 
-    function drawDayGrid(rides, date) {
+    function drawDayGrid(rides, date, todos) {
+        todos = todos || [];
         const grid = document.getElementById('cal-grid');
         if (!grid) return;
         const horses = activeHorses();
@@ -462,6 +466,11 @@
             return;
         }
         const times = dayTimes(rides);
+        // Timed activities get their own time row if it doesn't exist yet
+        todos.forEach((t) => { if (t.todo_time) times.push(hhmm(t.todo_time)); });
+        const uniqueTimes = [...new Set(times)].sort();
+        times.length = 0;
+        uniqueTimes.forEach((t) => times.push(t));
 
         // Horses blocked for the whole day (all-day block rides)
         const dayBlocks = {};
@@ -508,10 +517,13 @@
                 };
             });
         });
-        const hasUnassigned = Object.keys(unassigned).length > 0;
+        // Planning column is always visible: horses are usually assigned only
+        // on the morning itself, so future days are planned rider-first here.
+        const hasUnassigned = true;
 
         let html = '<div class="calendar-scroller"><table class="daygrid"><tr><th class="timecol">Time</th>';
-        if (hasUnassigned) html += '<th>🐴? No horse yet</th>';
+        html += '<th class="todo-col">📌</th>';
+        if (hasUnassigned) html += '<th class="unassigned-col">🐴? No horse yet</th>';
         horses.forEach((h) => {
             const blocked = dayBlocks[h.id];
             html += `<th class="${blocked ? 'blocked-th' : ''}">
@@ -548,9 +560,20 @@
                 const ride = timeRides[ri] || null;
                 html += '<tr>';
                 if (ri === 0) html += `<td class="timecol" rowspan="${subRows}">${esc(time)}</td>`;
+                if (ri === 0) {
+                    // Day activities: timed ones on their time row; undated-time
+                    // ones collect on the first row. Tap empty space to add.
+                    const cellTodos = todos.filter((t) =>
+                        (t.todo_time ? hhmm(t.todo_time) === time : ti === 0));
+                    html += `<td class="todo-cell" rowspan="${subRows}" data-todo-time="${time}">
+                        ${cellTodos.map((t) => `
+                            <button class="slot todo-slot" data-open-todo="${t.id}">
+                                <span class="slot-line">${esc(t.title)}</span>
+                            </button>`).join('')}</td>`;
+                }
                 if (hasUnassigned) {
                     const entry = ride && (unassigned[time] || []).find((e) => e.ride === ride);
-                    html += `<td class="unassigned-cell">${entry ? renderUnassigned(entry) : ''}</td>`;
+                    html += `<td class="unassigned-cell" data-un-time="${time}">${entry ? renderUnassigned(entry) : ''}</td>`;
                 }
                 horses.forEach((h, i) => {
                     if (dayBlocks[h.id]) {
@@ -613,6 +636,30 @@
                 horseId: td.getAttribute('data-horse'),
                 dayRides: rides
             }));
+        });
+        grid.querySelectorAll('[data-open-todo]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const t = todos.find((x) => String(x.id) === btn.getAttribute('data-open-todo'));
+                if (t) openTodoDialog(t);
+            });
+        });
+        grid.querySelectorAll('.todo-cell').forEach((td) => {
+            td.addEventListener('click', (e) => {
+                if (e.target.closest('[data-open-todo]')) return;
+                openTodoDialog(null, { date, time: td.getAttribute('data-todo-time') });
+            });
+        });
+        // Empty space in the planning column starts a horseless ride at that time
+        grid.querySelectorAll('.unassigned-cell').forEach((td) => {
+            td.addEventListener('click', (e) => {
+                if (e.target.closest('[data-ride-id]')) return;
+                openRideDialog(null, {
+                    date,
+                    time: td.getAttribute('data-un-time'),
+                    dayRides: rides
+                });
+            });
         });
         grid.querySelectorAll('[data-block-horse]').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
@@ -1306,11 +1353,134 @@
         });
     }
 
+    // ---------- Directory (school phone book) ----------
+    // One place for the numbers helpers need: instructors come from the guides
+    // table (single source of truth), external services from service_contacts.
+    async function renderDirectory() {
+        $view.innerHTML = `
+            <h1>👥 Contacts</h1>
+            <div class="month-pills" style="margin-bottom:10px">
+                <button class="month-pill" id="tab-people">Riders &amp; parents</button>
+                <button class="month-pill active">📖 Directory</button>
+            </div>
+            <div class="searchbar">
+                <input id="dir-search" placeholder="Search…" type="search">
+                ${canInvoice() ? '<button id="dir-add">＋ New</button>' : ''}
+            </div>
+            <div id="dir-list" class="muted">Loading…</div>`;
+        document.getElementById('tab-people').addEventListener('click', () => {
+            state.contactsTab = 'people';
+            renderContacts();
+        });
+        const addBtn = document.getElementById('dir-add');
+        if (addBtn) addBtn.addEventListener('click', () => openDirectoryDialog(null));
+        let entries = [];
+        try {
+            entries = (await api('GET', '/api/service-contacts')).service_contacts;
+        } catch (err) {
+            document.getElementById('dir-list').textContent = err.message;
+            return;
+        }
+        const draw = (filter) => {
+            const q = (filter || '').toLowerCase();
+            const match = (s) => !q || String(s || '').toLowerCase().includes(q);
+            const svc = entries.filter((e) => match(e.name) || match(e.category) || match(e.phone));
+            const instructors = state.guides.filter((g) => g.active && (match(g.name) || match(g.phone)));
+            const telLink = (p) => p ? `<a href="tel:${esc(p)}" onclick="event.stopPropagation()">${esc(p)}</a>` : '';
+            document.getElementById('dir-list').classList.remove('muted');
+            document.getElementById('dir-list').innerHTML = `
+                <h2>School contacts</h2>
+                ${svc.length ? svc.map((e) => `
+                    <div class="list-item" data-dir-id="${e.id}">
+                        <div class="li-main">
+                            <div class="li-title">${esc(e.name)}${e.category ? ` <span class="chip role">${esc(e.category)}</span>` : ''}</div>
+                            <div class="li-sub">${telLink(e.phone)}${e.phone && e.email ? ' · ' : ''}${esc(e.email || '')}</div>
+                            ${e.notes ? `<div class="li-sub">${esc(e.notes)}</div>` : ''}
+                        </div>
+                    </div>`).join('') : '<div class="card muted">No entries yet — add the vet, farrier, handyman…</div>'}
+                <h2>Instructors</h2>
+                ${instructors.map((g) => `
+                    <div class="list-item">
+                        <div class="li-main">
+                            <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}</div>
+                            <div class="li-sub">${telLink(g.phone) || '<span class="muted">no number — add it under Settings</span>'}</div>
+                        </div>
+                    </div>`).join('')}`;
+            if (canInvoice()) {
+                document.querySelectorAll('[data-dir-id]').forEach((el) => {
+                    el.addEventListener('click', () => {
+                        const e = entries.find((x) => String(x.id) === el.getAttribute('data-dir-id'));
+                        openDirectoryDialog(e);
+                    });
+                });
+            }
+        };
+        draw('');
+        document.getElementById('dir-search').addEventListener('input', (e) => draw(e.target.value));
+    }
+
+    function openDirectoryDialog(entry) {
+        openDialog(`
+            <h2>${entry ? 'Edit directory entry' : 'New directory entry'}</h2>
+            <label>Name</label>
+            <input id="dc-name" value="${esc(entry ? entry.name : '')}">
+            <label>What / role (e.g. Vet, Farrier, Handyman)</label>
+            <input id="dc-category" value="${esc(entry ? entry.category : '')}">
+            <label>Phone</label>
+            <input id="dc-phone" type="tel" value="${esc(entry ? entry.phone : '')}">
+            <label>Email</label>
+            <input id="dc-email" type="email" value="${esc(entry ? entry.email : '')}">
+            <label>Notes</label>
+            <textarea id="dc-notes">${esc(entry ? entry.notes : '')}</textarea>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                ${entry ? `<button class="danger small" id="dc-delete">${ICON_X}</button><span class="spacer"></span>` : ''}
+                <button class="secondary" id="dc-cancel">Cancel</button>
+                <button id="dc-save">Save</button>
+            </div>`);
+        document.getElementById('dc-cancel').addEventListener('click', closeDialog);
+        document.getElementById('dc-save').addEventListener('click', async () => {
+            const body = {
+                name: document.getElementById('dc-name').value,
+                category: document.getElementById('dc-category').value,
+                phone: document.getElementById('dc-phone').value,
+                email: document.getElementById('dc-email').value,
+                notes: document.getElementById('dc-notes').value
+            };
+            try {
+                if (entry) await api('PUT', `/api/service-contacts/${entry.id}`, body);
+                else await api('POST', '/api/service-contacts', body);
+                closeDialog();
+                toast('Saved.');
+                renderDirectory();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+        const delBtn = document.getElementById('dc-delete');
+        if (delBtn) delBtn.addEventListener('click', async () => {
+            if (!confirm(`Delete "${entry.name}" from the directory?`)) return;
+            try {
+                await api('DELETE', `/api/service-contacts/${entry.id}`);
+                closeDialog();
+                toast('Deleted.');
+                renderDirectory();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+    }
+
     // ---------- Contacts ----------
     async function renderContacts() {
+        if (state.contactsTab === 'directory') return renderDirectory();
         if (!state.contactLevelFilter) state.contactLevelFilter = new Set();
         $view.innerHTML = `
             <h1>👥 Contacts</h1>
+            <div class="month-pills" style="margin-bottom:10px">
+                <button class="month-pill active">Riders &amp; parents</button>
+                <button class="month-pill" id="tab-directory">📖 Directory</button>
+            </div>
             <div class="searchbar">
                 <input id="contact-search" placeholder="Search…" type="search">
                 <button id="contact-add">＋ New</button>
@@ -1324,6 +1494,10 @@
                                 : `color:${LEVEL_COLORS[l]}`}">${LEVEL_LABELS[l]}</button>`).join('')}
             </div>
             <div id="contact-list"></div>`;
+        document.getElementById('tab-directory').addEventListener('click', () => {
+            state.contactsTab = 'directory';
+            renderContacts();
+        });
         try {
             const data = await api('GET', '/api/contacts');
             state.contacts = data.contacts;
@@ -1897,6 +2071,167 @@
         }
     }
 
+    // ---------- To-dos ----------
+    function openTodoDialog(todo, defaults) {
+        defaults = defaults || {};
+        const isEdit = !!todo;
+        openDialog(`
+            <h2>${isEdit ? 'Edit to-do' : 'New to-do'}</h2>
+            <label>What</label>
+            <input id="td-title" value="${esc(isEdit ? todo.title : '')}" placeholder="e.g. Farrier for Sundara">
+            <div class="form-row">
+                <div><label>Date (optional)</label><input type="date" id="td-date" value="${esc(isEdit ? todo.todo_date || '' : defaults.date || '')}"></div>
+                <div><label>Time (optional)</label><input type="time" id="td-time" value="${esc(isEdit ? hhmm(todo.todo_time || '') : defaults.time || '')}"></div>
+            </div>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                ${isEdit ? `<button class="danger small" id="td-delete">${ICON_X}</button><span class="spacer"></span>` : ''}
+                <button class="secondary" id="td-cancel">Cancel</button>
+                ${isEdit && !todo.done_at ? '<button class="secondary" id="td-done">✓ Done</button>' : ''}
+                <button id="td-save">Save</button>
+            </div>`);
+        document.getElementById('td-cancel').addEventListener('click', closeDialog);
+        const refresh = () => (location.hash === '#/todos' ? renderTodos() : renderCalendar());
+        document.getElementById('td-save').addEventListener('click', async () => {
+            const body = {
+                title: document.getElementById('td-title').value,
+                todo_date: document.getElementById('td-date').value || null,
+                todo_time: document.getElementById('td-time').value || null
+            };
+            try {
+                if (isEdit) await api('PUT', `/api/todos/${todo.id}`, body);
+                else await api('POST', '/api/todos', body);
+                closeDialog();
+                toast('Saved.');
+                refresh();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+        const doneBtn = document.getElementById('td-done');
+        if (doneBtn) doneBtn.addEventListener('click', async () => {
+            try {
+                await api('PUT', `/api/todos/${todo.id}`, { done: true });
+                closeDialog();
+                toast('Done ✓');
+                refresh();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+        const delBtn = document.getElementById('td-delete');
+        if (delBtn) delBtn.addEventListener('click', async () => {
+            if (!confirm('Delete this to-do?')) return;
+            try {
+                await api('DELETE', `/api/todos/${todo.id}`);
+                closeDialog();
+                toast('Deleted.');
+                refresh();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+    }
+
+    function todoDateLabel(t) {
+        if (!t.todo_date) return '';
+        return `${t.todo_date}${t.todo_time ? ' ' + hhmm(t.todo_time) : ''}`;
+    }
+
+    async function renderTodos() {
+        $view.innerHTML = `
+            <h1>✅ To-dos</h1>
+            <div class="card">
+                <div class="searchbar" style="margin-bottom:0">
+                    <input id="td-new-title" placeholder="New to-do…">
+                    <input type="date" id="td-new-date" style="flex:0 0 150px">
+                    <button id="td-add">Add</button>
+                </div>
+            </div>
+            <div id="todo-list" class="muted">Loading…</div>
+            <div class="fab-row">
+                <button class="secondary" id="td-show-done"></button>
+            </div>
+            <div id="todo-done-list"></div>`;
+        const add = async () => {
+            const title = document.getElementById('td-new-title').value;
+            if (!title.trim()) return;
+            try {
+                await api('POST', '/api/todos', {
+                    title, todo_date: document.getElementById('td-new-date').value || null
+                });
+                renderTodos();
+            } catch (err) {
+                toast(err.message, true);
+            }
+        };
+        document.getElementById('td-add').addEventListener('click', add);
+        document.getElementById('td-new-title').addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+
+        try {
+            const data = await api('GET', '/api/todos');
+            const $list = document.getElementById('todo-list');
+            const today = todayStr();
+            if (!data.todos.length) {
+                $list.innerHTML = '<div class="card muted">Nothing to do 🎉</div>';
+            } else {
+                $list.classList.remove('muted');
+                $list.innerHTML = data.todos.map((t) => `
+                    <div class="list-item">
+                        <button class="secondary small todo-check" data-done-id="${t.id}" title="Mark as done">✓</button>
+                        <div class="li-main" data-todo-id="${t.id}" style="cursor:pointer">
+                            <div class="li-title">${esc(t.title)}</div>
+                            ${t.todo_date ? `<div class="li-sub ${t.todo_date < today ? 'overdue' : ''}">${esc(todoDateLabel(t))}${t.todo_date < today ? ' · overdue' : ''}</div>` : ''}
+                        </div>
+                    </div>`).join('');
+                $list.querySelectorAll('[data-done-id]').forEach((btn) => {
+                    btn.addEventListener('click', async () => {
+                        try {
+                            await api('PUT', `/api/todos/${btn.getAttribute('data-done-id')}`, { done: true });
+                            toast('Done ✓');
+                            renderTodos();
+                        } catch (err) {
+                            toast(err.message, true);
+                        }
+                    });
+                });
+                $list.querySelectorAll('[data-todo-id]').forEach((el) => {
+                    el.addEventListener('click', () => {
+                        const t = data.todos.find((x) => String(x.id) === el.getAttribute('data-todo-id'));
+                        openTodoDialog(t);
+                    });
+                });
+            }
+            const $showDone = document.getElementById('td-show-done');
+            $showDone.textContent = `Done (${data.done_count})`;
+            $showDone.addEventListener('click', async () => {
+                const $done = document.getElementById('todo-done-list');
+                if ($done.innerHTML) { $done.innerHTML = ''; return; }
+                const doneData = await api('GET', '/api/todos?done=1');
+                $done.innerHTML = '<h2>Done</h2>' + (doneData.todos.map((t) => `
+                    <div class="list-item" style="opacity:.65">
+                        <div class="li-main">
+                            <div class="li-title" style="text-decoration:line-through">${esc(t.title)}</div>
+                            <div class="li-sub">${esc(todoDateLabel(t))}${t.todo_date ? ' · ' : ''}done ${new Date(t.done_at).toISOString().slice(0, 10)}</div>
+                        </div>
+                        <button class="secondary small" data-undone-id="${t.id}">↩ Reopen</button>
+                    </div>`).join('') || '<div class="card muted">Nothing done yet.</div>');
+                $done.querySelectorAll('[data-undone-id]').forEach((btn) => {
+                    btn.addEventListener('click', async () => {
+                        try {
+                            await api('PUT', `/api/todos/${btn.getAttribute('data-undone-id')}`, { done: false });
+                            renderTodos();
+                        } catch (err) {
+                            toast(err.message, true);
+                        }
+                    });
+                });
+            });
+        } catch (err) {
+            document.getElementById('todo-list').textContent = err.message;
+        }
+    }
+
     // ---------- Reports ----------
     function monthBounds(offset) {
         const now = new Date();
@@ -2154,7 +2489,7 @@
             <label>Owned by (for contacts riding their own horse)</label>
             <select id="h-owner">${contactOptions(horse ? horse.owner_contact_id : null, '(stable horse)')}</select>
             <label>Notes</label>
-            <input id="h-notes" value="${esc(horse ? horse.notes || '' : '')}">
+            <textarea id="h-notes" style="min-height:110px">${esc(horse ? horse.notes || '' : '')}</textarea>
             <div class="form-error"></div>
             <div class="form-actions">
                 <button class="secondary" id="h-cancel">Cancel</button>
