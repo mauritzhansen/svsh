@@ -240,7 +240,6 @@
     function showShell() {
         $topbar.classList.remove('hidden');
         $nav.classList.remove('hidden');
-        document.getElementById('topbar-user').textContent = state.user.display_name;
     }
 
     // ---------- Calendar ----------
@@ -353,15 +352,98 @@
         return { horses, contacts, guides };
     }
 
+    // Rides + minutes per horse for a day (rider seats and instructor mounts;
+    // blocks don't count as work)
+    function horseDayLoad(rides) {
+        const load = {}; // horseId -> {count, minutes}
+        rides.forEach((r) => {
+            if (r.is_block || r.all_day) return;
+            const dur = r.duration_min || 60;
+            const add = (hid) => {
+                if (!hid) return;
+                const l = load[hid] = load[hid] || { count: 0, minutes: 0 };
+                l.count++;
+                l.minutes += dur;
+            };
+            r.participants.forEach((p) => add(p.horse_id));
+            r.guides.forEach((g) => { if (g.mode === 'horse') add(g.horse_id); });
+        });
+        return load;
+    }
+
+    function fmtMinutes(min) {
+        const h = Math.floor(min / 60), m = min % 60;
+        return h ? `${h}h${m ? String(m).padStart(2, '0') : ''}` : `${m}min`;
+    }
+
+    // Custom month-grid date picker in the app's own dialog (the native
+    // input's popover is tiny and unstylable)
+    function shiftMonth(view, delta) {
+        const [y, m] = view.split('-').map(Number);
+        const d = new Date(y, m - 1 + delta, 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    function openDatePicker(current) {
+        let view = current.slice(0, 7); // YYYY-MM shown
+        const render = () => {
+            const [y, m] = view.split('-').map(Number);
+            const first = new Date(y, m - 1, 1);
+            const label = first.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+            const startOffset = (first.getDay() + 6) % 7; // Monday-first
+            const daysInMonth = new Date(y, m, 0).getDate();
+            const fmt = (d) => `${view}-${String(d).padStart(2, '0')}`;
+            const cells = [...Array(startOffset).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+            openDialog(`
+                <div class="datepick-nav">
+                    <button class="secondary" id="dp-prev">‹</button>
+                    <h2 style="margin:0">${label}</h2>
+                    <button class="secondary" id="dp-next">›</button>
+                </div>
+                <div class="datepick-grid">
+                    ${['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((d) => `<div class="datepick-head">${d}</div>`).join('')}
+                    ${cells.map((d) => d === null ? '<div></div>' : `
+                        <button class="datepick-day ${fmt(d) === current ? 'selected' : ''} ${fmt(d) === todayStr() ? 'today' : ''}"
+                                data-pick="${fmt(d)}">${d}</button>`).join('')}
+                </div>
+                <div class="form-actions">
+                    <button class="secondary" id="dp-today">Today</button>
+                    <span class="spacer"></span>
+                    <button class="secondary" id="dp-cancel">Cancel</button>
+                </div>`);
+            document.getElementById('dp-cancel').addEventListener('click', closeDialog);
+            document.getElementById('dp-today').addEventListener('click', () => {
+                closeDialog();
+                location.hash = '#/calendar/' + todayStr();
+            });
+            document.getElementById('dp-prev').addEventListener('click', () => { view = shiftMonth(view, -1); render(); });
+            document.getElementById('dp-next').addEventListener('click', () => { view = shiftMonth(view, 1); render(); });
+            $dialog.querySelectorAll('[data-pick]').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    closeDialog();
+                    location.hash = '#/calendar/' + btn.getAttribute('data-pick');
+                });
+            });
+        };
+        render();
+    }
+
     async function renderCalendar() {
         const date = state.calendarDate;
+        const shortDate = new Date(date + 'T00:00:00').toLocaleDateString('en-GB',
+            { weekday: 'short', day: 'numeric', month: 'short' });
         $view.innerHTML = `
             <div class="day-header">
                 <button class="secondary daynav" id="cal-prev">‹</button>
-                <input type="date" id="cal-date" value="${date}">
+                <button class="secondary" id="cal-date-btn">📅 ${esc(shortDate)}</button>
                 <button class="secondary daynav" id="cal-today">Today</button>
                 <button class="secondary daynav" id="cal-next">›</button>
+                <span class="spacer"></span>
+                <button class="secondary daynav" id="cal-horses">🐴 Horses</button>
                 <div class="day-title">${esc(fmtDate(date))}</div>
+            </div>
+            <div id="horse-drawer-backdrop" class="hidden">
+                <div id="horse-drawer"></div>
             </div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
@@ -379,9 +461,7 @@
         document.getElementById('cal-prev').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, -1); });
         document.getElementById('cal-next').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, 1); });
         document.getElementById('cal-today').addEventListener('click', () => { location.hash = '#/calendar/' + todayStr(); });
-        document.getElementById('cal-date').addEventListener('change', (e) => {
-            if (e.target.value) location.hash = '#/calendar/' + e.target.value;
-        });
+        document.getElementById('cal-date-btn').addEventListener('click', () => openDatePicker(date));
         let dayRides = [];
         document.getElementById('cal-add').addEventListener('click', () =>
             openRideDialog(null, { date, time: (state.settings.day_start || '08:00'), dayRides }));
@@ -395,6 +475,30 @@
             dayRides = ridesData.rides;
             const dayTodos = todosData.todos.filter((t) => t.todo_date === date);
             drawDayGrid(dayRides, date, dayTodos);
+
+            // Slide-out horse availability panel (alphabetical, with day load)
+            const drawerLoad = horseDayLoad(dayRides);
+            const dayBlockedIds = new Set();
+            dayRides.forEach((r) => {
+                if (r.is_block && r.all_day) r.participants.forEach((p) => dayBlockedIds.add(String(p.horse_id)));
+            });
+            const $backdrop2 = document.getElementById('horse-drawer-backdrop');
+            document.getElementById('horse-drawer').innerHTML =
+                `<h2 style="margin-top:0">🐴 Horses — ${esc(shortDate)}</h2>` +
+                [...activeHorses()].sort((a, b) => a.name.localeCompare(b.name)).map((h) => {
+                    const l = drawerLoad[h.id];
+                    const status = dayBlockedIds.has(String(h.id))
+                        ? '<span class="chip draft">blocked</span>'
+                        : l ? `${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}`
+                        : '<span class="chip paid">free</span>';
+                    return `<div class="drawer-row">
+                        <span class="horse-dot" style="background:${esc(h.color)}"></span>
+                        <span class="drawer-name">${esc(h.name)}</span>
+                        <span class="drawer-load">${status}</span>
+                    </div>`;
+                }).join('');
+            document.getElementById('cal-horses').addEventListener('click', () => $backdrop2.classList.remove('hidden'));
+            $backdrop2.addEventListener('click', (e) => { if (e.target === $backdrop2) $backdrop2.classList.add('hidden'); });
             const $cb = document.getElementById('credit-bar');
             if ($cb && creditsData.credits.length) {
                 $cb.innerHTML = `
@@ -524,14 +628,19 @@
         let html = '<div class="calendar-scroller"><table class="daygrid"><tr><th class="timecol">Time</th>';
         html += '<th class="todo-col">📌</th>';
         if (hasUnassigned) html += '<th class="unassigned-col">🐴? No horse yet</th>';
+        const load = horseDayLoad(rides);
         horses.forEach((h) => {
             const blocked = dayBlocks[h.id];
+            const l = load[h.id];
+            const loadHtml = blocked ? ''
+                : l ? `<div class="horse-load">${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}</div>`
+                : '<div class="horse-load free">free</div>';
             html += `<th class="${blocked ? 'blocked-th' : ''}">
                 <span class="horse-dot" style="background:${esc(h.color)}"></span>${esc(h.name)}
                 <button class="horse-block-btn" data-block-horse="${h.id}"
                         title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">
                     ${blocked ? '🔓' : '🚫'}
-                </button></th>`;
+                </button>${loadHtml}</th>`;
         });
         html += '</tr>';
         const renderUnassigned = (e) => {
@@ -1929,6 +2038,7 @@
                 <div class="form-actions" style="justify-content:flex-start">
                     <button class="small" id="pass-add">＋ New term pass (invoice in advance)</button>
                     <button class="secondary small" id="pass-bulk">⚡ Passes for all fixed riders</button>
+                    <a class="btn secondary small" href="/api/invoices/batch-pdf?kind=advance&status=draft" target="_blank">⬇ All draft PDFs (one file)</a>
                 </div>
             </div>
             <h2>After the fact — monthly</h2>
@@ -1976,11 +2086,25 @@
                             <div class="li-sub">${tp.period_start} – ${tp.period_end} · ${tp.lessons_so_far} lesson${tp.lessons_so_far === 1 ? '' : 's'} so far
                                 ${tp.invoice_number ? ' · ' + esc(tp.invoice_number) : ''}</div>
                         </div>
-                        ${tp.invoice_status ? `<span class="chip ${tp.invoice_status}">${tp.invoice_status}</span>` : ''}
+                        ${tp.invoice_id ? `
+                            <select class="pass-status" data-pass-inv="${tp.invoice_id}" style="width:auto">
+                                ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${tp.invoice_status === s ? 'selected' : ''}>${s}</option>`).join('')}
+                            </select>
+                            <a class="btn secondary small" href="/api/invoices/${tp.invoice_id}/pdf" target="_blank">PDF</a>` : ''}
                         <div class="li-right">${money(tp.total_cents || 0)}</div>
                         <button class="danger small" data-pass-del="${tp.id}" data-pass-name="${esc(tp.contact_name)}">${ICON_X}</button>
                     </div>`;
                 }).join('');
+                $passes.querySelectorAll('.pass-status').forEach((sel) => {
+                    sel.addEventListener('change', async () => {
+                        try {
+                            await api('PUT', `/api/invoices/${sel.getAttribute('data-pass-inv')}`, { status: sel.value });
+                            toast('Status updated.');
+                        } catch (err) {
+                            toast(err.message, true);
+                        }
+                    });
+                });
                 $passes.querySelectorAll('[data-pass-del]').forEach((btn) => {
                     btn.addEventListener('click', async () => {
                         if (!confirm(`Delete ${btn.getAttribute('data-pass-name')}'s term pass? Their fixed lessons become billable per month again (the invoice stays).`)) return;

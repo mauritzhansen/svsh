@@ -1764,78 +1764,128 @@ app.delete('/api/invoices/:id', requireRole('helper'), async (req, res) => {
     }
 });
 
+async function loadSettings() {
+    const { rows } = await pool.query('SELECT key, value FROM settings');
+    const settings = {};
+    rows.forEach((r) => { settings[r.key] = r.value; });
+    return settings;
+}
+
+// Draws one invoice onto the current page of `doc`
+function drawInvoicePage(doc, inv, lines, settings) {
+    const cur = settings.currency || 'R';
+    const money = (cents) => `${cur} ${(cents / 100).toFixed(2)}`;
+
+    doc.fillColor('#000000').fontSize(20).font('Helvetica-Bold')
+        .text(settings.business_name || 'Invoice', 50, 50);
+    if (settings.business_address) {
+        doc.fontSize(9).font('Helvetica').fillColor('#555555')
+            .text(settings.business_address);
+    }
+    doc.moveDown(1.5);
+    doc.fillColor('#000000').fontSize(14).font('Helvetica-Bold').text(`Invoice ${inv.number}`);
+    doc.fontSize(10).font('Helvetica').moveDown(0.3);
+    doc.text(`Date: ${new Date(inv.created_at).toISOString().slice(0, 10)}`);
+    if (inv.period_start) doc.text(`Period: ${inv.period_start} to ${inv.period_end}`);
+    doc.moveDown(0.8);
+    doc.font('Helvetica-Bold').text('Billed to:');
+    doc.font('Helvetica').text(inv.contact_name);
+    if (inv.contact_address) doc.text(inv.contact_address);
+    if (inv.contact_email) doc.text(inv.contact_email);
+    if (inv.contact_phone) doc.text(inv.contact_phone);
+    doc.moveDown(1.2);
+
+    // Table
+    const left = 50, dateW = 80, amountW = 90;
+    const right = doc.page.width - 50;
+    const descX = left + dateW;
+    const amountX = right - amountW;
+    const drawRow = (dateTxt, desc, amount, bold) => {
+        const y = doc.y;
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
+        doc.text(dateTxt, left, y, { width: dateW - 10 });
+        doc.text(desc, descX, y, { width: amountX - descX - 10 });
+        doc.text(amount, amountX, y, { width: amountW, align: 'right' });
+        doc.moveDown(0.4);
+    };
+    drawRow('Date', 'Description', 'Amount', true);
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
+    doc.moveDown(0.4);
+    for (const line of lines) {
+        if (doc.y > doc.page.height - 120) doc.addPage();
+        drawRow(line.ride_date || '', line.description, money(line.amount_cents), false);
+    }
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
+    doc.moveDown(0.4);
+    drawRow('', 'Total', money(inv.total_cents), true);
+
+    if (settings.invoice_footer) {
+        doc.moveDown(2);
+        doc.fontSize(9).font('Helvetica').fillColor('#555555')
+            .text(settings.invoice_footer, left, doc.y, { width: right - left });
+    }
+}
+
+const INVOICE_WITH_CONTACT_SQL = `
+    SELECT i.*, c.name AS contact_name, c.email AS contact_email,
+           c.phone AS contact_phone, c.address AS contact_address
+      FROM invoices i JOIN contacts c ON c.id = i.contact_id`;
+
 app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
     try {
         const { rows } = await pool.query(
-            `SELECT i.*, c.name AS contact_name, c.email AS contact_email,
-                    c.phone AS contact_phone, c.address AS contact_address
-               FROM invoices i JOIN contacts c ON c.id = i.contact_id
-              WHERE i.id = $1`, [req.params.id]);
+            `${INVOICE_WITH_CONTACT_SQL} WHERE i.id = $1`, [req.params.id]);
         const inv = rows[0];
         if (!inv) return res.status(404).json({ error: 'Invoice not found.' });
         const { rows: lines } = await pool.query(
             'SELECT * FROM invoice_lines WHERE invoice_id = $1 ORDER BY ride_date, id', [inv.id]);
-        const { rows: settingRows } = await pool.query('SELECT key, value FROM settings');
-        const settings = {};
-        settingRows.forEach((r) => { settings[r.key] = r.value; });
-        const cur = settings.currency || 'R';
-        const money = (cents) => `${cur} ${(cents / 100).toFixed(2)}`;
+        const settings = await loadSettings();
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
         doc.pipe(res);
-
-        doc.fontSize(20).font('Helvetica-Bold').text(settings.business_name || 'Invoice');
-        if (settings.business_address) {
-            doc.fontSize(9).font('Helvetica').fillColor('#555555')
-                .text(settings.business_address);
-        }
-        doc.moveDown(1.5);
-        doc.fillColor('#000000').fontSize(14).font('Helvetica-Bold').text(`Invoice ${inv.number}`);
-        doc.fontSize(10).font('Helvetica').moveDown(0.3);
-        doc.text(`Date: ${new Date(inv.created_at).toISOString().slice(0, 10)}`);
-        if (inv.period_start) doc.text(`Period: ${inv.period_start} to ${inv.period_end}`);
-        doc.moveDown(0.8);
-        doc.font('Helvetica-Bold').text('Billed to:');
-        doc.font('Helvetica').text(inv.contact_name);
-        if (inv.contact_address) doc.text(inv.contact_address);
-        if (inv.contact_email) doc.text(inv.contact_email);
-        if (inv.contact_phone) doc.text(inv.contact_phone);
-        doc.moveDown(1.2);
-
-        // Table
-        const left = 50, dateW = 80, amountW = 90;
-        const right = doc.page.width - 50;
-        const descX = left + dateW;
-        const amountX = right - amountW;
-        const drawRow = (dateTxt, desc, amount, bold) => {
-            const y = doc.y;
-            doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
-            doc.text(dateTxt, left, y, { width: dateW - 10 });
-            doc.text(desc, descX, y, { width: amountX - descX - 10 });
-            doc.text(amount, amountX, y, { width: amountW, align: 'right' });
-            doc.moveDown(0.4);
-        };
-        drawRow('Date', 'Description', 'Amount', true);
-        doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
-        doc.moveDown(0.4);
-        for (const line of lines) {
-            if (doc.y > doc.page.height - 120) doc.addPage();
-            drawRow(line.ride_date || '', line.description, money(line.amount_cents), false);
-        }
-        doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
-        doc.moveDown(0.4);
-        drawRow('', 'Total', money(inv.total_cents), true);
-
-        if (settings.invoice_footer) {
-            doc.moveDown(2);
-            doc.fontSize(9).font('Helvetica').fillColor('#555555')
-                .text(settings.invoice_footer, left, doc.y, { width: right - left });
-        }
+        drawInvoicePage(doc, inv, lines, settings);
         doc.end();
     } catch (err) {
         handleError(res, err, 'Generating invoice PDF');
+    }
+});
+
+// One PDF with all matching invoices, one per page — for printing or sending
+// a whole batch (e.g. the term's advance invoices) in one go.
+app.get('/api/invoices/batch-pdf', requireRole('helper'), async (req, res) => {
+    try {
+        const params = [];
+        const where = [];
+        if (['advance', 'monthly'].includes(req.query.kind)) {
+            params.push(req.query.kind);
+            where.push(`i.kind = $${params.length}`);
+        }
+        if (['draft', 'sent', 'paid'].includes(req.query.status)) {
+            params.push(req.query.status);
+            where.push(`i.status = $${params.length}`);
+        }
+        const { rows: invoices } = await pool.query(
+            `${INVOICE_WITH_CONTACT_SQL}
+              ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+              ORDER BY c.name, i.number`, params);
+        if (!invoices.length) return res.status(404).json({ error: 'No matching invoices.' });
+        const settings = await loadSettings();
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'inline; filename="invoices-batch.pdf"');
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        doc.pipe(res);
+        for (let i = 0; i < invoices.length; i++) {
+            if (i > 0) doc.addPage();
+            const { rows: lines } = await pool.query(
+                'SELECT * FROM invoice_lines WHERE invoice_id = $1 ORDER BY ride_date, id', [invoices[i].id]);
+            drawInvoicePage(doc, invoices[i], lines, settings);
+        }
+        doc.end();
+    } catch (err) {
+        handleError(res, err, 'Generating batch PDF');
     }
 });
 

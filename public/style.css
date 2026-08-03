@@ -188,7 +188,6 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--green); out
 }
 
 .day-header .daynav { padding: 8px 14px; }
-.day-header input[type="date"] { width: auto; flex: 1; min-width: 130px; }
 .day-title { font-weight: 700; font-size: 15px; width: 100%; }
 
 .calendar-scroller {
@@ -487,3 +486,72 @@ td.todo-cell { background: #faf3da; vertical-align: top; cursor: pointer; }
 .todo-slot .slot-line { white-space: normal; max-width: none; }
 .todo-check { flex-shrink: 0; }
 .li-sub.overdue { color: var(--danger); font-weight: 600; }
+
+/* ---------- Date picker dialog ---------- */
+.datepick-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.datepick-nav button { padding: 8px 16px; }
+.datepick-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+}
+.datepick-head {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    padding: 6px 0 2px;
+}
+.datepick-day {
+    padding: 12px 0;
+    text-align: center;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 500;
+}
+.datepick-day.today { border: 2px solid var(--green); color: var(--green-dark); font-weight: 700; }
+.datepick-day.selected { background: var(--green); border-color: var(--green); color: #fff; font-weight: 700; }
+
+/* ---------- Horse workload ---------- */
+.horse-load { font-size: 11px; font-weight: 500; color: var(--muted); margin-top: 2px; }
+.horse-load.free { color: var(--open); font-weight: 700; }
+
+/* Slide-out horse availability drawer */
+#horse-drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 20, 15, 0.35);
+    z-index: 40;
+}
+#horse-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 300px;
+    max-width: 85vw;
+    background: var(--card);
+    padding: calc(env(safe-area-inset-top, 0px) + 16px) 16px 16px;
+    overflow-y: auto;
+    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.18);
+    animation: drawer-in 0.18s ease-out;
+}
+@keyframes drawer-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.drawer-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14.5px;
+}
+.drawer-name { flex: 1; font-weight: 600; }
+.drawer-load { font-size: 13px; color: var(--muted); }
