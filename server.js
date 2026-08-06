@@ -381,17 +381,20 @@ const EXPERIENCE_LEVELS = LEVELS;
 app.post('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes,
-                needs_collection, collection_teacher, collection_class } = req.body || {};
+                needs_collection, collection_teacher, collection_class,
+                is_prospect, birth_year } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         const parentError = await validateParent(parent_id, null);
         if (parentError) return res.status(400).json({ error: parentError });
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
-                                   needs_collection, collection_teacher, collection_class, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+                                   needs_collection, collection_teacher, collection_class,
+                                   is_prospect, birth_year, notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
-             !!needs_collection, collection_teacher || '', collection_class || '', notes || '']);
+             !!needs_collection, collection_teacher || '', collection_class || '',
+             !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '']);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -403,7 +406,8 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
 app.put('/api/contacts/:id', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes, archived,
-                needs_collection, collection_teacher, collection_class } = req.body || {};
+                needs_collection, collection_teacher, collection_class,
+                is_prospect, birth_year } = req.body || {};
         if (parent_id !== undefined) {
             const parentError = await validateParent(parent_id, req.params.id);
             if (parentError) return res.status(400).json({ error: parentError });
@@ -420,13 +424,17 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 collection_teacher = COALESCE($11, collection_teacher),
                 collection_class = COALESCE($12, collection_class),
                 notes = COALESCE($13, notes),
-                archived = COALESCE($14, archived)
+                archived = COALESCE($14, archived),
+                is_prospect = COALESCE($15, is_prospect),
+                birth_year = CASE WHEN $16 THEN $17::int ELSE birth_year END
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
              experience !== undefined, EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              needs_collection, collection_teacher, collection_class,
-             notes, archived]);
+             notes, archived,
+             typeof is_prospect === 'boolean' ? is_prospect : null,
+             birth_year !== undefined, Number.isInteger(birth_year) ? birth_year : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
@@ -711,6 +719,13 @@ function parseRecurringBody(body) {
 }
 
 async function insertRecurringChildren(client, recurringId, participants, guides) {
+    // Being placed on a fixed ride graduates an interested rider to a real one
+    const placedContacts = participants.map((p) => p.contact_id).filter(Boolean);
+    if (placedContacts.length) {
+        await client.query(
+            'UPDATE contacts SET is_prospect = false WHERE id = ANY($1::bigint[]) AND is_prospect',
+            [placedContacts]);
+    }
     for (const p of participants) {
         await client.query(
             `INSERT INTO recurring_participants (recurring_id, contact_id, horse_id, frequency, biweekly_anchor)
@@ -1416,9 +1431,10 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
         if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'A valid month (YYYY-MM) is required.' });
         const [from, to] = monthRange(month);
         await materializeRecurring(from, to);
-        // Rides are booked on the rider; the bill goes to the parent when set
+        // One row per RIDER (invoices are per rider); the payer is shown for context
         const { rows } = await pool.query(
-            `SELECT payer.id AS contact_id, payer.name,
+            `SELECT rider.id AS contact_id, rider.name,
+                    payer.name AS payer_name,
                     count(*)::int AS ride_count,
                     SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents
                FROM ride_participants rp
@@ -1429,8 +1445,8 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
               WHERE r.date BETWEEN $1 AND $2
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
-              GROUP BY payer.id, payer.name
-              ORDER BY payer.name`,
+              GROUP BY rider.id, rider.name, payer.name
+              ORDER BY rider.name`,
             [from, to]);
         res.json({ overview: rows, from, to });
     } catch (err) {
@@ -1447,9 +1463,10 @@ app.get('/api/invoices', requireRole('helper'), async (req, res) => {
             where = 'WHERE i.contact_id = $1';
         }
         const { rows } = await pool.query(
-            `SELECT i.*, c.name AS contact_name,
+            `SELECT i.*, c.name AS contact_name, rc.name AS rider_name,
                     (SELECT count(*)::int FROM invoice_lines il WHERE il.invoice_id = i.id) AS line_count
                FROM invoices i JOIN contacts c ON c.id = i.contact_id
+               LEFT JOIN contacts rc ON rc.id = i.rider_contact_id
               ${where}
               ORDER BY i.created_at DESC LIMIT 200`, params);
         res.json({ invoices: rows });
@@ -1464,18 +1481,23 @@ async function createInvoiceForContact(contactId, from, to) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        // Include the payer's own rides and those of their kid riders
+        // Per-rider invoice: only this rider's rides, billed to their payer
+        const { rows: riderRows } = await client.query(
+            'SELECT id, name, parent_id FROM contacts WHERE id = $1', [contactId]);
+        if (!riderRows[0]) {
+            await client.query('ROLLBACK');
+            return null;
+        }
+        const payerId = riderRows[0].parent_id || riderRows[0].id;
         const { rows: rides } = await client.query(
             `SELECT rp.id, r.date, r.start_time, h.name AS horse_name,
                     COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
-                    COALESCE(rp.price_cents, rt.price_cents, 0)::int AS amount_cents,
-                    CASE WHEN rider.id <> $1 THEN rider.name END AS rider_name
+                    COALESCE(rp.price_cents, rt.price_cents, 0)::int AS amount_cents
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-               JOIN contacts rider ON rider.id = rp.contact_id
                LEFT JOIN horses h ON h.id = rp.horse_id
                LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-              WHERE (rider.id = $1 OR rider.parent_id = $1)
+              WHERE rp.contact_id = $1
                 AND r.date BETWEEN $2 AND $3
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
@@ -1493,15 +1515,15 @@ async function createInvoiceForContact(contactId, from, to) {
         const number = `INV-${year}-${String(numRows[0].next).padStart(4, '0')}`;
         const total = rides.reduce((sum, r) => sum + r.amount_cents, 0);
         const { rows: invRows } = await client.query(
-            `INSERT INTO invoices (number, contact_id, period_start, period_end, kind, total_cents)
-             VALUES ($1, $2, $3, $4, 'monthly', $5) RETURNING *`,
-            [number, contactId, from, to, total]);
+            `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
+             VALUES ($1, $2, $3, $4, $5, 'monthly', $6) RETURNING *`,
+            [number, payerId, contactId, from, to, total]);
         for (const r of rides) {
             await client.query(
                 `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
                  VALUES ($1, $2, $3, $4, $5)`,
                 [invRows[0].id, r.id,
-                 `${r.rider_name ? r.rider_name + ': ' : ''}${r.ride_type_name}${r.horse_name ? ' on ' + r.horse_name : ''} at ${String(r.start_time).slice(0, 5)}`,
+                 `${r.ride_type_name}${r.horse_name ? ' on ' + r.horse_name : ''} at ${String(r.start_time).slice(0, 5)}`,
                  r.date, r.amount_cents]);
         }
         await client.query('COMMIT');
@@ -1579,9 +1601,9 @@ app.post('/api/term-passes', requireRole('helper'), async (req, res) => {
         const desc = String(description || '').trim() ||
             `Term fee ${rider.name}: fixed lessons ${period_start} to ${period_end}`;
         const { rows: invRows } = await client.query(
-            `INSERT INTO invoices (number, contact_id, period_start, period_end, kind, total_cents)
-             VALUES ($1, $2, $3, $4, 'advance', $5) RETURNING *`,
-            [number, payerId, period_start, period_end, amount_cents]);
+            `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
+             VALUES ($1, $2, $3, $4, $5, 'advance', $6) RETURNING *`,
+            [number, payerId, contact_id, period_start, period_end, amount_cents]);
         await client.query(
             `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
              VALUES ($1, $2, $3, $4)`,
@@ -1671,9 +1693,9 @@ app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
             const number = `INV-${year}-${String(numRows[0].next).padStart(4, '0')}`;
             const payerId = perContact[row.contact_id].parent_id || row.contact_id;
             const { rows: invRows } = await client.query(
-                `INSERT INTO invoices (number, contact_id, period_start, period_end, kind, total_cents)
-                 VALUES ($1, $2, $3, $4, 'advance', $5) RETURNING id`,
-                [number, payerId, period_start, period_end, row.amount_cents]);
+                `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
+                 VALUES ($1, $2, $3, $4, $5, 'advance', $6) RETURNING id`,
+                [number, payerId, row.contact_id, period_start, period_end, row.amount_cents]);
             await client.query(
                 `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
                  VALUES ($1, $2, $3, $4)`,
@@ -1720,17 +1742,16 @@ async function autoInvoiceClosedMonths() {
         const [from, to] = monthRange(month);
         await materializeRecurring(from, to);
         const { rows } = await pool.query(
-            `SELECT DISTINCT COALESCE(rider.parent_id, rider.id) AS payer_id
+            `SELECT DISTINCT rp.contact_id AS rider_id
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-               JOIN contacts rider ON rider.id = rp.contact_id
-              WHERE r.date BETWEEN $1 AND $2
+              WHERE rp.contact_id IS NOT NULL AND r.date BETWEEN $1 AND $2
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}`,
             [from, to]);
         for (const row of rows) {
-            const result = await createInvoiceForContact(row.payer_id, from, to);
-            if (result) console.log(`Auto-created invoice ${result.invoice.number} (${result.line_count} rides) for contact ${row.payer_id}`);
+            const result = await createInvoiceForContact(row.rider_id, from, to);
+            if (result) console.log(`Auto-created invoice ${result.invoice.number} (${result.line_count} rides) for rider ${row.rider_id}`);
         }
     } catch (err) {
         console.error('Automatic month-end invoicing failed:', err);
@@ -1793,6 +1814,10 @@ function drawInvoicePage(doc, inv, lines, settings) {
     if (inv.contact_address) doc.text(inv.contact_address);
     if (inv.contact_email) doc.text(inv.contact_email);
     if (inv.contact_phone) doc.text(inv.contact_phone);
+    if (inv.rider_name && inv.rider_name !== inv.contact_name) {
+        doc.moveDown(0.4);
+        doc.font('Helvetica-Bold').text('For rider: ', { continued: true }).font('Helvetica').text(inv.rider_name);
+    }
     doc.moveDown(1.2);
 
     // Table
@@ -1828,8 +1853,10 @@ function drawInvoicePage(doc, inv, lines, settings) {
 
 const INVOICE_WITH_CONTACT_SQL = `
     SELECT i.*, c.name AS contact_name, c.email AS contact_email,
-           c.phone AS contact_phone, c.address AS contact_address
-      FROM invoices i JOIN contacts c ON c.id = i.contact_id`;
+           c.phone AS contact_phone, c.address AS contact_address,
+           rc.name AS rider_name
+      FROM invoices i JOIN contacts c ON c.id = i.contact_id
+      LEFT JOIN contacts rc ON rc.id = i.rider_contact_id`;
 
 app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
     try {

@@ -91,6 +91,62 @@
     function openDialog(html) {
         $dialog.innerHTML = html;
         $backdrop.classList.remove('hidden');
+        enhanceTimeInputs($dialog);
+    }
+
+    // ---------- Time picker (replaces the platform-dependent native widget) ----------
+    const pad2 = (n) => String(n).padStart(2, '0');
+
+    function openTimePicker(current, onPick) {
+        let [h, m] = /^\d{2}:\d{2}/.test(current || '') ? current.split(':').map(Number) : [9, 0];
+        const oddMinute = [0, 15, 30, 45].includes(m) ? null : m; // keep e.g. 14:55 pickable
+        const overlay = document.createElement('div');
+        overlay.className = 'timepick-backdrop';
+        document.body.appendChild(overlay);
+        const close = () => overlay.remove();
+        const render = () => {
+            overlay.innerHTML = `
+                <div class="timepick">
+                    <div class="timepick-value">${pad2(h)}:${pad2(m)}</div>
+                    <div class="timepick-label">Hour</div>
+                    <div class="timepick-grid">
+                        ${Array.from({ length: 24 }, (_, i) =>
+                            `<button class="timepick-btn ${i === h ? 'sel' : ''}" data-h="${i}">${pad2(i)}</button>`).join('')}
+                    </div>
+                    <div class="timepick-label">Minutes</div>
+                    <div class="timepick-grid timepick-mins">
+                        ${[0, 15, 30, 45].concat(oddMinute === null ? [] : [oddMinute]).sort((a, b) => a - b).map((mm) =>
+                            `<button class="timepick-btn ${mm === m ? 'sel' : ''}" data-m="${mm}">${pad2(mm)}</button>`).join('')}
+                    </div>
+                    <div class="form-actions">
+                        <button class="secondary tp-cancel">Cancel</button>
+                        <button class="tp-ok">OK</button>
+                    </div>
+                </div>`;
+            overlay.querySelectorAll('[data-h]').forEach((b) =>
+                b.addEventListener('click', () => { h = Number(b.getAttribute('data-h')); render(); }));
+            overlay.querySelectorAll('[data-m]').forEach((b) =>
+                b.addEventListener('click', () => { m = Number(b.getAttribute('data-m')); render(); }));
+            overlay.querySelector('.tp-ok').addEventListener('click', () => { close(); onPick(`${pad2(h)}:${pad2(m)}`); });
+            overlay.querySelector('.tp-cancel').addEventListener('click', close);
+        };
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+        render();
+    }
+
+    // Turns every native time input inside `root` into a trigger for our picker
+    function enhanceTimeInputs(root) {
+        root.querySelectorAll('input[type="time"]').forEach((inp) => {
+            inp.readOnly = true; // suppresses the platform widget and keyboard
+            inp.addEventListener('click', (e) => {
+                e.preventDefault();
+                inp.blur();
+                openTimePicker(inp.value, (val) => {
+                    inp.value = val;
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                });
+            });
+        });
     }
 
     function closeDialog() {
@@ -949,7 +1005,7 @@
     // Contact options for a rider row: contacts whose availability windows
     // don't cover the ride time drop into a flagged group.
     function partContactOptions(selectedId, busy, weekday, startMin, durMin) {
-        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}</option>`;
+        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}${c.is_prospect ? ' (interested)' : ''}</option>`;
         const avail = state.contacts.filter((c) => keepOption(c.id, selectedId, busy));
         const ok = avail.filter((c) => contactAvailable(c, weekday, startMin, durMin));
         const flagged = avail.filter((c) => !contactAvailable(c, weekday, startMin, durMin));
@@ -1470,6 +1526,7 @@
             <h1>👥 Contacts</h1>
             <div class="month-pills" style="margin-bottom:10px">
                 <button class="month-pill" id="tab-people">Riders &amp; parents</button>
+                <button class="month-pill" id="tab-interested">🌱 Interested</button>
                 <button class="month-pill active">📖 Directory</button>
             </div>
             <div class="searchbar">
@@ -1479,6 +1536,10 @@
             <div id="dir-list" class="muted">Loading…</div>`;
         document.getElementById('tab-people').addEventListener('click', () => {
             state.contactsTab = 'people';
+            renderContacts();
+        });
+        document.getElementById('tab-interested').addEventListener('click', () => {
+            state.contactsTab = 'interested';
             renderContacts();
         });
         const addBtn = document.getElementById('dir-add');
@@ -1580,14 +1641,169 @@
         });
     }
 
+    // ---------- Interested riders (intake / waiting list) ----------
+    const ageOf = (c) => c.birth_year ? new Date().getFullYear() - c.birth_year : null;
+
+    async function renderInterested() {
+        $view.innerHTML = `
+            <h1>👥 Contacts</h1>
+            <div class="month-pills" style="margin-bottom:10px">
+                <button class="month-pill" id="tab-people">Riders &amp; parents</button>
+                <button class="month-pill active">🌱 Interested</button>
+                <button class="month-pill" id="tab-directory">📖 Directory</button>
+            </div>
+            <p class="muted">Riders who want to join but haven't been placed in a lesson yet.
+               Adding them to a fixed ride moves them to the normal rider list automatically.</p>
+            <div class="fab-row" style="margin:0 0 12px">
+                <button id="intake-add">＋ Add interested rider(s)</button>
+            </div>
+            <div id="interested-list" class="muted">Loading…</div>`;
+        document.getElementById('tab-people').addEventListener('click', () => {
+            state.contactsTab = 'people';
+            renderContacts();
+        });
+        document.getElementById('tab-directory').addEventListener('click', () => {
+            state.contactsTab = 'directory';
+            renderContacts();
+        });
+        document.getElementById('intake-add').addEventListener('click', openIntakeDialog);
+        try {
+            state.contacts = (await api('GET', '/api/contacts')).contacts;
+        } catch (err) {
+            document.getElementById('interested-list').textContent = err.message;
+            return;
+        }
+        const prospects = state.contacts.filter((c) => c.is_prospect);
+        const $list = document.getElementById('interested-list');
+        if (!prospects.length) {
+            $list.innerHTML = '<div class="card muted">Nobody on the interested list.</div>';
+            return;
+        }
+        // Group by parent (payer); prospects without a parent form their own group
+        const groups = {};
+        prospects.forEach((c) => {
+            const key = c.parent_id || `self-${c.id}`;
+            (groups[key] = groups[key] || []).push(c);
+        });
+        const availSummary = (c) => {
+            const days = [...new Set((c.availability || []).map((a) => a.weekday))].sort();
+            return days.length ? days.map((w) => WEEKDAYS[w - 1].slice(0, 3)).join(', ') : 'availability not set';
+        };
+        $list.classList.remove('muted');
+        $list.innerHTML = Object.entries(groups).map(([key, kids]) => {
+            const parent = key.startsWith('self-') ? null : contactById(key);
+            return `<div class="card">
+                ${parent ? `<div style="font-weight:700">${esc(parent.name)}
+                    ${parent.phone ? ` · <a href="tel:${esc(parent.phone)}">${esc(parent.phone)}</a>` : ''}</div>` : ''}
+                ${kids.map((c) => `
+                    <div class="list-item" data-prospect-id="${c.id}" style="margin:8px 0 0;cursor:pointer">
+                        <div class="li-main">
+                            <div class="li-title">${esc(c.name)}${ageOf(c) ? ` <span class="muted">(${ageOf(c)})</span>` : ''}</div>
+                            <div class="li-sub">${availSummary(c)}</div>
+                        </div>
+                        ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
+                    </div>`).join('')}
+            </div>`;
+        }).join('');
+        $list.querySelectorAll('[data-prospect-id]').forEach((el) => {
+            el.addEventListener('click', () => {
+                const c = contactById(el.getAttribute('data-prospect-id'));
+                if (c) openContactDialog(c);
+            });
+        });
+    }
+
+    // One dialog for the whole intake call: parent (existing or new) + kids +
+    // shared availability, everything created on save.
+    function openIntakeDialog() {
+        const kidRow = () => `
+            <div class="pick-row" data-kind="intake-kid">
+                <input class="ik-name" placeholder="Rider name">
+                <input class="ik-age" type="number" inputmode="numeric" placeholder="Age" style="flex:0 0 74px">
+                <select class="ik-level" style="flex:0 0 130px">${levelOptions('')}</select>
+                <button type="button" class="danger small row-x">${ICON_X}</button>
+            </div>`;
+        openDialog(`
+            <h2>🌱 Interested rider(s)</h2>
+            <label>Parent / payer — pick existing or enter a new one</label>
+            <select id="in-parent">${parentOptions(null, null)}</select>
+            <div class="form-row">
+                <div><input id="in-parent-name" placeholder="…or new parent name"></div>
+                <div><input id="in-parent-phone" type="tel" placeholder="Parent phone"></div>
+            </div>
+            <label>Riders</label>
+            <div id="intake-kids">${kidRow()}</div>
+            <button type="button" class="secondary small" id="intake-kid-add">＋ Another rider</button>
+            <label>Availability — tap the hours they can ride (applies to all riders above)</label>
+            ${availGridHtml([])}
+            <label>Notes</label>
+            <input id="in-notes" placeholder="e.g. friends of the Smiths, wants to start in September">
+            <div class="form-error"></div>
+            <div class="form-actions">
+                <button class="secondary" id="in-cancel">Cancel</button>
+                <button id="in-save">Save</button>
+            </div>`);
+        const wire = (row) => row.querySelector('.row-x').addEventListener('click', () => row.remove());
+        wire($dialog.querySelector('[data-kind="intake-kid"]'));
+        document.getElementById('intake-kid-add').addEventListener('click', () => {
+            document.getElementById('intake-kids').insertAdjacentHTML('beforeend', kidRow());
+            wire(document.getElementById('intake-kids').lastElementChild);
+        });
+        $dialog.querySelectorAll('.avail-cell').forEach((cell) =>
+            cell.addEventListener('click', () => cell.classList.toggle('on')));
+        document.getElementById('in-cancel').addEventListener('click', closeDialog);
+        document.getElementById('in-save').addEventListener('click', async () => {
+            const kids = [...$dialog.querySelectorAll('[data-kind="intake-kid"]')].map((row) => ({
+                name: row.querySelector('.ik-name').value.trim(),
+                age: parseInt(row.querySelector('.ik-age').value, 10) || null,
+                level: row.querySelector('.ik-level').value || null
+            })).filter((k) => k.name);
+            if (!kids.length) return dialogError('Add at least one rider.');
+            const availability = collectAvailability();
+            const notes = document.getElementById('in-notes').value;
+            const year = new Date().getFullYear();
+            try {
+                let parentId = document.getElementById('in-parent').value || null;
+                const newParentName = document.getElementById('in-parent-name').value.trim();
+                if (!parentId && newParentName) {
+                    const res = await api('POST', '/api/contacts', {
+                        name: newParentName,
+                        phone: document.getElementById('in-parent-phone').value,
+                        notes
+                    });
+                    parentId = res.contact.id;
+                }
+                for (const k of kids) {
+                    await api('POST', '/api/contacts', {
+                        name: k.name,
+                        parent_id: parentId,
+                        experience: k.level,
+                        birth_year: k.age ? year - k.age : null,
+                        is_prospect: true,
+                        availability,
+                        notes
+                    });
+                }
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                closeDialog();
+                toast(`${kids.length} interested rider${kids.length === 1 ? '' : 's'} added.`);
+                renderInterested();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+    }
+
     // ---------- Contacts ----------
     async function renderContacts() {
         if (state.contactsTab === 'directory') return renderDirectory();
+        if (state.contactsTab === 'interested') return renderInterested();
         if (!state.contactLevelFilter) state.contactLevelFilter = new Set();
         $view.innerHTML = `
             <h1>👥 Contacts</h1>
             <div class="month-pills" style="margin-bottom:10px">
                 <button class="month-pill active">Riders &amp; parents</button>
+                <button class="month-pill" id="tab-interested">🌱 Interested</button>
                 <button class="month-pill" id="tab-directory">📖 Directory</button>
             </div>
             <div class="searchbar">
@@ -1607,6 +1823,10 @@
             state.contactsTab = 'directory';
             renderContacts();
         });
+        document.getElementById('tab-interested').addEventListener('click', () => {
+            state.contactsTab = 'interested';
+            renderContacts();
+        });
         try {
             const data = await api('GET', '/api/contacts');
             state.contacts = data.contacts;
@@ -1617,6 +1837,7 @@
             const q = (filter || '').toLowerCase();
             const levels = state.contactLevelFilter;
             const items = state.contacts.filter((c) =>
+                !c.is_prospect &&
                 (!q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) &&
                 (!levels.size || levels.has(c.experience)));
             document.getElementById('contact-list').innerHTML = items.length ? items.map((c) => `
@@ -1720,11 +1941,24 @@
             <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
             <label>Parent / pays the invoices (for kid riders)</label>
             <select id="ct-parent">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
-            <label>Experience level</label>
-            <select id="ct-exp">
-                <option value="">(not set)</option>
-                ${LEVELS.map((l) => `<option value="${l}" ${contact && contact.experience === l ? 'selected' : ''}>${LEVEL_LABELS[l]}</option>`).join('')}
-            </select>
+            <div class="form-row">
+                <div>
+                    <label>Experience level</label>
+                    <select id="ct-exp">
+                        <option value="">(not set)</option>
+                        ${LEVELS.map((l) => `<option value="${l}" ${contact && contact.experience === l ? 'selected' : ''}>${LEVEL_LABELS[l]}</option>`).join('')}
+                    </select>
+                </div>
+                <div>
+                    <label>Age (approx.)</label>
+                    <input id="ct-age" type="number" inputmode="numeric"
+                           value="${contact && contact.birth_year ? new Date().getFullYear() - contact.birth_year : ''}">
+                </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
+                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
+                🌱 Interested — not placed in a lesson yet
+            </label>
             <label style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:500">
                 <input type="checkbox" id="ct-collect" style="width:auto" ${contact && contact.needs_collection ? 'checked' : ''}>
                 Needs to be picked up (from school)
@@ -1776,6 +2010,9 @@
                 address: document.getElementById('ct-address').value,
                 parent_id: document.getElementById('ct-parent').value || null,
                 experience: document.getElementById('ct-exp').value || null,
+                birth_year: parseInt(document.getElementById('ct-age').value, 10)
+                    ? new Date().getFullYear() - parseInt(document.getElementById('ct-age').value, 10) : null,
+                is_prospect: document.getElementById('ct-prospect').checked,
                 needs_collection: document.getElementById('ct-collect').checked,
                 collection_teacher: document.getElementById('ct-teacher').value,
                 collection_class: document.getElementById('ct-class').value,
@@ -1832,6 +2069,8 @@
                     ${data.children.length ? `<div>👨‍👧 Pays for: ${data.children.map((k) =>
                         `<a href="#/contacts/${k.id}">${esc(k.name)}</a>`).join(', ')}</div>` : ''}
                     ${c.experience ? `<div>🎓 ${LEVEL_LABELS[c.experience] || esc(c.experience)}</div>` : ''}
+                    ${c.birth_year ? `<div>🎂 About ${new Date().getFullYear() - c.birth_year} years old</div>` : ''}
+                    ${c.is_prospect ? '<div>🌱 <b>Interested — not placed in a lesson yet</b></div>' : ''}
                     ${state.horses.filter((h) => String(h.owner_contact_id) === String(c.id)).map((h) =>
                         `<div>🏠 Own horse: ${esc(h.name)}</div>`).join('')}
                     ${c.needs_collection ? `<div><b>Pick-up</b> from ${esc(c.collection_teacher || '?')}${c.collection_class ? ', class ' + esc(c.collection_class) : ''}</div>` : ''}
@@ -2127,7 +2366,7 @@
                     <tr><th>Contact</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
                     ${ov.overview.map((row) => `
                         <tr>
-                            <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a></td>
+                            <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>${row.payer_name && row.payer_name !== row.name ? ` <span class="muted">→ ${esc(row.payer_name)}</span>` : ''}</td>
                             <td class="num">${row.ride_count}</td>
                             <td class="num">${money(row.total_cents)}</td>
                             <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
@@ -2159,7 +2398,7 @@
                         <div class="li-main">
                             <div class="li-title">${esc(inv.number)} — ${esc(inv.contact_name)}
                                 ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
-                            <div class="li-sub">${inv.period_start || ''} – ${inv.period_end || ''} · ${inv.kind === 'advance' ? 'term fee' : `${inv.line_count} ride${inv.line_count === 1 ? '' : 's'}`} · ${money(inv.total_cents)}</div>
+                            <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${inv.period_start || ''} – ${inv.period_end || ''} · ${inv.kind === 'advance' ? 'term fee' : `${inv.line_count} ride${inv.line_count === 1 ? '' : 's'}`} · ${money(inv.total_cents)}</div>
                         </div>
                         <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
                             ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}

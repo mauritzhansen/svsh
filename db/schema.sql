@@ -31,6 +31,9 @@ CREATE TABLE contacts (
     -- One level only (a parent cannot itself have a parent). Invoices for the
     -- rider's rides go to the parent when set.
     parent_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL,
+    -- Interested rider not yet placed in a lesson (intake/waiting list)
+    is_prospect BOOLEAN NOT NULL DEFAULT false,
+    birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
     needs_collection BOOLEAN NOT NULL DEFAULT false,
@@ -191,6 +194,8 @@ CREATE TABLE invoices (
     period_end DATE,
     -- 'monthly' = after the fact (rides that happened); 'advance' = up front (term pass)
     kind TEXT NOT NULL DEFAULT 'monthly' CHECK (kind IN ('monthly', 'advance')),
+    -- Invoices are per rider, billed to the payer (parent) in contact_id
+    rider_contact_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent', 'paid')),
     total_cents INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
