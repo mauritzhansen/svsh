@@ -523,14 +523,12 @@
             openRideDialog(null, { date, time: (state.settings.day_start || '08:00'), dayRides }));
 
         try {
-            const [ridesData, creditsData, todosData] = await Promise.all([
+            const [ridesData, creditsData] = await Promise.all([
                 api('GET', `/api/rides?from=${date}&to=${date}`),
-                api('GET', '/api/credits'),
-                api('GET', '/api/todos')
+                api('GET', '/api/credits')
             ]);
             dayRides = ridesData.rides;
-            const dayTodos = todosData.todos.filter((t) => t.todo_date === date);
-            drawDayGrid(dayRides, date, dayTodos);
+            drawDayGrid(dayRides, date);
 
             // Slide-out horse availability panel (alphabetical, with day load)
             const drawerLoad = horseDayLoad(dayRides);
@@ -616,8 +614,7 @@
         });
     }
 
-    function drawDayGrid(rides, date, todos) {
-        todos = todos || [];
+    function drawDayGrid(rides, date) {
         const grid = document.getElementById('cal-grid');
         if (!grid) return;
         const horses = activeHorses();
@@ -626,11 +623,6 @@
             return;
         }
         const times = dayTimes(rides);
-        // Timed activities get their own time row if it doesn't exist yet
-        todos.forEach((t) => { if (t.todo_time) times.push(hhmm(t.todo_time)); });
-        const uniqueTimes = [...new Set(times)].sort();
-        times.length = 0;
-        uniqueTimes.forEach((t) => times.push(t));
 
         // Horses blocked for the whole day (all-day block rides)
         const dayBlocks = {};
@@ -682,7 +674,6 @@
         const hasUnassigned = true;
 
         let html = '<div class="calendar-scroller"><table class="daygrid"><tr><th class="timecol">Time</th>';
-        html += '<th class="todo-col">📌</th>';
         if (hasUnassigned) html += '<th class="unassigned-col">🐴? No horse yet</th>';
         const load = horseDayLoad(rides);
         horses.forEach((h) => {
@@ -725,17 +716,6 @@
                 const ride = timeRides[ri] || null;
                 html += '<tr>';
                 if (ri === 0) html += `<td class="timecol" rowspan="${subRows}">${esc(time)}</td>`;
-                if (ri === 0) {
-                    // Day activities: timed ones on their time row; undated-time
-                    // ones collect on the first row. Tap empty space to add.
-                    const cellTodos = todos.filter((t) =>
-                        (t.todo_time ? hhmm(t.todo_time) === time : ti === 0));
-                    html += `<td class="todo-cell" rowspan="${subRows}" data-todo-time="${time}">
-                        ${cellTodos.map((t) => `
-                            <button class="slot todo-slot" data-open-todo="${t.id}">
-                                <span class="slot-line">${esc(t.title)}</span>
-                            </button>`).join('')}</td>`;
-                }
                 if (hasUnassigned) {
                     const entry = ride && (unassigned[time] || []).find((e) => e.ride === ride);
                     html += `<td class="unassigned-cell" data-un-time="${time}">${entry ? renderUnassigned(entry) : ''}</td>`;
@@ -801,19 +781,6 @@
                 horseId: td.getAttribute('data-horse'),
                 dayRides: rides
             }));
-        });
-        grid.querySelectorAll('[data-open-todo]').forEach((btn) => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const t = todos.find((x) => String(x.id) === btn.getAttribute('data-open-todo'));
-                if (t) openTodoDialog(t);
-            });
-        });
-        grid.querySelectorAll('.todo-cell').forEach((td) => {
-            td.addEventListener('click', (e) => {
-                if (e.target.closest('[data-open-todo]')) return;
-                openTodoDialog(null, { date, time: td.getAttribute('data-todo-time') });
-            });
         });
         // Empty space in the planning column starts a horseless ride at that time
         grid.querySelectorAll('.unassigned-cell').forEach((td) => {
@@ -2501,21 +2468,52 @@
         return `${t.todo_date}${t.todo_time ? ' ' + hhmm(t.todo_time) : ''}`;
     }
 
+    function mondayOf(dateStr) {
+        const d = new Date(dateStr + 'T00:00:00');
+        d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+        return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+
     async function renderTodos() {
+        if (!state.todoWeekStart) state.todoWeekStart = mondayOf(todayStr());
+        const weekStart = state.todoWeekStart;
+        const days = Array.from({ length: 7 }, (_, i) => shiftDate(weekStart, i));
+        const today = todayStr();
+        const short = (d) => new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
         $view.innerHTML = `
             <h1>✅ To-dos</h1>
-            <div class="card">
+            <div class="day-header">
+                <button class="secondary daynav" id="tw-prev">‹</button>
+                <div class="day-title" style="width:auto;flex:1">${short(days[0])} – ${short(days[6])}</div>
+                <button class="secondary daynav" id="tw-today">This week</button>
+                <button class="secondary daynav" id="tw-next">›</button>
+            </div>
+            <div class="week-grid-scroller">
+                <div class="week-grid">
+                    ${days.map((d) => `
+                        <div class="week-day ${d === today ? 'is-today' : ''}">
+                            <div class="week-day-head">${WEEKDAYS[isoDow(d) - 1].slice(0, 3)} ${short(d)}</div>
+                            <div class="week-day-body" data-week-date="${d}"></div>
+                        </div>`).join('')}
+                </div>
+            </div>
+            <div class="card" style="margin-top:12px">
                 <div class="searchbar" style="margin-bottom:0">
                     <input id="td-new-title" placeholder="New to-do…">
                     <input type="date" id="td-new-date" style="flex:0 0 150px">
                     <button id="td-add">Add</button>
                 </div>
             </div>
+            <div id="todo-overdue"></div>
+            <h2>No date yet</h2>
             <div id="todo-list" class="muted">Loading…</div>
             <div class="fab-row">
                 <button class="secondary" id="td-show-done"></button>
             </div>
             <div id="todo-done-list"></div>`;
+        document.getElementById('tw-prev').addEventListener('click', () => { state.todoWeekStart = shiftDate(weekStart, -7); renderTodos(); });
+        document.getElementById('tw-next').addEventListener('click', () => { state.todoWeekStart = shiftDate(weekStart, 7); renderTodos(); });
+        document.getElementById('tw-today').addEventListener('click', () => { state.todoWeekStart = mondayOf(todayStr()); renderTodos(); });
         const add = async () => {
             const title = document.getElementById('td-new-title').value;
             if (!title.trim()) return;
@@ -2533,38 +2531,71 @@
 
         try {
             const data = await api('GET', '/api/todos');
-            const $list = document.getElementById('todo-list');
-            const today = todayStr();
-            if (!data.todos.length) {
-                $list.innerHTML = '<div class="card muted">Nothing to do 🎉</div>';
-            } else {
-                $list.classList.remove('muted');
-                $list.innerHTML = data.todos.map((t) => `
+            const openTodo = (id) => openTodoDialog(data.todos.find((x) => String(x.id) === String(id)));
+
+            // Week grid: dated items land on their day, sorted by time
+            days.forEach((d) => {
+                const body = $view.querySelector(`[data-week-date="${d}"]`);
+                const items = data.todos.filter((t) => t.todo_date === d)
+                    .sort((a, b) => String(a.todo_time || '99').localeCompare(String(b.todo_time || '99')));
+                body.innerHTML = items.map((t) => `
+                    <button class="slot todo-slot" data-open-todo="${t.id}">
+                        <span class="slot-line">${t.todo_time ? `<b>${hhmm(t.todo_time)}</b> ` : ''}${esc(t.title)}</span>
+                    </button>`).join('');
+            });
+            $view.querySelectorAll('[data-open-todo]').forEach((btn) => {
+                btn.addEventListener('click', (e) => { e.stopPropagation(); openTodo(btn.getAttribute('data-open-todo')); });
+            });
+            $view.querySelectorAll('.week-day-body').forEach((body) => {
+                body.addEventListener('click', (e) => {
+                    if (e.target.closest('[data-open-todo]')) return;
+                    openTodoDialog(null, { date: body.getAttribute('data-week-date') });
+                });
+            });
+
+            // Overdue: open items dated before today, whatever week they're in
+            const overdue = data.todos.filter((t) => t.todo_date && t.todo_date < today);
+            document.getElementById('todo-overdue').innerHTML = overdue.length ? `
+                <h2 class="overdue">Overdue</h2>
+                ${overdue.map((t) => `
                     <div class="list-item">
                         <button class="secondary small todo-check" data-done-id="${t.id}" title="Mark as done">✓</button>
                         <div class="li-main" data-todo-id="${t.id}" style="cursor:pointer">
                             <div class="li-title">${esc(t.title)}</div>
-                            ${t.todo_date ? `<div class="li-sub ${t.todo_date < today ? 'overdue' : ''}">${esc(todoDateLabel(t))}${t.todo_date < today ? ' · overdue' : ''}</div>` : ''}
+                            <div class="li-sub overdue">${esc(todoDateLabel(t))}</div>
+                        </div>
+                    </div>`).join('')}` : '';
+
+            // Backlog: undated items
+            const $list = document.getElementById('todo-list');
+            const undated = data.todos.filter((t) => !t.todo_date);
+            if (!undated.length) {
+                $list.innerHTML = '<div class="card muted">Nothing without a date.</div>';
+            } else {
+                $list.classList.remove('muted');
+                $list.innerHTML = undated.map((t) => `
+                    <div class="list-item">
+                        <button class="secondary small todo-check" data-done-id="${t.id}" title="Mark as done">✓</button>
+                        <div class="li-main" data-todo-id="${t.id}" style="cursor:pointer">
+                            <div class="li-title">${esc(t.title)}</div>
                         </div>
                     </div>`).join('');
-                $list.querySelectorAll('[data-done-id]').forEach((btn) => {
-                    btn.addEventListener('click', async () => {
-                        try {
-                            await api('PUT', `/api/todos/${btn.getAttribute('data-done-id')}`, { done: true });
-                            toast('Done ✓');
-                            renderTodos();
-                        } catch (err) {
-                            toast(err.message, true);
-                        }
-                    });
-                });
-                $list.querySelectorAll('[data-todo-id]').forEach((el) => {
-                    el.addEventListener('click', () => {
-                        const t = data.todos.find((x) => String(x.id) === el.getAttribute('data-todo-id'));
-                        openTodoDialog(t);
-                    });
-                });
             }
+            $view.querySelectorAll('[data-done-id]').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                    try {
+                        await api('PUT', `/api/todos/${btn.getAttribute('data-done-id')}`, { done: true });
+                        toast('Done ✓');
+                        renderTodos();
+                    } catch (err) {
+                        toast(err.message, true);
+                    }
+                });
+            });
+            $view.querySelectorAll('[data-todo-id]').forEach((el) => {
+                el.addEventListener('click', () => openTodo(el.getAttribute('data-todo-id')));
+            });
+
             const $showDone = document.getElementById('td-show-done');
             $showDone.textContent = `Done (${data.done_count})`;
             $showDone.addEventListener('click', async () => {

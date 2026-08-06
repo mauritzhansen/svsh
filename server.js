@@ -13,7 +13,13 @@ const pool = new pg.Pool({
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// no-cache = browsers revalidate (ETag) on every load, so a deploy is picked
+// up immediately; unchanged files still answer with a cheap 304.
+app.use(express.static(path.join(__dirname, 'public'), {
+    setHeaders(res, filePath) {
+        if (/\.(js|css|html)$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+    }
+}));
 
 const PORT = process.env.PORT || 4700;
 const SESSION_DAYS = 60;
