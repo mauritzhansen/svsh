@@ -321,6 +321,8 @@
     const levelOptions = (selected) => '<option value="">(no level)</option>' +
         LEVELS.map((l) => `<option value="${l}" ${selected === l ? 'selected' : ''}>${LEVEL_LABELS[l]}</option>`).join('');
     const guideDisplayName = (g) => `${g.guide_name || g.name}${(g.is_assistant) ? ' (ass)' : ''}`;
+    const guideDot = (g) => `<span class="guide-dot" style="background:${esc(g.guide_color || g.color || '#6a6a66')}"></span>`;
+    const guideChip = (g) => `${guideDot(g)}${esc(guideDisplayName(g))}`;
 
     // "Lily Smith" -> "Lily S"; single-word names stay as they are
     function shortName(full) {
@@ -614,6 +616,9 @@
         });
     }
 
+    // Grid = one row per ride (details in the first column) x one narrow
+    // column per horse; a dot marks which horses that ride uses. Tap a horse
+    // cell to assign/unassign that horse for the ride.
     function drawDayGrid(rides, date) {
         const grid = document.getElementById('cal-grid');
         if (!grid) return;
@@ -622,183 +627,177 @@
             grid.innerHTML = '<div class="card">No horses yet — add them under Settings.</div>';
             return;
         }
-        const times = dayTimes(rides);
 
-        // Horses blocked for the whole day (all-day block rides)
+        // Horses blocked for the whole day
         const dayBlocks = {};
         rides.forEach((r) => {
             if (r.is_block && r.all_day) r.participants.forEach((p) => { dayBlocks[p.horse_id] = r; });
         });
 
-        // One cell per (horse, time); cells of the same ride share the colour
-        // of the ride's experience level. Seats without a horse stack up in
-        // the "No horse yet" column instead.
-        const cells = {};
-        const unassigned = {}; // time -> [{ride, color, seats}]
-        rides.filter((r) => !r.all_day).forEach((r) => {
-            const color = rideColor(r);
-            const time = hhmm(r.start_time);
-            const footGuides = r.guides
-                .filter((g) => g.mode !== 'horse')
-                .map((g) => `${guideDisplayName(g)}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}`).join(', ');
-            const onceOff = !r.is_block && !r.recurring_id;
-            const horseless = r.participants.filter((p) => !p.horse_id);
-            if (horseless.length) {
-                (unassigned[time] = unassigned[time] || []).push({ ride: r, color, seats: horseless, footGuides, onceOff });
-            } else if (!r.is_block && !r.participants.length && r.guides.length) {
-                // Instructor-only booking (no student): show it in the planning column
-                (unassigned[time] = unassigned[time] || []).push({ ride: r, color, seats: [], footGuides, onceOff, instructorOnly: true });
-            }
-            let first = !horseless.length; // instructor names go on the unassigned cell if there is one
-            r.participants.filter((p) => p.horse_id).forEach((p) => {
-                let label, cls;
-                if (r.is_block) { label = 'Blocked'; cls = 'blocked'; }
-                else if (p.contact_name) { label = p.contact_name; cls = 'booked'; }
-                else { label = 'Open seat'; cls = 'open'; }
-                let sub = r.is_block ? '' : (r.ride_type_name || '');
-                if (first && footGuides) sub = `${sub ? sub + ' · ' : ''}${footGuides}`;
-                cells[`${p.horse_id}|${time}`] = {
-                    ride: r, color, cls, label, sub,
-                    pickup: !r.is_block && !!p.contact_name && p.needs_collection,
-                    onceOff: first && onceOff, // marked once per ride, next to the instructors
-                    extra: !r.is_block && isExtraSeat(p)
-                };
-                first = false;
-            });
-            r.guides.filter((g) => g.mode === 'horse' && g.horse_id).forEach((g) => {
-                cells[`${g.horse_id}|${time}`] = {
-                    ride: r, color, cls: 'guide',
-                    label: `${g.guide_name} (instructor)`, sub: r.ride_type_name || ''
-                };
-            });
-        });
-        // Planning column is always visible: horses are usually assigned only
-        // on the morning itself, so future days are planned rider-first here.
-        const hasUnassigned = true;
+        const dayRides = rides.filter((r) => !r.all_day)
+            .sort((a, b) => hhmm(a.start_time).localeCompare(hhmm(b.start_time)));
 
-        let html = '<div class="calendar-scroller"><table class="daygrid"><tr><th class="timecol">Time</th>';
-        if (hasUnassigned) html += '<th class="unassigned-col">🐴? No horse yet</th>';
-        const load = horseDayLoad(rides);
+        let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
+        html += '<tr><th class="ridecol">Ride</th>';
         horses.forEach((h) => {
             const blocked = dayBlocks[h.id];
-            const l = load[h.id];
-            const loadHtml = blocked ? ''
-                : l ? `<div class="horse-load">${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}</div>`
-                : '<div class="horse-load free">free</div>';
-            html += `<th class="${blocked ? 'blocked-th' : ''}">
-                <span class="horse-dot" style="background:${esc(h.color)}"></span>${esc(h.name)}
+            html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" draggable="true"
+                        data-horse-col="${h.id}" title="Drag to reorder · ${esc(h.name)}">
+                <div class="horsecol-inner">
+                    <span class="horse-dot" style="background:${esc(h.color)}"></span>
+                    <span class="horsecol-name">${esc(h.name)}</span>
+                </div>
                 <button class="horse-block-btn" data-block-horse="${h.id}"
-                        title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">
-                    ${blocked ? '🔓' : '🚫'}
-                </button>${loadHtml}</th>`;
+                        title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">${blocked ? '🔓' : '🚫'}</button>
+            </th>`;
         });
         html += '</tr>';
-        const renderUnassigned = (e) => {
-            const collect = e.seats.filter((s) => s.needs_collection).length;
-            const label = e.instructorOnly
-                ? e.ride.guides.map((g) => shortName(g.guide_name)).join(', ')
-                : e.seats.map((s) => s.contact_name ? shortName(s.contact_name) : 'Open seat').join(', ');
-            const subText = e.instructorOnly ? 'instructor only' : (e.footGuides || '');
-            let subHtml = `${esc(subText)}${collect
-                ? `${subText ? ' · ' : ''}<b>${collect} pick-up${collect === 1 ? '' : 's'}</b>` : ''}`;
-            if (e.onceOff) subHtml += `${subHtml ? ' · ' : ''}<b>once-off</b>`;
-            const extraNames = e.seats.filter(isExtraSeat).map((s) => shortName(s.contact_name));
-            if (extraNames.length) subHtml += `${subHtml ? ' · ' : ''}<b>extra: ${esc(extraNames.join(', '))}</b>`;
-            const border = e.instructorOnly ? `1px solid ${e.color}` : `1.5px dashed ${e.color}`;
-            return `<button class="slot booked ${e.instructorOnly ? '' : 'needs-horse'} ${e.ride.invoiced ? 'invoiced' : ''}"
-                        style="background:color-mix(in srgb, ${e.color} 26%, white);border:${border};color:${e.color};border-left:4px solid ${e.color}"
-                        data-ride-id="${e.ride.id}">
-                        <span class="slot-line">${e.instructorOnly ? '👤 ' : '⚠ '}${esc(label)}</span>
-                        ${subHtml ? `<span class="slot-line slot-sub">${subHtml}</span>` : ''}
-                    </button>`;
-        };
 
-        // One sub-row per ride within a time slot, so a ride's horse cells sit
-        // on the same line as its "No horse yet" entry.
-        times.forEach((time, ti) => {
-            const timeRides = rides.filter((r) => !r.all_day && hhmm(r.start_time) === time);
-            const subRows = Math.max(1, timeRides.length);
-            for (let ri = 0; ri < subRows; ri++) {
-                const ride = timeRides[ri] || null;
-                html += '<tr>';
-                if (ri === 0) html += `<td class="timecol" rowspan="${subRows}">${esc(time)}</td>`;
-                if (hasUnassigned) {
-                    const entry = ride && (unassigned[time] || []).find((e) => e.ride === ride);
-                    html += `<td class="unassigned-cell" data-un-time="${time}">${entry ? renderUnassigned(entry) : ''}</td>`;
-                }
-                horses.forEach((h, i) => {
-                    if (dayBlocks[h.id]) {
-                        if (ri === 0) html += `<td class="blocked-col" rowspan="${subRows}">${ti === 0 ? '🚫 Blocked all day' : ''}</td>`;
-                        return;
-                    }
-                    const cell = cells[`${h.id}|${time}`];
-                    if (!cell) {
-                        // free the whole time row for tapping
-                        if (ri === 0) html += `<td class="empty-cell" rowspan="${subRows}" data-time="${time}" data-horse="${h.id}"></td>`;
-                        return;
-                    }
-                    if (!ride || cell.ride !== ride) {
-                        // this horse's cell belongs to another ride's sub-row
-                        html += '<td class="filler-cell"></td>';
-                        return;
-                    }
-                    const r = cell.ride;
-                    // Same-ride cells share the ride colour; adjacent ones fuse
-                    // into one continuous bar with a thin internal divider.
-                    const joinL = i > 0 && cells[`${horses[i - 1].id}|${time}`]?.ride === r;
-                    const joinR = i < horses.length - 1 && cells[`${horses[i + 1].id}|${time}`]?.ride === r;
-                    let style = '';
-                    if (cell.cls === 'booked' || cell.cls === 'guide') {
-                        style += `background:color-mix(in srgb, ${cell.color} 26%, white);` +
-                                 `border-color:color-mix(in srgb, ${cell.color} 60%, white);` +
-                                 `color:${cell.color};`;
-                    }
-                    style += joinL
-                        ? 'border-top-left-radius:0;border-bottom-left-radius:0;' +
-                          'margin-left:-9px;width:calc(100% + 9px);' +
-                          `border-left:1px dashed color-mix(in srgb, ${cell.color} 60%, white);`
-                        : `border-left:4px solid ${cell.color};`;
-                    if (joinR) style += 'border-top-right-radius:0;border-bottom-right-radius:0;';
-                    let subHtml = `${esc(cell.sub || '')}${cell.pickup ? `${cell.sub ? ' · ' : ''}<b>pick-up</b>` : ''}`;
-                    if (cell.onceOff) subHtml += `${subHtml ? ' · ' : ''}<b>once-off</b>`;
-                    if (cell.extra) subHtml += `${subHtml ? ' · ' : ''}<b>extra — billed monthly</b>`;
-                    html += `<td><button class="slot ${cell.cls} ${r.invoiced ? 'invoiced' : ''}"
-                                style="${style}" data-ride-id="${r.id}">
-                                <span class="slot-line">${esc(cell.label)}</span>
-                                ${subHtml ? `<span class="slot-line slot-sub">${subHtml}</span>` : ''}
-                             </button></td>`;
-                });
-                html += '</tr>';
+        if (!dayRides.length) {
+            html += `<tr><td class="ridecol empty-ride" colspan="${horses.length + 1}">
+                No rides on this day yet — tap <b>＋ New ride</b> below.</td></tr>`;
+        }
+
+        dayRides.forEach((r) => {
+            const color = rideColor(r);
+            const start = hhmm(r.start_time);
+            const endMin = toMin(start) + (r.duration_min || 60);
+            const end = `${pad2(Math.floor(endMin / 60) % 24)}:${pad2(endMin % 60)}`;
+            const riders = r.participants.filter((p) => p.contact_id);
+            const noHorse = riders.filter((p) => !p.horse_id).length;
+            const pickups = riders.filter((p) => p.needs_collection).length;
+            const guides = r.guides.map((g) =>
+                `${guideChip(g)}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}`).join(', ');
+
+            let title, cls;
+            if (r.is_block) {
+                title = '🚫 Blocked';
+                cls = 'blocked';
+            } else if (riders.length) {
+                title = riders.map((p) => shortName(p.contact_name)).join(', ');
+                cls = 'booked';
+            } else if (r.guides.length) {
+                title = '👤 Instructor only';
+                cls = 'booked';
+            } else {
+                title = 'Open ride';
+                cls = 'open';
             }
+
+            const bits = [];
+            if (!r.is_block && r.level) bits.push(esc(LEVEL_LABELS[r.level]));
+            if (guides) bits.push(guides);
+            if (pickups) bits.push(`<b>${pickups} pick-up${pickups === 1 ? '' : 's'}</b>`);
+            if (!r.is_block && !r.recurring_id) bits.push('<b>once-off</b>');
+            if (riders.some(isExtraSeat)) bits.push('<b>extra — billed monthly</b>');
+
+            const style = r.is_block ? ''
+                : `background:color-mix(in srgb, ${color} 20%, white);border-left:5px solid ${color};color:${color}`;
+            html += `<tr class="ride-row"><td class="ridecol">
+                <button class="ride-box ${cls} ${r.invoiced ? 'invoiced' : ''}" style="${style}" data-ride-id="${r.id}">
+                    <span class="ride-time">${esc(start)}–${esc(end)} <span class="ride-dur">${r.duration_min} min</span></span>
+                    <span class="ride-riders">${esc(title)}</span>
+                    ${bits.length ? `<span class="ride-meta">${bits.join(' · ')}</span>` : ''}
+                    ${noHorse ? `<span class="ride-unassigned">⚠ ${noHorse} without a horse</span>` : ''}
+                </button></td>`;
+
+            horses.forEach((h) => {
+                if (dayBlocks[h.id]) { html += '<td class="blocked-col"></td>'; return; }
+                const seat = r.participants.find((p) => String(p.horse_id) === String(h.id));
+                const mount = r.guides.find((g) => g.mode === 'horse' && String(g.horse_id) === String(h.id));
+                const used = seat || mount;
+                const label = mount ? shortName(mount.guide_name)
+                    : (seat && seat.contact_name) ? shortName(seat.contact_name) : '';
+                html += `<td class="horse-cell ${used ? 'used' : ''}" data-ride="${r.id}" data-horse="${h.id}"
+                            title="${used ? esc(label || h.name) : 'Tap to put ' + esc(h.name) + ' on this ride'}">
+                    ${used ? `<span class="horse-mark" style="background:${color}"></span>` : ''}
+                </td>`;
+            });
+            html += '</tr>';
         });
         html += '</table></div>';
         grid.classList.remove('muted');
         grid.innerHTML = html;
+
         grid.querySelectorAll('[data-ride-id]').forEach((btn) => {
             btn.addEventListener('click', () => {
-                const ride = rides.find((r) => String(r.id) === btn.getAttribute('data-ride-id'));
+                const ride = rides.find((x) => String(x.id) === btn.getAttribute('data-ride-id'));
                 if (ride) openRideDialog(ride, { date, dayRides: rides });
             });
         });
-        grid.querySelectorAll('.empty-cell').forEach((td) => {
-            td.addEventListener('click', () => openRideDialog(null, {
-                date,
-                time: td.getAttribute('data-time'),
-                horseId: td.getAttribute('data-horse'),
-                dayRides: rides
-            }));
-        });
-        // Empty space in the planning column starts a horseless ride at that time
-        grid.querySelectorAll('.unassigned-cell').forEach((td) => {
-            td.addEventListener('click', (e) => {
-                if (e.target.closest('[data-ride-id]')) return;
-                openRideDialog(null, {
-                    date,
-                    time: td.getAttribute('data-un-time'),
-                    dayRides: rides
-                });
+
+        // Tap a horse cell: assign that horse to the ride's first horseless
+        // rider, or take it off again.
+        grid.querySelectorAll('.horse-cell').forEach((td) => {
+            td.addEventListener('click', async () => {
+                const ride = rides.find((x) => String(x.id) === td.getAttribute('data-ride'));
+                const horseId = td.getAttribute('data-horse');
+                if (!ride || ride.invoiced) return;
+                const parts = ride.participants.map((p) => ({
+                    horse_id: p.horse_id, contact_id: p.contact_id
+                }));
+                const guides = ride.guides.map((g) => ({
+                    guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id
+                }));
+                const seat = parts.find((p) => String(p.horse_id) === String(horseId));
+                const mount = guides.find((g) => String(g.horse_id) === String(horseId));
+                if (seat) {
+                    if (seat.contact_id) seat.horse_id = null;   // free the horse, keep the rider
+                    else parts.splice(parts.indexOf(seat), 1);   // horse-only seat: drop it
+                } else if (mount) {
+                    mount.horse_id = null;
+                    mount.mode = 'foot';
+                } else {
+                    const free = parts.find((p) => p.contact_id && !p.horse_id);
+                    if (free) free.horse_id = horseId;
+                    else parts.push({ horse_id: horseId, contact_id: null });
+                }
+                try {
+                    await api('PUT', `/api/rides/${ride.id}`, {
+                        date: ride.date,
+                        start_time: hhmm(ride.start_time),
+                        duration_min: ride.duration_min,
+                        ride_type_id: ride.ride_type_id,
+                        is_block: ride.is_block,
+                        level: ride.level,
+                        notes: ride.notes || '',
+                        participants: parts,
+                        guides
+                    });
+                    renderCalendar();
+                } catch (err) {
+                    toast(err.message, true);
+                }
             });
         });
+
+        // Drag horse column headers to reorder
+        let dragId = null;
+        grid.querySelectorAll('[data-horse-col]').forEach((th) => {
+            th.addEventListener('dragstart', (e) => {
+                dragId = th.getAttribute('data-horse-col');
+                e.dataTransfer.effectAllowed = 'move';
+            });
+            th.addEventListener('dragover', (e) => { e.preventDefault(); th.classList.add('drop-target'); });
+            th.addEventListener('dragleave', () => th.classList.remove('drop-target'));
+            th.addEventListener('drop', async (e) => {
+                e.preventDefault();
+                th.classList.remove('drop-target');
+                const targetId = th.getAttribute('data-horse-col');
+                if (!dragId || dragId === targetId) return;
+                const order = horses.map((h) => String(h.id));
+                order.splice(order.indexOf(dragId), 1);
+                order.splice(order.indexOf(targetId), 0, dragId);
+                try {
+                    await api('PUT', '/api/horses/reorder', { horse_ids: order });
+                    state.horses = (await api('GET', '/api/horses')).horses;
+                    renderCalendar();
+                } catch (err) {
+                    toast(err.message, true);
+                }
+            });
+        });
+
         grid.querySelectorAll('[data-block-horse]').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
@@ -2770,6 +2769,21 @@
                 <div class="form-actions"><button id="biz-save">Save</button></div>
             </div>` : ''}
 
+            ${admin ? `
+            <h2>Instructor schedule link</h2>
+            <div class="card">
+                <p class="muted" style="margin-top:0">A read-only schedule for instructors — no login needed.
+                   Share this one link (WhatsApp) and it always shows the current schedule.
+                   Anyone with the link can see it, so don't post it publicly. Rotate it if it leaks.</p>
+                <input id="pub-link" readonly value="${esc(location.origin)}/schedule?token=${esc(state.settings.public_schedule_token || '')}">
+                <div class="form-actions" style="justify-content:flex-start">
+                    <button class="small" id="pub-copy">Copy link</button>
+                    <a class="btn secondary small" id="pub-open" href="/schedule?token=${esc(state.settings.public_schedule_token || '')}" target="_blank">Open</a>
+                    <span class="spacer"></span>
+                    <button class="secondary small" id="pub-rotate">Rotate link</button>
+                </div>
+            </div>` : ''}
+
             <div class="card" style="margin-top:18px">
                 Logged in as <b>${esc(state.user.display_name)}</b> <span class="chip role">${esc(state.user.role)}</span>
                 <div class="form-actions"><button class="secondary" id="logout-btn">Log out</button></div>
@@ -2811,6 +2825,7 @@
         const drawGuides = () => {
             document.getElementById('set-guides').innerHTML = state.guides.map((g) => `
                 <div class="list-item" data-guide-id="${g.id}">
+                    <span class="horse-dot" style="background:${esc(g.color || '#6a6a66')};width:14px;height:14px"></span>
                     <div class="li-main">
                         <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}${g.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
                         ${g.phone ? `<div class="li-sub">${esc(g.phone)}</div>` : ''}
@@ -2829,6 +2844,25 @@
         document.getElementById('horse-add').addEventListener('click', () => openHorseDialog(null));
         document.getElementById('guide-add').addEventListener('click', () => openGuideDialog(null));
         document.getElementById('ridetype-add').addEventListener('click', () => openRideTypeDialog(null));
+        const copyBtn = document.getElementById('pub-copy');
+        if (copyBtn) copyBtn.addEventListener('click', () => {
+            const inp = document.getElementById('pub-link');
+            inp.select();
+            navigator.clipboard.writeText(inp.value).then(() => toast('Link copied.'),
+                () => toast('Select and copy the link.', true));
+        });
+        const rotateBtn = document.getElementById('pub-rotate');
+        if (rotateBtn) rotateBtn.addEventListener('click', async () => {
+            if (!confirm('Make a new link? The old one stops working immediately and everyone needs the new one.')) return;
+            try {
+                const res = await api('POST', '/api/settings/rotate-schedule-token');
+                state.settings.public_schedule_token = res.token;
+                toast('New link created.');
+                renderSettings();
+            } catch (err) {
+                toast(err.message, true);
+            }
+        });
         document.getElementById('logout-btn').addEventListener('click', async () => {
             await api('POST', '/api/auth/logout');
             state.user = null;
@@ -2931,6 +2965,8 @@
             <input id="g-phone" type="tel" value="${esc(guide ? guide.phone || '' : '')}">
             <label>Notes</label>
             <input id="g-notes" value="${esc(guide ? guide.notes || '' : '')}">
+            <label>Colour (dot on the calendar)</label>
+            <input type="color" id="g-color" value="${esc(guide ? guide.color || '#6a6a66' : '#6a6a66')}" style="height:44px;padding:4px">
             ${guide ? `<label>Active</label>
             <select id="g-active"><option value="true" ${guide.active ? 'selected' : ''}>Yes</option><option value="false" ${guide.active ? '' : 'selected'}>No</option></select>` : ''}
             <div class="form-error"></div>
@@ -2944,7 +2980,8 @@
                 name: document.getElementById('g-name').value,
                 phone: document.getElementById('g-phone').value,
                 is_assistant: document.getElementById('g-assistant').checked,
-                notes: document.getElementById('g-notes').value
+                notes: document.getElementById('g-notes').value,
+                color: document.getElementById('g-color').value
             };
             if (guide) body.active = document.getElementById('g-active').value === 'true';
             try {

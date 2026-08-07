@@ -12,6 +12,23 @@ const pool = new pg.Pool({
 });
 
 const app = express();
+app.set('trust proxy', 1); // behind Caddy: makes req.ip the real client address
+app.disable('x-powered-by'); // don't advertise the stack
+
+// Security headers. The app is fully self-contained (no external scripts,
+// styles, fonts or images), so a strict CSP costs nothing.
+app.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy',
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+        "script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; " +
+        "frame-ancestors 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    next();
+});
+
 app.use(express.json({ limit: '1mb' }));
 // no-cache = browsers revalidate (ETag) on every load, so a deploy is picked
 // up immediately; unchanged files still answer with a cheap 304.
@@ -23,6 +40,38 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 const PORT = process.env.PORT || 4700;
 const SESSION_DAYS = 60;
+// Behind TLS in production (Caddy); plain HTTP only for local development
+const COOKIE_SECURE = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+
+// Login throttle: slows brute force without locking anyone out permanently.
+// Keyed per IP+email, in memory (single process, one small stable).
+const loginAttempts = new Map();
+const LOGIN_MAX = 8;              // failures before the window blocks
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function loginKey(req, email) {
+    return `${req.ip}|${String(email || '').toLowerCase()}`;
+}
+
+function loginBlocked(key) {
+    const rec = loginAttempts.get(key);
+    if (!rec) return false;
+    if (Date.now() - rec.first > LOGIN_WINDOW_MS) {
+        loginAttempts.delete(key);
+        return false;
+    }
+    return rec.count >= LOGIN_MAX;
+}
+
+function noteLoginFailure(key) {
+    const rec = loginAttempts.get(key);
+    if (!rec || Date.now() - rec.first > LOGIN_WINDOW_MS) {
+        loginAttempts.set(key, { count: 1, first: Date.now() });
+    } else {
+        rec.count++;
+    }
+    if (loginAttempts.size > 5000) loginAttempts.clear(); // crude bound
+}
 
 // ---------- Auth helpers ----------
 function hashPassword(password) {
@@ -54,7 +103,7 @@ async function createSession(res, userId) {
         [token, userId, SESSION_DAYS]
     );
     res.setHeader('Set-Cookie',
-        `sb_session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; SameSite=Lax`);
+        `sb_session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; SameSite=Lax${COOKIE_SECURE}`);
 }
 
 // Attach req.user (or null) to every API request
@@ -124,7 +173,7 @@ app.post('/api/auth/setup', async (req, res) => {
         const emailNorm = String(email || '').trim().toLowerCase();
         const name = String(display_name || '').trim();
         if (!emailNorm || !name) return res.status(400).json({ error: 'Name and email are required.' });
-        if (String(password || '').length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+        if (String(password || '').length < 10) return res.status(400).json({ error: 'Password must be at least 10 characters.' });
 
         const ins = await pool.query(
             `INSERT INTO users (email, password_hash, display_name, role)
@@ -141,12 +190,18 @@ app.post('/api/auth/setup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const emailNorm = String((req.body || {}).email || '').trim().toLowerCase();
+        const key = loginKey(req, emailNorm);
+        if (loginBlocked(key)) {
+            return res.status(429).json({ error: 'Too many attempts. Please wait 15 minutes and try again.' });
+        }
         const { rows } = await pool.query(
             'SELECT * FROM users WHERE email = $1 AND active', [emailNorm]);
         const user = rows[0];
         if (!user || !verifyPassword((req.body || {}).password || '', user.password_hash)) {
+            noteLoginFailure(key);
             return res.status(401).json({ error: 'Wrong email or password.' });
         }
+        loginAttempts.delete(key);
         await createSession(res, user.id);
         res.json({ user: { id: user.id, email: user.email, display_name: user.display_name, role: user.role } });
     } catch (err) {
@@ -158,7 +213,7 @@ app.post('/api/auth/logout', async (req, res) => {
     try {
         const token = parseCookies(req).sb_session;
         if (token) await pool.query('DELETE FROM sessions WHERE token = $1', [token]);
-        res.setHeader('Set-Cookie', 'sb_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+        res.setHeader('Set-Cookie', `sb_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${COOKIE_SECURE}`);
         res.json({ ok: true });
     } catch (err) {
         handleError(res, err, 'Logout');
@@ -183,7 +238,7 @@ app.post('/api/users', requireRole('admin'), async (req, res) => {
         if (!emailNorm || !String(display_name || '').trim()) {
             return res.status(400).json({ error: 'Name and email are required.' });
         }
-        if (String(password || '').length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+        if (String(password || '').length < 10) return res.status(400).json({ error: 'Password must be at least 10 characters.' });
         if (!['admin', 'helper', 'guide'].includes(role)) return res.status(400).json({ error: 'Invalid role.' });
         const { rows } = await pool.query(
             `INSERT INTO users (email, password_hash, display_name, role)
@@ -246,6 +301,18 @@ app.put('/api/settings', requireRole('admin'), async (req, res) => {
         res.json({ ok: true });
     } catch (err) {
         handleError(res, err, 'Saving settings');
+    }
+});
+
+app.post('/api/settings/rotate-schedule-token', requireRole('admin'), async (req, res) => {
+    try {
+        const token = crypto.randomBytes(32).toString('hex');
+        await pool.query(
+            `INSERT INTO settings (key, value) VALUES ('public_schedule_token', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [token]);
+        res.json({ token });
+    } catch (err) {
+        handleError(res, err, 'Rotating schedule link');
     }
 });
 
@@ -479,6 +546,26 @@ app.post('/api/horses', requireRole('helper'), async (req, res) => {
     }
 });
 
+// Drag-to-reorder the calendar's horse columns
+app.put('/api/horses/reorder', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const ids = Array.isArray((req.body || {}).horse_ids) ? req.body.horse_ids : [];
+        if (!ids.length) return res.status(400).json({ error: 'No order given.' });
+        await client.query('BEGIN');
+        for (let i = 0; i < ids.length; i++) {
+            await client.query('UPDATE horses SET sort_order = $2 WHERE id = $1', [ids[i], i]);
+        }
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Reordering horses');
+    } finally {
+        client.release();
+    }
+});
+
 app.put('/api/horses/:id', requireRole('helper'), async (req, res) => {
     try {
         const { name, color, notes, active, sort_order, owner_contact_id } = req.body || {};
@@ -512,11 +599,12 @@ app.get('/api/guides', requireAuth, async (req, res) => {
 
 app.post('/api/guides', requireRole('helper'), async (req, res) => {
     try {
-        const { name, phone, notes, is_assistant } = req.body || {};
+        const { name, phone, notes, is_assistant, color } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         const { rows } = await pool.query(
-            `INSERT INTO guides (name, phone, is_assistant, notes) VALUES ($1, $2, $3, $4) RETURNING *`,
-            [String(name).trim(), phone || '', !!is_assistant, notes || '']);
+            `INSERT INTO guides (name, phone, is_assistant, notes, color)
+             VALUES ($1, $2, $3, $4, COALESCE($5, '#6a6a66')) RETURNING *`,
+            [String(name).trim(), phone || '', !!is_assistant, notes || '', color]);
         res.json({ guide: rows[0] });
     } catch (err) {
         handleError(res, err, 'Creating guide');
@@ -525,16 +613,17 @@ app.post('/api/guides', requireRole('helper'), async (req, res) => {
 
 app.put('/api/guides/:id', requireRole('helper'), async (req, res) => {
     try {
-        const { name, phone, notes, active, is_assistant } = req.body || {};
+        const { name, phone, notes, active, is_assistant, color } = req.body || {};
         const { rows } = await pool.query(
             `UPDATE guides SET
                 name = COALESCE($2, name),
                 phone = COALESCE($3, phone),
                 notes = COALESCE($4, notes),
                 active = COALESCE($5, active),
-                is_assistant = COALESCE($6, is_assistant)
+                is_assistant = COALESCE($6, is_assistant),
+                color = COALESCE($7, color)
              WHERE id = $1 RETURNING *`,
-            [req.params.id, name, phone, notes, active, is_assistant]);
+            [req.params.id, name, phone, notes, active, is_assistant, color]);
         if (!rows[0]) return res.status(404).json({ error: 'Guide not found.' });
         res.json({ guide: rows[0] });
     } catch (err) {
@@ -1077,7 +1166,7 @@ async function fetchRides(from, to) {
           WHERE rp.ride_id = ANY($1::bigint[])
           ORDER BY h.sort_order NULLS LAST, h.name, c.name`, [ids]);
     const { rows: rideGuides } = await pool.query(
-        `SELECT rg.*, g.name AS guide_name, g.is_assistant, h.name AS horse_name
+        `SELECT rg.*, g.name AS guide_name, g.is_assistant, g.color AS guide_color, h.name AS horse_name
            FROM ride_guides rg
            JOIN guides g ON g.id = rg.guide_id
            LEFT JOIN horses h ON h.id = rg.horse_id
@@ -1929,12 +2018,86 @@ app.get('/api/invoices/batch-pdf', requireRole('helper'), async (req, res) => {
     }
 });
 
+// ---------- Public read-only schedule (instructors, no login) ----------
+// Guarded by an unguessable token, not a password: one link to paste into the
+// staff WhatsApp group. Shows only what instructors need for the day.
+async function requirePublicToken(req, res) {
+    const { rows } = await pool.query(
+        "SELECT value FROM settings WHERE key = 'public_schedule_token'");
+    const token = rows[0] && rows[0].value;
+    const given = String(req.query.token || '');
+    if (!token || given.length !== token.length ||
+        !crypto.timingSafeEqual(Buffer.from(given.padEnd(token.length).slice(0, token.length)), Buffer.from(token))) {
+        res.status(404).json({ error: 'Not found.' });
+        return false;
+    }
+    return true;
+}
+
+app.get('/api/public/schedule', async (req, res) => {
+    try {
+        if (!await requirePublicToken(req, res)) return;
+        const { from, to } = req.query;
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to ||
+            datesInRange(from, to).length > 14) {
+            return res.status(400).json({ error: 'Valid from/to dates are required (max 14 days).' });
+        }
+        const rides = await fetchRides(from, to);
+        const { rows: settingRows } = await pool.query(
+            "SELECT value FROM settings WHERE key = 'business_name'");
+        res.json({
+            business_name: (settingRows[0] || {}).value || 'Riding school',
+            days: datesInRange(from, to).map((date) => ({
+                date,
+                rides: rides.filter((r) => r.date === date && !r.all_day)
+                    .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
+                    .map((r) => ({
+                        start_time: String(r.start_time).slice(0, 5),
+                        duration_min: r.duration_min,
+                        level: r.level,
+                        is_block: r.is_block,
+                        notes: r.notes || '',
+                        riders: r.participants.filter((p) => p.contact_id).map((p) => ({
+                            name: p.contact_name,
+                            horse: p.horse_name,
+                            pickup: p.needs_collection
+                                ? [p.collection_teacher, p.collection_class].filter(Boolean).join(', ') || 'yes'
+                                : null
+                        })),
+                        horses_only: r.participants.filter((p) => !p.contact_id && p.horse_name)
+                            .map((p) => p.horse_name),
+                        staff: r.guides.map((g) => ({
+                            name: g.guide_name, assistant: g.is_assistant,
+                            color: g.guide_color, mode: g.mode, horse: g.horse_name
+                        }))
+                    }))
+            }))
+        });
+    } catch (err) {
+        handleError(res, err, 'Loading public schedule');
+    }
+});
+
+// The shareable page itself (the token travels in the query string)
+app.get('/schedule', (req, res) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.sendFile(path.join(__dirname, 'public', 'schedule.html'));
+});
+
 // SPA fallback
 app.get('*', (req, res) => {
     if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found.' });
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-    console.log(`SVSH running on http://localhost:${PORT}`);
+// Expired sessions serve no purpose and are one more thing to steal
+setInterval(() => {
+    pool.query('DELETE FROM sessions WHERE expires_at < now()')
+        .catch((err) => console.error('Session cleanup failed:', err));
+}, 6 * 3600 * 1000).unref();
+
+// In production only Caddy talks to us, so don't listen on public interfaces
+const HOST = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
+app.listen(PORT, HOST, () => {
+    console.log(`SVSH running on http://${HOST}:${PORT}`);
 });

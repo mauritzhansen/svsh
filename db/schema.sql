@@ -51,6 +51,7 @@ CREATE TABLE guides (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     phone TEXT,
+    color TEXT NOT NULL DEFAULT '#6a6a66', -- dot colour on the calendar
     is_assistant BOOLEAN NOT NULL DEFAULT false,
     notes TEXT,
     active BOOLEAN NOT NULL DEFAULT true
