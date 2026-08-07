@@ -123,6 +123,7 @@ CREATE TABLE recurring_participants (
     -- anchored on biweekly_anchor (falls back to the template start_date)
     frequency TEXT NOT NULL DEFAULT 'weekly' CHECK (frequency IN ('weekly', 'biweekly')),
     biweekly_anchor DATE,
+    start_date DATE, -- per-rider start when later/earlier than the template's
     CHECK (contact_id IS NOT NULL OR horse_id IS NOT NULL)
 );
 

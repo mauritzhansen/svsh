@@ -1,7 +1,7 @@
 # SVSH — Sweet Valley School of Horsemanship 🐴
 
 Simple scheduling, contacts and invoicing for the Sweet Valley School of
-Horsemanship (production: svsh.aplacetostay.co.za). Built to be self-hosted
+Horsemanship (production: app.svsh.co.za). Built to be self-hosted
 cheaply: one Node.js process + one PostgreSQL database, no external services,
 no frameworks.
 

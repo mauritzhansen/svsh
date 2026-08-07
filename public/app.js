@@ -645,6 +645,9 @@
             const horseless = r.participants.filter((p) => !p.horse_id);
             if (horseless.length) {
                 (unassigned[time] = unassigned[time] || []).push({ ride: r, color, seats: horseless, footGuides, onceOff });
+            } else if (!r.is_block && !r.participants.length && r.guides.length) {
+                // Instructor-only booking (no student): show it in the planning column
+                (unassigned[time] = unassigned[time] || []).push({ ride: r, color, seats: [], footGuides, onceOff, instructorOnly: true });
             }
             let first = !horseless.length; // instructor names go on the unassigned cell if there is one
             r.participants.filter((p) => p.horse_id).forEach((p) => {
@@ -692,17 +695,20 @@
         html += '</tr>';
         const renderUnassigned = (e) => {
             const collect = e.seats.filter((s) => s.needs_collection).length;
-            const label = e.seats.map((s) => s.contact_name ? shortName(s.contact_name) : 'Open seat').join(', ');
-            const subText = e.footGuides || '';
+            const label = e.instructorOnly
+                ? e.ride.guides.map((g) => shortName(g.guide_name)).join(', ')
+                : e.seats.map((s) => s.contact_name ? shortName(s.contact_name) : 'Open seat').join(', ');
+            const subText = e.instructorOnly ? 'instructor only' : (e.footGuides || '');
             let subHtml = `${esc(subText)}${collect
                 ? `${subText ? ' · ' : ''}<b>${collect} pick-up${collect === 1 ? '' : 's'}</b>` : ''}`;
             if (e.onceOff) subHtml += `${subHtml ? ' · ' : ''}<b>once-off</b>`;
             const extraNames = e.seats.filter(isExtraSeat).map((s) => shortName(s.contact_name));
             if (extraNames.length) subHtml += `${subHtml ? ' · ' : ''}<b>extra: ${esc(extraNames.join(', '))}</b>`;
-            return `<button class="slot booked needs-horse ${e.ride.invoiced ? 'invoiced' : ''}"
-                        style="background:color-mix(in srgb, ${e.color} 26%, white);border:1.5px dashed ${e.color};color:${e.color};border-left:4px solid ${e.color}"
+            const border = e.instructorOnly ? `1px solid ${e.color}` : `1.5px dashed ${e.color}`;
+            return `<button class="slot booked ${e.instructorOnly ? '' : 'needs-horse'} ${e.ride.invoiced ? 'invoiced' : ''}"
+                        style="background:color-mix(in srgb, ${e.color} 26%, white);border:${border};color:${e.color};border-left:4px solid ${e.color}"
                         data-ride-id="${e.ride.id}">
-                        <span class="slot-line">⚠ ${esc(label)}</span>
+                        <span class="slot-line">${e.instructorOnly ? '👤 ' : '⚠ '}${esc(label)}</span>
                         ${subHtml ? `<span class="slot-line slot-sub">${subHtml}</span>` : ''}
                     </button>`;
         };

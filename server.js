@@ -922,9 +922,6 @@ function parseRideBody(body) {
             price_cents: Number.isInteger(p.price_cents) ? p.price_cents : null
         });
     }
-    if (!participants.length) {
-        return { error: isBlock ? 'Pick at least one horse to block.' : 'A ride needs at least one rider or horse.' };
-    }
     const guides = [];
     const guidesUsed = new Set();
     if (!isBlock) {
@@ -943,6 +940,10 @@ function parseRideBody(body) {
             }
             guides.push({ guide_id: g.guide_id, mode, horse_id: horseId });
         }
+    }
+    if (!participants.length && (isBlock || !guides.length)) {
+        return { error: isBlock ? 'Pick at least one horse to block.'
+            : 'A ride needs at least one rider, horse or instructor.' };
     }
     return {
         date, start_time, isBlock, allDay,
@@ -1007,11 +1008,16 @@ async function materializeRecurring(from, to) {
                 'SELECT 1 FROM rides WHERE recurring_id = $1 AND date = $2', [t.id, date]);
             if (existing[0]) continue;
             const dueParts = tParts.filter((p) => {
+                if (p.start_date && date < p.start_date) return false;
                 if (p.frequency !== 'biweekly') return true;
                 const w = weeksBetween(p.biweekly_anchor || t.start_date, date);
                 return w >= 0 && w % 2 === 0;
             });
-            if (!dueParts.length) continue;
+            // Templates WITH riders only materialize when someone is due
+            // (biweekly off-weeks create nothing); instructor-held empty
+            // slots (no participants at all) always materialize.
+            if (!dueParts.length && tParts.length) continue;
+            if (!dueParts.length && !tGuides.length) continue;
             const horseIds = [
                 ...dueParts.map((p) => p.horse_id),
                 ...tGuides.filter((g) => g.mode === 'horse').map((g) => g.horse_id)
@@ -1651,7 +1657,7 @@ app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
             [period_start, period_end]);
         const { rows: parts } = templates.length ? await pool.query(
             `SELECT rp.recurring_id, rp.contact_id, rp.frequency, rp.biweekly_anchor,
-                    c.name, c.parent_id
+                    rp.start_date, c.name, c.parent_id
                FROM recurring_participants rp
                JOIN contacts c ON c.id = rp.contact_id
               WHERE rp.contact_id IS NOT NULL AND rp.recurring_id = ANY($1::bigint[])`,
@@ -1666,6 +1672,7 @@ app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
             for (const date of dates) {
                 if (isoWeekday(date) !== t.weekday) continue;
                 if (date < t.start_date || (t.end_date && date > t.end_date)) continue;
+                if (p.start_date && date < p.start_date) continue;
                 if (p.frequency === 'biweekly') {
                     const w = weeksBetween(p.biweekly_anchor || t.start_date, date);
                     if (w < 0 || w % 2 !== 0) continue;
