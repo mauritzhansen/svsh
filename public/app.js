@@ -700,8 +700,16 @@
             html += '</tr>';
         }
         html += '</table></div>';
+        // keep the scroll position across re-renders (assigning a horse
+        // shouldn't jump you back to the top of the day)
+        const prev = grid.querySelector('.calendar-scroller');
+        const keep = prev ? { x: prev.scrollLeft, y: prev.scrollTop } : null;
         grid.classList.remove('muted');
         grid.innerHTML = html;
+        if (keep) {
+            const next = grid.querySelector('.calendar-scroller');
+            if (next) { next.scrollLeft = keep.x; next.scrollTop = keep.y; }
+        }
 
         grid.querySelectorAll('[data-new-time]').forEach((el) => {
             el.addEventListener('click', () => openRideDialog(null, {
