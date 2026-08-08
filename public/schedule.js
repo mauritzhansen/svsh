@@ -78,10 +78,11 @@
         }
 
         return `<div class="ride-box pub-box ${r.is_block ? 'blocked' : ''}">
-            <div class="ride-top" style="background:${color}">
+            <div class="ride-top">
                 <span class="ride-time">${esc(r.start_time)}–${esc(endTime(r.start_time, r.duration_min))}</span>
                 <span class="ride-dur">${r.duration_min} min</span>
-                <span class="ride-level${r.level ? '' : ' none'}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
+                <span class="ride-level${r.level ? '' : ' none'}"
+                      style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
             </div>
             <div class="ride-cols">
                 <div class="ride-riders-col">${riderRows}</div>

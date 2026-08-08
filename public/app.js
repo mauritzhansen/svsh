@@ -668,11 +668,11 @@
 
             html += `<tr class="ride-row"><td class="ridecol">
                 <div class="ride-box ${r.is_block ? 'blocked' : ''} ${r.invoiced ? 'invoiced' : ''}">
-                    <button class="ride-top" data-ride-id="${r.id}"
-                            style="background:color-mix(in srgb, ${color} 88%, black 0%);">
+                    <button class="ride-top" data-ride-id="${r.id}">
                         <span class="ride-time">${esc(start)}–${esc(end)}</span>
                         <span class="ride-dur">${r.duration_min} min</span>
-                        <span class="ride-level${r.level ? '' : ' none'}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
+                        <span class="ride-level${r.level ? '' : ' none'}"
+                              style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
                     </button>
                     <div class="ride-cols">
                         <div class="ride-riders-col">${riderRows}</div>
