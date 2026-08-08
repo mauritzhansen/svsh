@@ -708,10 +708,10 @@
                 const used = seat || mount;
                 const label = mount ? shortName(mount.guide_name)
                     : (seat && seat.contact_name) ? shortName(seat.contact_name) : '';
-                html += `<td class="horse-cell ${used ? 'used' : ''}" data-ride="${r.id}" data-horse="${h.id}"
-                            title="${used ? esc(label || h.name) : 'Tap to put ' + esc(h.name) + ' on this ride'}">
-                    ${used ? `<span class="horse-mark" style="background:${color}"></span>` : ''}
-                </td>`;
+                const fill = used ? `background:${color};` : '';
+                html += `<td class="horse-cell ${used ? 'used' : ''}" style="${fill}"
+                            data-ride="${r.id}" data-horse="${h.id}"
+                            title="${used ? esc(h.name) + (label ? ' — ' + esc(label) : '') : 'Tap to put ' + esc(h.name) + ' on this ride'}"></td>`;
             });
             html += '</tr>';
         });

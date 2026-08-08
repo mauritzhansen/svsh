@@ -654,9 +654,9 @@ table.ridegrid th.ridecol, table.ridegrid td.ridecol {
 }
 table.ridegrid th.ridecol { z-index: 4; background: var(--green-light); }
 table.ridegrid th.horsecol {
-    min-width: 34px;
-    width: 34px;
-    padding: 6px 2px 4px;
+    min-width: 26px;
+    width: 26px;
+    padding: 6px 1px 4px;
     vertical-align: bottom;
     text-align: center;
 }
@@ -664,29 +664,21 @@ table.ridegrid th.horsecol {
 .horsecol-name {
     writing-mode: vertical-rl;
     transform: rotate(180deg);
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 700;
-    letter-spacing: 0.2px;
+    letter-spacing: 0;
     white-space: nowrap;
 }
 table.ridegrid th.horsecol .horse-block-btn { margin: 2px 0 0; font-size: 11px; }
 td.horse-cell {
-    min-width: 34px;
-    width: 34px;
-    text-align: center;
-    vertical-align: middle;
+    min-width: 26px;
+    width: 26px;
+    padding: 0;
     cursor: pointer;
     background: #fbfbf8;
 }
-td.horse-cell:hover { background: var(--green-light); }
-td.horse-cell.used { background: #fff; }
-.horse-mark {
-    display: inline-block;
-    width: 15px;
-    height: 15px;
-    border-radius: 50%;
-    box-shadow: 0 0 0 2px #fff inset;
-}
+td.horse-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }
+td.horse-cell.used:hover { box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.45); }
 .ride-box {
     display: block;
     width: 100%;
