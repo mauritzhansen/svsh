@@ -36,6 +36,9 @@
 
     function hhmm(t) { return String(t || '').slice(0, 5); }
 
+    const shortDate = (d) => new Date(d + 'T00:00:00')
+        .toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
     // Font Awesome Pro 7.1.0 (solid), inlined as SVG
     const ICON_X = '<svg viewBox="0 0 384 512" width="17" height="17" style="fill:currentColor;display:block" aria-hidden="true"><path d="M55.1 73.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L147.2 256 9.9 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L192.5 301.3 329.9 438.6c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L237.8 256 375.1 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L192.5 210.7 55.1 73.4z"/></svg>';
     const ICON_ROTATE = '<svg viewBox="0 0 512 512" width="17" height="17" style="fill:currentColor;display:block" aria-hidden="true"><path d="M488 192l-144 0c-9.7 0-18.5-5.8-22.2-14.8s-1.7-19.3 5.2-26.2l46.7-46.7c-75.3-58.6-184.3-53.3-253.5 15.9-75 75-75 196.5 0 271.5s196.5 75 271.5 0c8.2-8.2 15.5-16.9 21.9-26.1 10.1-14.5 30.1-18 44.6-7.9s18 30.1 7.9 44.6c-8.5 12.2-18.2 23.8-29.1 34.7-100 100-262.1 100-362 0S-25 175 75 75c94.3-94.3 243.7-99.6 344.3-16.2L471 7c6.9-6.9 17.2-8.9 26.2-5.2S512 14.3 512 24l0 144c0 13.3-10.7 24-24 24z"/></svg>';
@@ -661,6 +664,13 @@
             } else {
                 riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
             }
+            // riders in the weekly series who aren't on this week
+            riderRows += (r.off_riders || []).map((o) => `
+                <div class="rider-row off-rider">
+                    <span class="rider-name">${esc(o.contact_name)}</span>
+                    <span class="rider-off">${o.frequency === 'biweekly' ? 'every 2nd week' : 'not riding'}${
+                        o.next_date ? ' · next ' + esc(shortDate(o.next_date)) : ''}</span>
+                </div>`).join('');
 
             const flags = [];
             if (!r.is_block && !r.recurring_id) flags.push('once-off');
@@ -1267,11 +1277,15 @@
         return html;
     }
 
-    function participantRowHtml(p, withResched) {
+    function participantRowHtml(p, withResched, freq) {
         return `
             <div class="pick-row" data-kind="part">
                 <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(open seat)')}</select>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
+                <select class="pr-freq hidden" title="How often this rider comes">
+                    <option value="weekly" ${freq === 'biweekly' ? '' : 'selected'}>Every week</option>
+                    <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
+                </select>
                 ${withResched ? `<button type="button" class="secondary small row-resched" title="Can't make it — give a reschedule credit">${ICON_ROTATE}</button>` : ''}
                 <button type="button" class="danger small row-x">${ICON_X}</button>
             </div>`;
@@ -1475,6 +1489,13 @@
             <label>Notes</label>
             <input id="ride-notes" value="${esc(isEdit ? ride.notes || '' : '')}">
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
+                <input type="checkbox" id="ride-repeat" style="width:auto" ${isEdit && ride.recurring_id ? 'checked' : ''}>
+                🔁 Repeats every week (fixed ride)
+            </label>
+            <div class="muted" id="repeat-note" style="margin-left:26px">${isEdit && ride.recurring_id
+                ? 'Set how often each rider comes above. Unticking stops the series from this day on.'
+                : 'Makes this a weekly fixed ride from this date. Each rider can then be every week or every 2nd week.'}</div>
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
                 <input type="checkbox" id="ride-block" style="width:auto" ${isEdit && ride.is_block ? 'checked' : ''}>
                 Block these horses (unavailable, no ride)
             </label>
@@ -1496,7 +1517,11 @@
                 ? [...ride.participants, { contact_id: defaults.addContactId, horse_id: null }]
                 : ride.participants)
             : [{ horse_id: defaultHorse, contact_id: null }];
-        parts.forEach((p) => addRow('ride-parts', participantRowHtml(p, isEdit)));
+        const seriesFreq = {};
+        if (isEdit) (ride.off_riders || []).forEach((o) => { seriesFreq[String(o.contact_id)] = o.frequency; });
+        if (isEdit && ride.rider_freq) Object.assign(seriesFreq, ride.rider_freq);
+        parts.forEach((p) => addRow('ride-parts',
+            participantRowHtml(p, isEdit, seriesFreq[String(p.contact_id)])));
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
         document.getElementById('part-add').addEventListener('click', () =>
             addRow('ride-parts', participantRowHtml(null, isEdit)));
@@ -1515,6 +1540,14 @@
             }
             refreshOptions();
         });
+        const repeatBox = document.getElementById('ride-repeat');
+        const syncFreqVisibility = () => {
+            $dialog.querySelectorAll('.pr-freq').forEach((s) =>
+                s.classList.toggle('hidden', !repeatBox || !repeatBox.checked));
+        };
+        if (repeatBox) repeatBox.addEventListener('change', syncFreqVisibility);
+        syncFreqVisibility();
+        document.getElementById('ride-parts').addEventListener('input', syncFreqVisibility);
         document.getElementById('ride-guides').addEventListener('change', refreshOptions);
         refreshOptions();
         if (locked) return;
@@ -1545,8 +1578,9 @@
                 }).filter((g) => g.guide_id)
             };
             try {
+                let savedId = isEdit ? ride.id : null;
                 if (isEdit) await api('PUT', `/api/rides/${ride.id}`, body);
-                else await api('POST', '/api/rides', body);
+                else savedId = (await api('POST', '/api/rides', body)).ride_id;
                 for (const pc of credits) {
                     await api('POST', '/api/credits', {
                         contact_id: pc.contact_id,
@@ -1558,6 +1592,19 @@
                         contact_id: defaults.addContactId, ride_id: ride.id
                     });
                 }
+                const box = document.getElementById('ride-repeat');
+                const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')].map((row) => ({
+                    contact_id: row.querySelector('.pr-contact').value || null,
+                    frequency: row.querySelector('.pr-freq').value
+                })).filter((p) => p.contact_id);
+                const targetId = isEdit ? ride.id : savedId;
+                if (box && targetId) {
+                    const wants = box.checked;
+                    const has = isEdit && !!ride.recurring_id;
+                    if (wants && !has) await api('POST', `/api/rides/${targetId}/repeat`, { participants: freqs });
+                    else if (wants && has) await api('PUT', `/api/rides/${targetId}/repeat-riders`, { participants: freqs });
+                    else if (!wants && has) await api('POST', `/api/rides/${targetId}/stop-repeat`, {});
+                }
                 closeDialog();
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
@@ -1568,16 +1615,62 @@
             }
         });
         const deleteBtn = document.getElementById('ride-delete');
-        if (deleteBtn) deleteBtn.addEventListener('click', async () => {
-            if (!confirm('Delete this ride?')) return;
+        if (deleteBtn) deleteBtn.addEventListener('click', () => {
+            if (!ride.recurring_id) {
+                if (!confirm('Delete this ride?')) return;
+                doDelete('one');
+                return;
+            }
+            openDeleteScopeDialog(ride, doDelete);
+        });
+
+        async function doDelete(scope) {
             try {
-                await api('DELETE', `/api/rides/${ride.id}`);
+                await api('DELETE', `/api/rides/${ride.id}?scope=${scope}`);
                 closeDialog();
-                toast('Deleted.');
+                toast(scope === 'all' ? 'The whole series was deleted.'
+                    : scope === 'future' ? 'This and all later rides were deleted.'
+                    : 'Deleted.');
                 renderCalendar();
             } catch (err) {
                 dialogError(err.message);
             }
+        }
+    }
+
+    // A repeating ride can be deleted at three scopes
+    function openDeleteScopeDialog(ride, doDelete) {
+        openDialog(`
+            <h2>Delete a repeating ride</h2>
+            <p class="muted">This ride is part of a weekly fixed ride
+               (${esc(WEEKDAYS[isoDow(ride.date) - 1])}s at ${hhmm(ride.start_time)}).
+               Rides that are already invoiced are always kept.</p>
+            <div class="assign-list">
+                <button class="assign-row" data-scope="one">
+                    <span class="assign-name">Just this day</span>
+                    <span class="assign-cur">${esc(ride.date)}</span>
+                </button>
+                <button class="assign-row" data-scope="future">
+                    <span class="assign-name">This day and all later ones</span>
+                    <span class="assign-cur">ends the series here</span>
+                </button>
+                <button class="assign-row" data-scope="all">
+                    <span class="assign-name">The whole series</span>
+                    <span class="assign-cur">past and future</span>
+                </button>
+            </div>
+            <div class="form-error"></div>
+            <div class="form-actions"><button class="secondary" id="ds-cancel">Cancel</button></div>`);
+        document.getElementById('ds-cancel').addEventListener('click', closeDialog);
+        $dialog.querySelectorAll('[data-scope]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const scope = btn.getAttribute('data-scope');
+                const msg = scope === 'all' ? 'Delete every ride in this series (except invoiced ones)?'
+                    : scope === 'future' ? 'Delete this ride and all later ones in the series?'
+                    : 'Delete just this day?';
+                if (!confirm(msg)) return;
+                doDelete(scope);
+            });
         });
     }
 

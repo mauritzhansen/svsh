@@ -76,6 +76,12 @@
         } else {
             riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
         }
+        riderRows += (r.off_riders || []).map((o) => `
+            <div class="rider-row off-rider">
+                <span class="rider-name">${esc(o.name)}</span>
+                <span class="rider-off">${o.frequency === 'biweekly' ? 'every 2nd week' : 'not riding'}${
+                    o.next_date ? ' · next ' + esc(o.next_date) : ''}</span>
+            </div>`).join('');
 
         return `<div class="ride-box pub-box ${r.is_block ? 'blocked' : ''}">
             <div class="ride-top">

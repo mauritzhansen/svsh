@@ -926,6 +926,12 @@ function datesInRange(from, to) {
     return out;
 }
 
+function shiftDays(dateStr, days) {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
 function isoWeekday(dateStr) {
     const dow = new Date(dateStr + 'T00:00:00Z').getUTCDay(); // 0=Sun..6=Sat
     return dow === 0 ? 7 : dow;
@@ -1102,11 +1108,9 @@ async function materializeRecurring(from, to) {
                 const w = weeksBetween(p.biweekly_anchor || t.start_date, date);
                 return w >= 0 && w % 2 === 0;
             });
-            // Templates WITH riders only materialize when someone is due
-            // (biweekly off-weeks create nothing); instructor-held empty
-            // slots (no participants at all) always materialize.
-            if (!dueParts.length && tParts.length) continue;
-            if (!dueParts.length && !tGuides.length) continue;
+            // The slot is always created, even on a week when nobody is due:
+            // the diary keeps the slot and the grid shows who is off (off_riders).
+            if (!tParts.length && !tGuides.length) continue;
             const horseIds = [
                 ...dueParts.map((p) => p.horse_id),
                 ...tGuides.filter((g) => g.mode === 'horse').map((g) => g.horse_id)
@@ -1173,12 +1177,45 @@ async function fetchRides(from, to) {
           WHERE rg.ride_id = ANY($1::bigint[])
           ORDER BY g.is_assistant, g.name`, [ids]);
     const byId = {};
-    rides.forEach((r) => { r.participants = []; r.guides = []; r.invoiced = false; byId[r.id] = r; });
+    rides.forEach((r) => {
+        r.participants = []; r.guides = []; r.off_riders = []; r.invoiced = false;
+        byId[r.id] = r;
+    });
     parts.forEach((p) => {
         byId[p.ride_id].participants.push(p);
         if (p.invoiced) byId[p.ride_id].invoiced = true;
     });
     rideGuides.forEach((g) => byId[g.ride_id].guides.push(g));
+
+    // Riders who belong to the weekly series but aren't riding this week
+    // (every-2nd-week riders on their off week, or taken off for the day).
+    const tplIds = [...new Set(rides.filter((r) => r.recurring_id).map((r) => r.recurring_id))];
+    if (tplIds.length) {
+        const { rows: tplParts } = await pool.query(
+            `SELECT rp.recurring_id, rp.contact_id, rp.frequency, rp.start_date,
+                    c.name AS contact_name, t.end_date AS tpl_end
+               FROM recurring_participants rp
+               JOIN recurring_rides t ON t.id = rp.recurring_id
+               JOIN contacts c ON c.id = rp.contact_id
+              WHERE rp.recurring_id = ANY($1::bigint[])`, [tplIds]);
+        const byTpl = {};
+        tplParts.forEach((p) => { (byTpl[p.recurring_id] = byTpl[p.recurring_id] || []).push(p); });
+        rides.forEach((r) => {
+            if (!r.recurring_id) return;
+            const here = new Set(r.participants.map((p) => String(p.contact_id)));
+            (byTpl[r.recurring_id] || []).forEach((p) => {
+                if (here.has(String(p.contact_id))) return;
+                if (p.start_date && r.date < p.start_date) return;
+                const next = shiftDays(r.date, 7);
+                r.off_riders.push({
+                    contact_id: p.contact_id,
+                    contact_name: p.contact_name,
+                    frequency: p.frequency,
+                    next_date: (!p.tpl_end || next <= p.tpl_end) ? next : null
+                });
+            });
+        });
+    }
     return rides;
 }
 
@@ -1267,28 +1304,177 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
     }
 });
 
-app.delete('/api/rides/:id', requireAuth, async (req, res) => {
+// Turn a one-off ride into a weekly fixed ride, copying its riders,
+// instructors, time, duration, level and type. The ride itself becomes the
+// series' first occurrence.
+app.post('/api/rides/:id/repeat', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
     try {
+        const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [req.params.id]);
+        const ride = rows[0];
+        if (!ride) return res.status(404).json({ error: 'Ride not found.' });
+        if (ride.recurring_id) return res.status(400).json({ error: 'This ride already repeats weekly.' });
+        if (ride.is_block) return res.status(400).json({ error: 'Blocks cannot repeat.' });
+        const { rows: parts } = await pool.query(
+            'SELECT contact_id, horse_id FROM ride_participants WHERE ride_id = $1', [req.params.id]);
+        const { rows: guides } = await pool.query(
+            'SELECT guide_id, mode, horse_id FROM ride_guides WHERE ride_id = $1', [req.params.id]);
+        const endDate = DATE_RE.test((req.body || {}).end_date || '') ? req.body.end_date : null;
+
+        await client.query('BEGIN');
+        const { rows: tpl } = await client.query(
+            `INSERT INTO recurring_rides (weekday, start_time, duration_min, ride_type_id, level,
+                                          start_date, end_date, notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            [isoWeekday(ride.date), ride.start_time, ride.duration_min, ride.ride_type_id,
+             ride.level, ride.date, endDate, ride.notes || '']);
+        // Horses are usually assigned per day, so the template carries riders only
+        const freq = {};
+        (Array.isArray((req.body || {}).participants) ? req.body.participants : []).forEach((p) => {
+            if (p && p.contact_id) freq[String(p.contact_id)] = p.frequency === 'biweekly' ? 'biweekly' : 'weekly';
+        });
+        await insertRecurringChildren(client, tpl[0].id,
+            parts.filter((p) => p.contact_id).map((p) => ({
+                contact_id: p.contact_id,
+                horse_id: null,
+                frequency: freq[String(p.contact_id)] || 'weekly',
+                biweekly_anchor: freq[String(p.contact_id)] === 'biweekly' ? ride.date : null
+            })),
+            guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: null })));
+        await client.query('UPDATE rides SET recurring_id = $2 WHERE id = $1',
+            [req.params.id, tpl[0].id]);
+        await client.query('COMMIT');
+        res.json({ recurring_id: tpl[0].id });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Making the ride repeat');
+    } finally {
+        client.release();
+    }
+});
+
+// Keep the series' rider list in step with an occurrence: adds riders that
+// were added on the day, and updates how often each one rides.
+app.put('/api/rides/:id/repeat-riders', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [req.params.id]);
+        const ride = rows[0];
+        if (!ride) return res.status(404).json({ error: 'Ride not found.' });
+        if (!ride.recurring_id) return res.status(400).json({ error: 'This ride does not repeat.' });
+        const wanted = (Array.isArray((req.body || {}).participants) ? req.body.participants : [])
+            .filter((p) => p && p.contact_id);
+        await client.query('BEGIN');
+        for (const p of wanted) {
+            const frequency = p.frequency === 'biweekly' ? 'biweekly' : 'weekly';
+            const { rowCount } = await client.query(
+                `UPDATE recurring_participants
+                    SET frequency = $3,
+                        biweekly_anchor = CASE WHEN $3 = 'biweekly'
+                            THEN COALESCE(biweekly_anchor, $4::date) ELSE NULL END
+                  WHERE recurring_id = $1 AND contact_id = $2`,
+                [ride.recurring_id, p.contact_id, frequency, ride.date]);
+            if (!rowCount) {
+                await client.query(
+                    `INSERT INTO recurring_participants (recurring_id, contact_id, frequency, biweekly_anchor, start_date)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [ride.recurring_id, p.contact_id, frequency,
+                     frequency === 'biweekly' ? ride.date : null, ride.date]);
+            }
+        }
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Updating the repeat');
+    } finally {
+        client.release();
+    }
+});
+
+// Stop a series from this date on: the occurrence stays as a one-off ride,
+// later occurrences go, and the template ends the day before.
+app.post('/api/rides/:id/stop-repeat', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [req.params.id]);
+        const ride = rows[0];
+        if (!ride) return res.status(404).json({ error: 'Ride not found.' });
+        if (!ride.recurring_id) return res.status(400).json({ error: 'This ride does not repeat.' });
+        await client.query('BEGIN');
+        await client.query(
+            `DELETE FROM rides r
+              WHERE r.recurring_id = $1 AND r.date > $2 AND r.status = 'active'
+                AND NOT EXISTS (SELECT 1 FROM ride_participants rp
+                                JOIN invoice_lines il ON il.participant_id = rp.id
+                               WHERE rp.ride_id = r.id)`,
+            [ride.recurring_id, ride.date]);
+        await client.query('UPDATE recurring_rides SET end_date = $2::date - 1 WHERE id = $1',
+            [ride.recurring_id, ride.date]);
+        await client.query('UPDATE rides SET recurring_id = NULL WHERE id = $1', [req.params.id]);
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Stopping the repeat');
+    } finally {
+        client.release();
+    }
+});
+
+// scope: 'one' (default) | 'future' | 'all'. Invoiced rides are never removed.
+app.delete('/api/rides/:id', requireAuth, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const scope = ['one', 'future', 'all'].includes(req.query.scope) ? req.query.scope : 'one';
         const { rows: existing } = await pool.query(
             `SELECT r.*, EXISTS (SELECT 1 FROM ride_participants rp
                                  JOIN invoice_lines il ON il.participant_id = rp.id
                                 WHERE rp.ride_id = r.id) AS invoiced
                FROM rides r WHERE r.id = $1`, [req.params.id]);
-        if (!existing[0]) return res.status(404).json({ error: 'Ride not found.' });
-        if (existing[0].invoiced) {
+        const ride = existing[0];
+        if (!ride) return res.status(404).json({ error: 'Ride not found.' });
+        if (scope === 'one' && ride.invoiced) {
             return res.status(400).json({ error: 'This ride is already invoiced and cannot be deleted.' });
         }
-        if (existing[0].recurring_id) {
-            // Keep a tombstone so re-materialization doesn't bring it back
-            await pool.query(`UPDATE rides SET status = 'cancelled' WHERE id = $1`, [req.params.id]);
-            await pool.query('DELETE FROM ride_participants WHERE ride_id = $1', [req.params.id]);
-            await pool.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
-        } else {
-            await pool.query('DELETE FROM rides WHERE id = $1', [req.params.id]);
+        if (scope !== 'one' && !ride.recurring_id) {
+            return res.status(400).json({ error: 'This ride does not repeat.' });
         }
+
+        await client.query('BEGIN');
+        if (scope === 'one') {
+            if (ride.recurring_id) {
+                // tombstone so re-materialization doesn't bring it back
+                await client.query(`UPDATE rides SET status = 'cancelled' WHERE id = $1`, [req.params.id]);
+                await client.query('DELETE FROM ride_participants WHERE ride_id = $1', [req.params.id]);
+                await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
+            } else {
+                await client.query('DELETE FROM rides WHERE id = $1', [req.params.id]);
+            }
+        } else {
+            const dateClause = scope === 'future' ? 'AND r.date >= $2' : '';
+            const params = scope === 'future' ? [ride.recurring_id, ride.date] : [ride.recurring_id];
+            await client.query(
+                `DELETE FROM rides r
+                  WHERE r.recurring_id = $1 ${dateClause}
+                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
+                                    JOIN invoice_lines il ON il.participant_id = rp.id
+                                   WHERE rp.ride_id = r.id)`, params);
+            if (scope === 'future') {
+                // keep the series' history, just end it before this date
+                await client.query('UPDATE recurring_rides SET end_date = $2::date - 1 WHERE id = $1',
+                    [ride.recurring_id, ride.date]);
+            } else {
+                await client.query('DELETE FROM recurring_rides WHERE id = $1', [ride.recurring_id]);
+            }
+        }
+        await client.query('COMMIT');
         res.json({ ok: true });
     } catch (err) {
+        await client.query('ROLLBACK');
         handleError(res, err, 'Deleting ride');
+    } finally {
+        client.release();
     }
 });
 
@@ -2066,6 +2252,9 @@ app.get('/api/public/schedule', async (req, res) => {
                         })),
                         horses_only: r.participants.filter((p) => !p.contact_id && p.horse_name)
                             .map((p) => p.horse_name),
+                        off_riders: (r.off_riders || []).map((o) => ({
+                            name: o.contact_name, frequency: o.frequency, next_date: o.next_date
+                        })),
                         staff: r.guides.map((g) => ({
                             name: g.guide_name, assistant: g.is_assistant,
                             color: g.guide_color, mode: g.mode, horse: g.horse_name
