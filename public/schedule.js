@@ -47,30 +47,45 @@
         return `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
     }
 
+    // Same ride-box UI as the office calendar, minus the editing
     function rideHtml(r) {
-        if (r.is_block) {
-            return `<div class="pub-ride blocked">
-                <div class="pub-time">${esc(r.start_time)}</div>
-                <div class="pub-body"><b>Blocked</b> — ${esc(r.horses_only.join(', ') || 'horses unavailable')}</div>
-            </div>`;
-        }
         const color = LEVEL_COLORS[r.level] || '#8a6d4f';
-        const staff = r.staff.map((s) =>
-            `<span class="pub-staff"><span class="guide-dot" style="background:${esc(s.color || '#6a6a66')}"></span>${esc(s.name)}${s.assistant ? ' (assistant)' : ''}${s.mode === 'horse' && s.horse ? ' on ' + esc(s.horse) : MODE[s.mode] || ''}</span>`
-        ).join(' ');
-        const riders = r.riders.length ? r.riders.map((rd) => `
-            <li>
-                <span class="pub-rider">${esc(rd.name)}</span>
-                <span class="pub-horse">${rd.horse ? esc(rd.horse) : '<i>horse not assigned</i>'}</span>
-                ${rd.pickup ? `<span class="pub-pickup">Pick-up: ${esc(rd.pickup)}</span>` : ''}
-            </li>`).join('') : '<li class="muted">No riders on this one yet</li>';
-        return `<div class="pub-ride" style="border-left-color:${color}">
-            <div class="pub-time">${esc(r.start_time)}<span class="pub-end">–${esc(endTime(r.start_time, r.duration_min))}</span></div>
-            <div class="pub-body">
-                ${r.level ? `<span class="pub-level" style="background:color-mix(in srgb, ${color} 20%, white);color:${color}">${LEVEL_LABELS[r.level]}</span>` : ''}
-                ${staff ? `<div class="pub-staffline">${staff}</div>` : ''}
-                <ul class="pub-riders">${riders}</ul>
-                ${r.horses_only.length ? `<div class="pub-extra">Horses: ${esc(r.horses_only.join(', '))}</div>` : ''}
+        const staff = r.staff.map((s) => `
+            <span class="staff-item">
+                <span class="staff-pill" style="background:${esc(s.color || '#4a4a46')}">
+                    ${esc(s.name)}${s.assistant ? ' (ass)' : ''}${MODE[s.mode] || ''}
+                </span>
+                ${s.mode === 'horse' && s.horse ? `<span class="rider-horse has">${esc(s.horse)}</span>` : ''}
+            </span>`).join('');
+
+        let riderRows;
+        if (r.is_block) {
+            riderRows = `<div class="rider-row"><span class="rider-name">🚫 Blocked</span>
+                <span class="rider-horse has">${esc(r.horses_only.join(', ') || 'horses unavailable')}</span></div>`;
+        } else if (r.riders.length) {
+            riderRows = r.riders.map((rd) => `
+                <div class="rider-row">
+                    <span class="rider-name">${esc(rd.name)}</span>
+                    ${rd.horse ? `<span class="rider-horse has">${esc(rd.horse)}</span>`
+                        : '<span class="rider-horse none">no horse yet</span>'}
+                    ${rd.pickup ? `<span class="rider-pickup">pick-up: ${esc(rd.pickup)}</span>` : ''}
+                </div>`).join('');
+        } else if (r.horses_only.length) {
+            riderRows = `<div class="rider-row"><span class="rider-name muted">Horses only</span>
+                <span class="rider-horse has">${esc(r.horses_only.join(', '))}</span></div>`;
+        } else {
+            riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
+        }
+
+        return `<div class="ride-box pub-box ${r.is_block ? 'blocked' : ''}">
+            <div class="ride-top" style="background:${color}">
+                <span class="ride-time">${esc(r.start_time)}–${esc(endTime(r.start_time, r.duration_min))}</span>
+                <span class="ride-dur">${r.duration_min} min</span>
+                <span class="ride-level${r.level ? '' : ' none'}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
+            </div>
+            <div class="ride-cols">
+                <div class="ride-riders-col">${riderRows}</div>
+                <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
             </div>
         </div>`;
     }

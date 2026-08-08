@@ -916,3 +916,15 @@ body.page-calendar .fab-row { flex: 0 0 auto; }
 .cal-nav .daynav { padding: 7px 12px; }
 table.ridegrid th.ridecol { vertical-align: middle; }
 .cal-actions { display: flex; width: 100%; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* Public schedule: same ride box, sized for a phone instead of a table cell */
+.pub-box { margin-bottom: 10px; }
+.pub-box .ride-top { cursor: default; }
+.pub-box .ride-riders-col { flex: 1 1 60%; }
+.pub-box .ride-staff-col { flex: 0 0 38%; }
+.pub-box .rider-row { font-size: 14.5px; padding: 3px 0; }
+.pub-box .rider-name { font-size: 15px; }
+@media (max-width: 480px) {
+    .pub-box .ride-cols { flex-direction: column; gap: 6px; }
+    .pub-box .ride-staff-col { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 6px; flex: 1 1 auto; }
+}
