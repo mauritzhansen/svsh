@@ -265,5 +265,5 @@ INSERT INTO settings (key, value) VALUES
     ('business_address', ''),
     ('currency', 'R'),
     ('invoice_footer', 'Thank you for riding with us!'),
-    ('day_start', '08:00'),
-    ('day_end', '17:00');
+    ('day_start', '09:00'),
+    ('day_end', '19:00');

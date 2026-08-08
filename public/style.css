@@ -646,8 +646,8 @@ table.ridegrid th.ridecol, table.ridegrid td.ridecol {
     position: sticky;
     left: 0;
     z-index: 2;
-    min-width: 250px;
-    width: 250px;
+    min-width: 330px;
+    width: 330px;
     background: var(--card);
     text-align: left;
     vertical-align: middle;
@@ -656,11 +656,14 @@ table.ridegrid th.ridecol { z-index: 4; background: var(--green-light); }
 table.ridegrid th.horsecol {
     min-width: 26px;
     width: 26px;
-    padding: 6px 1px 4px;
+    padding: 4px 1px 6px;
     vertical-align: bottom;
     text-align: center;
 }
+/* block button pinned to the top, name hanging at the bottom */
 .horsecol-inner { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 4px; font-size: 11px; }
+table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
 .horsecol-name {
     writing-mode: vertical-rl;
     transform: rotate(180deg);
@@ -680,25 +683,71 @@ td.horse-cell {
 td.horse-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }
 td.horse-cell.used:hover { box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.45); }
 .ride-box {
-    display: block;
-    width: 100%;
-    text-align: left;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 7px 9px;
-    background: var(--bg);
+    border-radius: 9px;
+    padding: 8px 10px;
+    background: var(--card);
+}
+.ride-box.blocked { background: var(--blocked-bg); }
+.ride-box.invoiced { opacity: 0.75; }
+.ride-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ride-open {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    background: none;
+    border: none;
+    padding: 0;
     color: var(--text);
-    font-weight: 500;
     cursor: pointer;
 }
-.ride-box > span { display: block; }
-.ride-time { font-size: 12px; font-weight: 700; opacity: 0.85; }
-.ride-dur { font-weight: 400; opacity: 0.75; }
-.ride-riders { font-size: 14px; font-weight: 700; line-height: 1.25; margin: 1px 0; }
-.ride-meta { font-size: 11.5px; opacity: 0.85; line-height: 1.35; }
-.ride-unassigned { font-size: 11.5px; font-weight: 700; color: var(--danger); margin-top: 2px; }
-.ride-box.blocked { background: var(--blocked-bg); color: #666; }
-.ride-box.invoiced { opacity: 0.75; }
+.ride-open:hover .ride-time { text-decoration: underline; }
+.ride-time { font-size: 14px; font-weight: 800; }
+.ride-dur { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.level-pill {
+    padding: 2px 9px;
+    border: 1px solid;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.ride-cols { display: flex; gap: 10px; margin-top: 5px; align-items: flex-start; }
+.ride-riders-col { flex: 1 1 62%; min-width: 0; }
+.ride-staff-col { flex: 0 0 34%; display: flex; flex-wrap: wrap; gap: 3px; align-content: flex-start; }
+.staff-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+}
+.rider-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 0;
+    font-size: 13.5px;
+}
+.rider-name { font-weight: 600; min-width: 0; }
+.rider-pickup { font-size: 11px; font-weight: 700; color: #9a6a00; white-space: nowrap; }
+.rider-horse {
+    background: none;
+    border: none;
+    padding: 1px 6px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.rider-horse.has { color: var(--green-dark); background: var(--green-light); }
+.rider-horse.none { color: var(--danger); background: #fbeae7; font-style: italic; }
+.rider-horse:hover { box-shadow: inset 0 0 0 1px currentColor; }
+.ride-flags { font-size: 11px; font-weight: 700; color: var(--muted); margin-top: 4px; }
 td.empty-ride { padding: 16px; color: var(--muted); font-size: 14px; }
 
 /* ---------- Public instructor schedule ---------- */
@@ -737,3 +786,48 @@ td.empty-ride { padding: 16px; color: var(--muted); font-size: 14px; }
 .pub-horse { color: var(--green-dark); margin-left: 8px; }
 .pub-pickup { display: block; font-size: 13px; font-weight: 600; color: #9a6a00; }
 .pub-extra { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+/* ---------- Horse assign picker ---------- */
+.assign-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.assign-x { padding: 8px 10px; }
+.assign-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.assign-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 12px 14px;
+    font-weight: 600;
+}
+.assign-row:hover { background: var(--green-light); }
+.assign-row.has { background: var(--green-light); border-color: var(--green); }
+.assign-name { font-size: 15.5px; }
+.assign-cur { font-size: 12.5px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+
+
+/* Empty hour rows: tappable like a normal calendar */
+.hour-box {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 7px 9px;
+    color: var(--muted);
+    font-weight: 600;
+    cursor: pointer;
+}
+.hour-box:hover { background: var(--green-light); border-radius: 8px; color: var(--green-dark); }
+.hour-label { font-size: 13px; font-weight: 700; }
+.hour-add { font-size: 12px; opacity: 0; }
+.hour-box:hover .hour-add { opacity: 1; }
+tr.hour-row td { background: #fcfcfa; }
+td.horse-cell.free-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }

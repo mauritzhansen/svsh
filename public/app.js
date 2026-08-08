@@ -505,7 +505,7 @@
             </div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
-            <p class="muted" style="margin:8px 2px">Tap an <b>empty cell</b> to plan a ride on that horse at that time, or tap a ride to change it. Colours show the ride's level; "(guide)" marks the horse the guide rides.</p>
+            <p class="muted" style="margin:8px 2px">Tap an <b>empty hour</b> to add a ride, or a cell under a horse to add it with that horse. Tap a ride to change it, or a coloured cell to move the horse to someone else.</p>
             <div class="calendar-legend">
                 <span class="legend-pill" style="background:var(--open-bg);border-color:#9fcba2;color:var(--open)">Open seat</span>
                 ${LEVELS.map((l) => `<span class="legend-pill" style="background:color-mix(in srgb, ${LEVEL_COLORS[l]} 26%, white);border-color:color-mix(in srgb, ${LEVEL_COLORS[l]} 60%, white);color:${LEVEL_COLORS[l]}">${LEVEL_LABELS[l]}</span>`).join('')}
@@ -643,63 +643,93 @@
             const blocked = dayBlocks[h.id];
             html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" draggable="true"
                         data-horse-col="${h.id}" title="Drag to reorder · ${esc(h.name)}">
-                <div class="horsecol-inner">
-                    <span class="horse-dot" style="background:${esc(h.color)}"></span>
-                    <span class="horsecol-name">${esc(h.name)}</span>
-                </div>
                 <button class="horse-block-btn" data-block-horse="${h.id}"
                         title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">${blocked ? '🔓' : '🚫'}</button>
+                <span class="horsecol-name">${esc(h.name)}</span>
             </th>`;
         });
         html += '</tr>';
 
-        if (!dayRides.length) {
-            html += `<tr><td class="ridecol empty-ride" colspan="${horses.length + 1}">
-                No rides on this day yet — tap <b>＋ New ride</b> below.</td></tr>`;
-        }
-
+        // One row per hour of the working day: rides sit in their hour, empty
+        // hours stay tappable so a day can be planned like a normal calendar.
+        const startH = parseInt((state.settings.day_start || '08:00').slice(0, 2), 10);
+        const endH = parseInt((state.settings.day_end || '17:00').slice(0, 2), 10);
+        const hours = [];
+        for (let h = startH; h <= endH; h++) hours.push(pad2(h));
         dayRides.forEach((r) => {
+            const hh = hhmm(r.start_time).slice(0, 2);
+            if (!hours.includes(hh)) hours.push(hh);
+        });
+        hours.sort();
+
+        hours.forEach((hour) => {
+            const inHour = dayRides.filter((r) => hhmm(r.start_time).slice(0, 2) === hour);
+            if (inHour.length) { inHour.forEach(renderRideRow); return; }
+            html += `<tr class="hour-row"><td class="ridecol">
+                <button class="hour-box" data-new-time="${hour}:00">
+                    <span class="hour-label">${hour}:00</span>
+                    <span class="hour-add">＋ ride</span>
+                </button></td>`;
+            horses.forEach((h) => {
+                if (dayBlocks[h.id]) { html += '<td class="blocked-col"></td>'; return; }
+                html += `<td class="horse-cell free-cell" data-new-time="${hour}:00" data-new-horse="${h.id}"
+                            title="New ride at ${hour}:00 on ${esc(h.name)}"></td>`;
+            });
+            html += '</tr>';
+        });
+
+        function renderRideRow(r) {
             const color = rideColor(r);
             const start = hhmm(r.start_time);
             const endMin = toMin(start) + (r.duration_min || 60);
             const end = `${pad2(Math.floor(endMin / 60) % 24)}:${pad2(endMin % 60)}`;
             const riders = r.participants.filter((p) => p.contact_id);
-            const noHorse = riders.filter((p) => !p.horse_id).length;
-            const pickups = riders.filter((p) => p.needs_collection).length;
-            const guides = r.guides.map((g) =>
-                `${guideChip(g)}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}`).join(', ');
+            const horsesOnly = r.participants.filter((p) => !p.contact_id && p.horse_name);
 
-            let title, cls;
+            const staff = r.guides.map((g) => `
+                <span class="staff-pill" style="background:${esc(g.guide_color || '#4a4a46')}">
+                    ${esc(shortName(g.guide_name))}${g.is_assistant ? ' (ass)' : ''}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}${g.mode === 'horse' && g.horse_name ? ' · ' + esc(g.horse_name) : ''}
+                </span>`).join('');
+
+            let riderRows;
             if (r.is_block) {
-                title = '🚫 Blocked';
-                cls = 'blocked';
+                riderRows = `<div class="rider-row"><span class="rider-name">🚫 Blocked</span>
+                    <span class="rider-horse">${esc(horsesOnly.map((p) => p.horse_name).join(', '))}</span></div>`;
             } else if (riders.length) {
-                title = riders.map((p) => shortName(p.contact_name)).join(', ');
-                cls = 'booked';
-            } else if (r.guides.length) {
-                title = '👤 Instructor only';
-                cls = 'booked';
+                riderRows = riders.map((p) => `
+                    <div class="rider-row">
+                        <span class="rider-name">${esc(p.contact_name)}${p.needs_collection
+                            ? ` <span class="rider-pickup">pick-up${p.collection_teacher ? ': ' + esc(p.collection_teacher) : ''}${p.collection_class ? ', ' + esc(p.collection_class) : ''}</span>` : ''}</span>
+                        ${p.horse_name
+                            ? `<button class="rider-horse has" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">${esc(p.horse_name)}</button>`
+                            : `<button class="rider-horse none" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">no horse yet</button>`}
+                    </div>`).join('');
+            } else if (horsesOnly.length) {
+                riderRows = `<div class="rider-row"><span class="rider-name muted">Horses only</span>
+                    <span class="rider-horse">${esc(horsesOnly.map((p) => p.horse_name).join(', '))}</span></div>`;
             } else {
-                title = 'Open ride';
-                cls = 'open';
+                riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
             }
 
-            const bits = [];
-            if (!r.is_block && r.level) bits.push(esc(LEVEL_LABELS[r.level]));
-            if (guides) bits.push(guides);
-            if (pickups) bits.push(`<b>${pickups} pick-up${pickups === 1 ? '' : 's'}</b>`);
-            if (!r.is_block && !r.recurring_id) bits.push('<b>once-off</b>');
-            if (riders.some(isExtraSeat)) bits.push('<b>extra — billed monthly</b>');
+            const flags = [];
+            if (!r.is_block && !r.recurring_id) flags.push('once-off');
+            if (riders.some(isExtraSeat)) flags.push('extra — billed monthly');
 
-            const style = r.is_block ? ''
-                : `background:color-mix(in srgb, ${color} 20%, white);border-left:5px solid ${color};color:${color}`;
             html += `<tr class="ride-row"><td class="ridecol">
-                <button class="ride-box ${cls} ${r.invoiced ? 'invoiced' : ''}" style="${style}" data-ride-id="${r.id}">
-                    <span class="ride-time">${esc(start)}–${esc(end)} <span class="ride-dur">${r.duration_min} min</span></span>
-                    <span class="ride-riders">${esc(title)}</span>
-                    ${bits.length ? `<span class="ride-meta">${bits.join(' · ')}</span>` : ''}
-                    ${noHorse ? `<span class="ride-unassigned">⚠ ${noHorse} without a horse</span>` : ''}
-                </button></td>`;
+                <div class="ride-box ${r.is_block ? 'blocked' : ''} ${r.invoiced ? 'invoiced' : ''}">
+                    <div class="ride-top">
+                        <button class="ride-open" data-ride-id="${r.id}">
+                            <span class="ride-time">${esc(start)}–${esc(end)}</span>
+                            <span class="ride-dur">${r.duration_min} min</span>
+                        </button>
+                        ${r.level ? `<span class="level-pill" style="background:color-mix(in srgb, ${color} 22%, white);color:${color};border-color:${color}">${LEVEL_LABELS[r.level]}</span>` : ''}
+                    </div>
+                    <div class="ride-cols">
+                        <div class="ride-riders-col">${riderRows}</div>
+                        <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
+                    </div>
+                    ${flags.length ? `<div class="ride-flags">${esc(flags.join(' · '))}</div>` : ''}
+                </div></td>`;
 
             horses.forEach((h) => {
                 if (dayBlocks[h.id]) { html += '<td class="blocked-col"></td>'; return; }
@@ -714,11 +744,28 @@
                             title="${used ? esc(h.name) + (label ? ' — ' + esc(label) : '') : 'Tap to put ' + esc(h.name) + ' on this ride'}"></td>`;
             });
             html += '</tr>';
-        });
+        }
         html += '</table></div>';
         grid.classList.remove('muted');
         grid.innerHTML = html;
 
+        grid.querySelectorAll('[data-new-time]').forEach((el) => {
+            el.addEventListener('click', () => openRideDialog(null, {
+                date,
+                time: el.getAttribute('data-new-time'),
+                horseId: el.getAttribute('data-new-horse') || null,
+                dayRides: rides
+            }));
+        });
+        grid.querySelectorAll('[data-seat-contact]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const ride = rides.find((x) => String(x.id) === btn.getAttribute('data-seat-ride'));
+                const seat = ride && ride.participants.find((p) =>
+                    String(p.contact_id) === btn.getAttribute('data-seat-contact'));
+                if (ride && seat) openRiderHorseDialog(ride, seat, date, rides);
+            });
+        });
         grid.querySelectorAll('[data-ride-id]').forEach((btn) => {
             btn.addEventListener('click', () => {
                 const ride = rides.find((x) => String(x.id) === btn.getAttribute('data-ride-id'));
@@ -726,48 +773,12 @@
             });
         });
 
-        // Tap a horse cell: assign that horse to the ride's first horseless
-        // rider, or take it off again.
+        // Tap a horse cell: pick which rider (or instructor) gets that horse
         grid.querySelectorAll('.horse-cell').forEach((td) => {
-            td.addEventListener('click', async () => {
+            td.addEventListener('click', () => {
                 const ride = rides.find((x) => String(x.id) === td.getAttribute('data-ride'));
-                const horseId = td.getAttribute('data-horse');
-                if (!ride || ride.invoiced) return;
-                const parts = ride.participants.map((p) => ({
-                    horse_id: p.horse_id, contact_id: p.contact_id
-                }));
-                const guides = ride.guides.map((g) => ({
-                    guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id
-                }));
-                const seat = parts.find((p) => String(p.horse_id) === String(horseId));
-                const mount = guides.find((g) => String(g.horse_id) === String(horseId));
-                if (seat) {
-                    if (seat.contact_id) seat.horse_id = null;   // free the horse, keep the rider
-                    else parts.splice(parts.indexOf(seat), 1);   // horse-only seat: drop it
-                } else if (mount) {
-                    mount.horse_id = null;
-                    mount.mode = 'foot';
-                } else {
-                    const free = parts.find((p) => p.contact_id && !p.horse_id);
-                    if (free) free.horse_id = horseId;
-                    else parts.push({ horse_id: horseId, contact_id: null });
-                }
-                try {
-                    await api('PUT', `/api/rides/${ride.id}`, {
-                        date: ride.date,
-                        start_time: hhmm(ride.start_time),
-                        duration_min: ride.duration_min,
-                        ride_type_id: ride.ride_type_id,
-                        is_block: ride.is_block,
-                        level: ride.level,
-                        notes: ride.notes || '',
-                        participants: parts,
-                        guides
-                    });
-                    renderCalendar();
-                } catch (err) {
-                    toast(err.message, true);
-                }
+                const horse = horses.find((h) => String(h.id) === td.getAttribute('data-horse'));
+                if (ride && horse) openHorseAssignDialog(ride, horse, date, rides);
             });
         });
 
@@ -817,6 +828,194 @@
                 }
             });
         });
+    }
+
+    // Reverse picker: which horse does this rider get?
+    function openRiderHorseDialog(ride, seat, date, dayRides) {
+        if (ride.invoiced) {
+            toast('This ride is already invoiced and cannot be changed.', true);
+            return;
+        }
+        const busy = busyAt(dayRides, hhmm(ride.start_time), ride.id, ride.duration_min || 60).horses;
+        // Horses already used inside this ride are taken too
+        ride.participants.forEach((p) => {
+            if (p.horse_id && String(p.contact_id) !== String(seat.contact_id)) busy.add(String(p.horse_id));
+        });
+        ride.guides.forEach((g) => { if (g.horse_id) busy.add(String(g.horse_id)); });
+        const prefs = prefsFor(seat.contact_id);
+        const rank = (h) => prefs.preferred.has(String(h.id)) ? 0 : prefs.caution.has(String(h.id)) ? 2 : 1;
+        const options = activeHorses()
+            .filter((h) => !busy.has(String(h.id)) || String(h.id) === String(seat.horse_id))
+            .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+
+        openDialog(`
+            <div class="assign-head">
+                <div>
+                    <h2 style="margin:0">${esc(seat.contact_name)}</h2>
+                    <div class="muted">${hhmm(ride.start_time)} · ${ride.duration_min} min${ride.level ? ' · ' + LEVEL_LABELS[ride.level] : ''}</div>
+                </div>
+                <button class="secondary assign-x" id="rh-close">${ICON_X}</button>
+            </div>
+            <p class="muted" style="margin:10px 0 4px">Which horse?</p>
+            <div class="assign-list">
+                ${options.length ? options.map((h) => {
+                    const mark = prefs.preferred.has(String(h.id)) ? '⭐ '
+                        : prefs.caution.has(String(h.id)) ? '⚠ ' : '';
+                    const own = String(h.owner_contact_id) === String(seat.contact_id) ? '🏠 ' : '';
+                    const has = String(h.id) === String(seat.horse_id);
+                    return `<button class="assign-row ${has ? 'has' : ''}" data-pick-horse="${h.id}">
+                        <span class="assign-name">${own}${mark}${esc(h.name)}</span>
+                        <span class="assign-cur">${has ? '✓ assigned' : ''}${prefs.caution.has(String(h.id))
+                            ? esc(prefs.caution.get(String(h.id)) || 'caution') : ''}</span>
+                    </button>`;
+                }).join('') : '<div class="muted">Every horse is busy at this time.</div>'}
+            </div>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                ${seat.horse_id ? '<button class="danger small" id="rh-clear">Remove horse</button>' : ''}
+            </div>`);
+        document.getElementById('rh-close').addEventListener('click', closeDialog);
+
+        const save = async (horseId) => {
+            const parts = ride.participants.map((p) => ({
+                horse_id: String(p.contact_id) === String(seat.contact_id) ? horseId : p.horse_id,
+                contact_id: p.contact_id
+            }));
+            try {
+                await api('PUT', `/api/rides/${ride.id}`, {
+                    date: ride.date,
+                    start_time: hhmm(ride.start_time),
+                    duration_min: ride.duration_min,
+                    ride_type_id: ride.ride_type_id,
+                    is_block: ride.is_block,
+                    level: ride.level,
+                    notes: ride.notes || '',
+                    participants: parts.filter((p) => p.contact_id || p.horse_id),
+                    guides: ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
+                });
+                closeDialog();
+                renderCalendar();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        };
+        $dialog.querySelectorAll('[data-pick-horse]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const hid = btn.getAttribute('data-pick-horse');
+                save(String(hid) === String(seat.horse_id) ? null : hid);
+            });
+        });
+        const clearBtn = document.getElementById('rh-clear');
+        if (clearBtn) clearBtn.addEventListener('click', () => save(null));
+    }
+
+    // Small picker: who on this ride gets this horse?
+    function openHorseAssignDialog(ride, horse, date, dayRides) {
+        if (ride.invoiced) {
+            toast('This ride is already invoiced and cannot be changed.', true);
+            return;
+        }
+        const color = rideColor(ride);
+        const riders = ride.participants.filter((p) => p.contact_id);
+        const current = ride.participants.find((p) => String(p.horse_id) === String(horse.id));
+        const mount = ride.guides.find((g) => g.mode === 'horse' && String(g.horse_id) === String(horse.id));
+        const holder = mount ? `${mount.guide_name} (instructor)`
+            : current ? (current.contact_name || 'an open seat') : null;
+
+        const rows = riders.map((p) => {
+            const has = String(p.horse_id) === String(horse.id);
+            const prefs = prefsFor(p.contact_id);
+            const mark = prefs.preferred.has(String(horse.id)) ? '⭐ '
+                : prefs.caution.has(String(horse.id)) ? '⚠ ' : '';
+            return `<button class="assign-row ${has ? 'has' : ''}" data-assign-contact="${p.contact_id}">
+                <span class="assign-name">${mark}${esc(p.contact_name)}</span>
+                <span class="assign-cur">${has ? '✓ on ' + esc(horse.name)
+                    : p.horse_name ? 'on ' + esc(p.horse_name) : 'no horse yet'}</span>
+            </button>`;
+        }).join('');
+        const guideRows = ride.guides.map((g) => {
+            const has = g.mode === 'horse' && String(g.horse_id) === String(horse.id);
+            return `<button class="assign-row ${has ? 'has' : ''}" data-assign-guide="${g.guide_id}">
+                <span class="assign-name">${guideDot(g)}${esc(g.guide_name)} <span class="muted">(instructor)</span></span>
+                <span class="assign-cur">${has ? '✓ on ' + esc(horse.name)
+                    : g.mode === 'horse' && g.horse_name ? 'on ' + esc(g.horse_name) : esc(g.mode)}</span>
+            </button>`;
+        }).join('');
+
+        openDialog(`
+            <div class="assign-head">
+                <div>
+                    <h2 style="margin:0"><span class="horse-dot" style="background:${esc(horse.color)};width:13px;height:13px"></span>${esc(horse.name)}</h2>
+                    <div class="muted">${hhmm(ride.start_time)} · ${ride.duration_min} min${ride.level ? ' · ' + LEVEL_LABELS[ride.level] : ''}</div>
+                </div>
+                <button class="secondary assign-x" id="as-close">${ICON_X}</button>
+            </div>
+            ${holder ? `<p class="muted" style="margin:10px 0 4px">${esc(horse.name)} is on <b>${esc(holder)}</b>. Pick someone else to move the horse, or remove it below.</p>`
+                : '<p class="muted" style="margin:10px 0 4px">Who rides this horse?</p>'}
+            <div class="assign-list">${rows || '<div class="muted">No riders on this ride.</div>'}${guideRows}</div>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                ${holder ? `<button class="danger small" id="as-clear">Take ${esc(horse.name)} off this ride</button>` : ''}
+            </div>`);
+        document.getElementById('as-close').addEventListener('click', closeDialog);
+
+        const save = async (mutate) => {
+            const parts = ride.participants.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id }));
+            const guides = ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }));
+            mutate(parts, guides);
+            try {
+                await api('PUT', `/api/rides/${ride.id}`, {
+                    date: ride.date,
+                    start_time: hhmm(ride.start_time),
+                    duration_min: ride.duration_min,
+                    ride_type_id: ride.ride_type_id,
+                    is_block: ride.is_block,
+                    level: ride.level,
+                    notes: ride.notes || '',
+                    participants: parts.filter((p) => p.contact_id || p.horse_id),
+                    guides
+                });
+                closeDialog();
+                renderCalendar();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        };
+        // Whoever had the horse loses it first, so one tap always just works
+        const freeHorse = (parts, guides) => {
+            parts.forEach((p) => { if (String(p.horse_id) === String(horse.id)) p.horse_id = null; });
+            guides.forEach((g) => {
+                if (String(g.horse_id) === String(horse.id)) { g.horse_id = null; g.mode = 'foot'; }
+            });
+        };
+        $dialog.querySelectorAll('[data-assign-contact]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const cid = btn.getAttribute('data-assign-contact');
+                save((parts, guides) => {
+                    const already = parts.find((p) => String(p.contact_id) === String(cid) &&
+                        String(p.horse_id) === String(horse.id));
+                    freeHorse(parts, guides);
+                    if (already) return; // tapping the current rider removes the horse
+                    const seat = parts.find((p) => String(p.contact_id) === String(cid));
+                    if (seat) seat.horse_id = horse.id;
+                });
+            });
+        });
+        $dialog.querySelectorAll('[data-assign-guide]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const gid = btn.getAttribute('data-assign-guide');
+                save((parts, guides) => {
+                    const g = guides.find((x) => String(x.guide_id) === String(gid));
+                    const already = g && g.mode === 'horse' && String(g.horse_id) === String(horse.id);
+                    freeHorse(parts, guides);
+                    if (already || !g) return;
+                    g.mode = 'horse';
+                    g.horse_id = horse.id;
+                });
+            });
+        });
+        const clearBtn = document.getElementById('as-clear');
+        if (clearBtn) clearBtn.addEventListener('click', () => save(freeHorse));
     }
 
     // ---------- Block a horse for a whole day ----------
