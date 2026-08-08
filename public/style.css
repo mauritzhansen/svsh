@@ -627,9 +627,9 @@ table.ridegrid th.ridecol { z-index: 6; background: var(--green-light); }
 table.ridegrid th.horsecol {
     position: sticky;
     top: 0;
-    min-width: 46px;
-    width: 46px;
-    max-width: 46px;
+    min-width: 52px;
+    width: 52px;
+    max-width: 52px;
     padding: 3px 1px 6px;
     text-align: center;
     overflow: hidden;
@@ -642,18 +642,17 @@ table.ridegrid th.horsecol .horsecol-stack {
     align-items: flex-end;
     justify-content: center;
     gap: 1px;
-    min-height: 112px;
+    min-height: 124px;
 }
 .horse-grip {
     display: block;
-    flex: 0 0 auto;
     width: 100%;
     background: none;
     border: none;
-    padding: 1px 0 0;
-    margin: 0 0 1px;
-    font-size: 17px;
-    line-height: 1;
+    padding: 2px 0 0;
+    margin: 0 0 3px;
+    font-size: 24px;
+    line-height: 0.85;
     letter-spacing: -1px;
     color: var(--muted);
     opacity: 0.5;
@@ -666,7 +665,7 @@ table.ridegrid th.horsecol .horsecol-stack {
 .horsecol-use {
     writing-mode: vertical-rl;
     transform: rotate(180deg);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
 }
@@ -676,22 +675,31 @@ table.ridegrid th.horsecol .horsecol-stack {
 table.ridegrid { table-layout: auto; }
 /* block button pinned to the top, name hanging at the bottom */
 .horsecol-inner { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-table.ridegrid th.horsecol .horse-block-btn { display: block; flex: 0 0 auto; margin: 0 auto 4px; padding: 0; font-size: 12px; opacity: 0.5; }
+table.ridegrid th.horsecol .horse-block-btn {
+    display: block;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 0;
+    font-size: 19px;
+    line-height: 1;
+    text-align: center;
+    opacity: 0.5;
+}
 table.ridegrid th.horsecol .horse-block-btn:hover { opacity: 1; }
 table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
 .horsecol-name {
     writing-mode: vertical-rl;
     transform: rotate(180deg);
-    font-size: 11.5px;
+    font-size: 14px;
     font-weight: 700;
     letter-spacing: 0;
     white-space: nowrap;
 }
 table.ridegrid th.horsecol .horse-block-btn { margin: 2px 0 0; font-size: 11px; }
 table.ridegrid td.horse-cell {
-    min-width: 46px;
-    width: 46px;
-    max-width: 46px;
+    min-width: 52px;
+    width: 52px;
+    max-width: 52px;
     padding: 2px;
     cursor: pointer;
     background: #fbfbf8;
