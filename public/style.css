@@ -631,12 +631,23 @@ table.ridegrid th.horsecol {
     width: 46px;
     max-width: 46px;
     padding: 3px 1px 6px;
-    vertical-align: bottom;
     text-align: center;
     overflow: hidden;
+    /* flex column: tools pinned at the top, name/usage hanging at the bottom */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+table.ridegrid th.horsecol .horsecol-stack {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
 }
 .horse-grip {
     display: block;
+    flex: 0 0 auto;
     width: 100%;
     background: none;
     border: none;
@@ -653,7 +664,6 @@ table.ridegrid th.horsecol {
 .horse-grip:active { cursor: grabbing; }
 .horsecol:hover .horse-grip { opacity: 1; color: var(--green-dark); }
 /* name + usage, both rotated, side by side */
-.horsecol-stack { display: flex; justify-content: center; gap: 1px; }
 .horsecol-use {
     writing-mode: vertical-rl;
     transform: rotate(180deg);
@@ -667,7 +677,7 @@ table.ridegrid th.horsecol {
 table.ridegrid { table-layout: auto; }
 /* block button pinned to the top, name hanging at the bottom */
 .horsecol-inner { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 3px; padding: 0; font-size: 12px; opacity: 0.5; }
+table.ridegrid th.horsecol .horse-block-btn { display: block; flex: 0 0 auto; margin: 0 auto 4px; padding: 0; font-size: 12px; opacity: 0.5; }
 table.ridegrid th.horsecol .horse-block-btn:hover { opacity: 1; }
 table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
 .horsecol-name {
