@@ -895,13 +895,18 @@ body.page-calendar #view {
     height: calc(100vh - 44px - 58px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     padding-bottom: 6px;
 }
+/* content-sized, capped to the viewport — no empty space on quiet days */
 body.page-calendar #cal-grid {
-    flex: 1 1 auto;
-    min-height: 160px;
+    flex: 0 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
 }
-body.page-calendar .calendar-scroller { flex: 1 1 auto; max-height: none; }
+body.page-calendar .calendar-scroller {
+    flex: 0 1 auto;
+    max-height: calc(100vh - 44px - 58px - 24px
+        - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+}
 body.page-calendar .day-header,
 body.page-calendar #credit-bar,
 body.page-calendar .calendar-legend,
@@ -916,8 +921,7 @@ body.page-calendar .fab-row { flex: 0 0 auto; }
 .staff-item { display: inline-flex; align-items: center; gap: 3px; }
 
 /* Date controls inside the grid's top-left cell */
-.cal-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cal-nav { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; }
 .cal-nav .daynav { padding: 7px 12px; }
-.cal-longdate { margin-top: 6px; font-size: 13.5px; font-weight: 700; color: var(--green-dark); }
 table.ridegrid th.ridecol { vertical-align: middle; }
-.cal-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.cal-actions { display: flex; width: 100%; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }

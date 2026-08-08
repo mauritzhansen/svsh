@@ -565,16 +565,13 @@
 
         const load = horseDayLoad(rides);
         let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
-        const shortDay = new Date(date + 'T00:00:00').toLocaleDateString('en-GB',
-            { weekday: 'short', day: 'numeric', month: 'short' });
         html += `<tr><th class="ridecol">
             <div class="cal-nav">
                 <button class="secondary daynav" id="cal-prev">‹</button>
-                <button class="secondary" id="cal-date-btn">📅 ${esc(shortDay)}</button>
-                <button class="secondary daynav" id="cal-today">Today</button>
+                <button class="secondary" id="cal-date-btn">📅 ${esc(fmtDate(date))}</button>
                 <button class="secondary daynav" id="cal-next">›</button>
+                <button class="secondary daynav" id="cal-today">Today</button>
             </div>
-            <div class="cal-longdate">${esc(fmtDate(date))}</div>
             <div class="cal-actions">
                 <button class="small" id="cal-add">＋ New ride</button>
                 <a class="btn secondary small" href="#/fixed">🔁 Fixed rides</a>
