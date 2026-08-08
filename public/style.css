@@ -635,26 +635,23 @@ table.ridegrid th.horsecol {
     text-align: center;
     overflow: hidden;
 }
-.horsecol-tools {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 1px;
-    margin-bottom: 1px;
-}
-.horse-move, .horse-grip {
+.horse-grip {
+    display: block;
+    width: 100%;
     background: none;
     border: none;
-    padding: 0 1px;
-    font-size: 12px;
+    padding: 1px 0 0;
+    margin: 0 0 1px;
+    font-size: 17px;
     line-height: 1;
+    letter-spacing: -1px;
     color: var(--muted);
-    opacity: 0.45;
-    cursor: pointer;
+    opacity: 0.5;
+    cursor: grab;
+    text-align: center;
 }
-.horse-grip { cursor: grab; font-size: 10px; }
-.horsecol:hover .horse-move, .horsecol:hover .horse-grip { opacity: 1; }
-.horse-move:hover { color: var(--green); }
+.horse-grip:active { cursor: grabbing; }
+.horsecol:hover .horse-grip { opacity: 1; color: var(--green-dark); }
 /* name + usage, both rotated, side by side */
 .horsecol-stack { display: flex; justify-content: center; gap: 1px; }
 .horsecol-use {
@@ -670,7 +667,7 @@ table.ridegrid th.horsecol {
 table.ridegrid { table-layout: auto; }
 /* block button pinned to the top, name hanging at the bottom */
 .horsecol-inner { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 2px; padding: 0; font-size: 11px; opacity: 0.5; }
+table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 3px; padding: 0; font-size: 12px; opacity: 0.5; }
 table.ridegrid th.horsecol .horse-block-btn:hover { opacity: 1; }
 table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
 .horsecol-name {
@@ -689,12 +686,15 @@ table.ridegrid td.horse-cell {
     padding: 2px;
     cursor: pointer;
     background: #fbfbf8;
+    /* the inner block stretches to the full cell height */
+    height: inherit;
 }
+table.ridegrid td.horse-cell > .horse-fill { min-height: 100%; }
+table.ridegrid tr.ride-row { height: 1px; } /* lets cells resolve height:100% */
 .horse-fill {
     display: block;
     width: 100%;
     height: 100%;
-    min-height: 26px;
     border-radius: 5px;
 }
 td.horse-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }
@@ -866,3 +866,29 @@ table.ridegrid td.horse-cell.busy-elsewhere {
 table.ridegrid td.horse-cell.busy-elsewhere:hover { box-shadow: inset 0 0 0 2px #b9b9ae; }
 .assign-row.busy { opacity: 0.62; }
 .assign-row.busy .assign-cur { color: #8a6a2a; }
+
+/* ---------- Calendar page: only the grid scrolls ---------- */
+/* Keeps the sticky horse header visible instead of letting the page scroll
+   the whole grid up under the top bar. */
+body.page-calendar { overflow: hidden; }
+body.page-calendar #view {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 44px - 58px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    padding-bottom: 6px;
+}
+body.page-calendar #cal-grid {
+    flex: 1 1 auto;
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+}
+body.page-calendar .calendar-scroller { flex: 1 1 auto; max-height: none; }
+body.page-calendar .day-header,
+body.page-calendar #credit-bar,
+body.page-calendar .calendar-legend,
+body.page-calendar .fab-row { flex: 0 0 auto; }
+/* short screens: the grid matters more than the legend */
+@media (max-height: 700px) {
+    body.page-calendar .calendar-legend { display: none; }
+}

@@ -226,6 +226,7 @@
                 (btn.getAttribute('data-nav') === 'calendar' && hash.startsWith('#/fixed')));
         });
         if (!state.user) return renderLogin();
+        document.body.classList.toggle('page-calendar', parts[0] === 'calendar' || !parts[0]);
         if (parts[0] === 'calendar') {
             if (/^\d{4}-\d{2}-\d{2}$/.test(parts[1] || '')) state.calendarDate = parts[1];
             return renderCalendar();
@@ -597,11 +598,8 @@
                 : l ? `<span class="horsecol-use busy">${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}</span>`
                 : '<span class="horsecol-use free">free</span>';
             html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" data-horse-col="${h.id}">
-                <span class="horsecol-tools">
-                    <button class="horse-move" data-move-horse="${h.id}" data-dir="-1" title="Move ${esc(h.name)} left">‹</button>
-                    <span class="horse-grip" draggable="true" data-grip="${h.id}" title="Drag ${esc(h.name)} to reorder">⠿</span>
-                    <button class="horse-move" data-move-horse="${h.id}" data-dir="1" title="Move ${esc(h.name)} right">›</button>
-                </span>
+                <span class="horse-grip" draggable="true" data-grip="${h.id}"
+                      title="Drag ${esc(h.name)} left or right to reorder">⠿</span>
                 <button class="horse-block-btn" data-block-horse="${h.id}"
                         title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">${blocked ? '🔓' : '🚫'}</button>
                 <span class="horsecol-stack">
@@ -748,29 +746,30 @@
             });
         });
 
-        // Reorder horse columns: drag the grip, or nudge with ‹ ›
-        const saveOrder = async (order) => {
-            try {
-                await api('PUT', '/api/horses/reorder', { horse_ids: order });
-                state.horses = (await api('GET', '/api/horses')).horses;
-                renderCalendar();
-            } catch (err) {
-                toast(err.message, true);
-            }
-        };
-        grid.querySelectorAll('[data-move-horse]').forEach((btn) => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const id = btn.getAttribute('data-move-horse');
-                const dir = Number(btn.getAttribute('data-dir'));
-                const order = horses.map((h) => String(h.id));
-                const i = order.indexOf(id);
-                const j = i + dir;
-                if (j < 0 || j >= order.length) return;
-                [order[i], order[j]] = [order[j], order[i]];
-                saveOrder(order);
+        // Reorder horse columns by moving the cells in place — no re-render, so
+        // the grid doesn't flash and the scroll position is kept.
+        const moveColumn = (from, to) => {
+            grid.querySelectorAll('table.ridegrid tr').forEach((tr) => {
+                const cells = [...tr.children];
+                const node = cells[1 + from];
+                const ref = cells[1 + to];
+                if (!node || !ref || node === ref) return;
+                if (from < to) ref.after(node);
+                else ref.before(node);
             });
-        });
+            const [moved] = horses.splice(from, 1);
+            horses.splice(to, 0, moved);
+            // keep the shared list in the same order for the next render
+            state.horses.sort((a, b) => {
+                const ia = horses.findIndex((h) => String(h.id) === String(a.id));
+                const ib = horses.findIndex((h) => String(h.id) === String(b.id));
+                return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+            });
+            state.horses.forEach((h, i) => { h.sort_order = i; });
+            // persist quietly in the background
+            api('PUT', '/api/horses/reorder', { horse_ids: horses.map((h) => String(h.id)) })
+                .catch((err) => toast(err.message, true));
+        };
         let dragId = null;
         grid.querySelectorAll('[data-grip]').forEach((grip) => {
             grip.addEventListener('dragstart', (e) => {
@@ -787,10 +786,11 @@
                 th.classList.remove('drop-target');
                 const targetId = th.getAttribute('data-horse-col');
                 if (!dragId || dragId === targetId) return;
-                const order = horses.map((h) => String(h.id));
-                order.splice(order.indexOf(dragId), 1);
-                order.splice(order.indexOf(targetId), 0, dragId);
-                saveOrder(order);
+                const from = horses.findIndex((h) => String(h.id) === String(dragId));
+                const to = horses.findIndex((h) => String(h.id) === String(targetId));
+                if (from < 0 || to < 0) return;
+                moveColumn(from, to);
+                dragId = null;
             });
         });
 
