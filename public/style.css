@@ -191,7 +191,10 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--green); out
 .day-title { font-weight: 700; font-size: 15px; width: 100%; }
 
 .calendar-scroller {
-    overflow-x: auto;
+    /* scrolls in both directions so the sticky horse header and the sticky
+       ride column stay put while the grid moves under them */
+    overflow: auto;
+    max-height: calc(100vh - 210px);
     -webkit-overflow-scrolling: touch;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -204,7 +207,6 @@ table.daygrid th, table.daygrid td {
     border-bottom: 1px solid var(--border);
     border-right: 1px solid var(--border);
     padding: 4px;
-    min-width: 108px;
     vertical-align: top;
 }
 
@@ -525,37 +527,6 @@ td.todo-cell { background: #faf3da; vertical-align: top; cursor: pointer; }
 .horse-load { font-size: 11px; font-weight: 500; color: var(--muted); margin-top: 2px; }
 .horse-load.free { color: var(--open); font-weight: 700; }
 
-/* Slide-out horse availability drawer */
-#horse-drawer-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(20, 20, 15, 0.35);
-    z-index: 40;
-}
-#horse-drawer {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 300px;
-    max-width: 85vw;
-    background: var(--card);
-    padding: calc(env(safe-area-inset-top, 0px) + 16px) 16px 16px;
-    overflow-y: auto;
-    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.18);
-    animation: drawer-in 0.18s ease-out;
-}
-@keyframes drawer-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
-.drawer-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 4px;
-    border-bottom: 1px solid var(--border);
-    font-size: 14.5px;
-}
-.drawer-name { flex: 1; font-weight: 600; }
-.drawer-load { font-size: 13px; color: var(--muted); }
 
 /* ---------- Time picker ---------- */
 .timepick-backdrop {
@@ -652,17 +623,55 @@ table.ridegrid th.ridecol, table.ridegrid td.ridecol {
     text-align: left;
     vertical-align: middle;
 }
-table.ridegrid th.ridecol { z-index: 4; background: var(--green-light); }
+table.ridegrid th.ridecol { z-index: 6; background: var(--green-light); }
 table.ridegrid th.horsecol {
-    min-width: 26px;
-    width: 26px;
-    padding: 4px 1px 6px;
+    position: sticky;
+    top: 0;
+    min-width: 46px;
+    width: 46px;
+    max-width: 46px;
+    padding: 3px 1px 6px;
     vertical-align: bottom;
     text-align: center;
+    overflow: hidden;
 }
+.horsecol-tools {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    margin-bottom: 1px;
+}
+.horse-move, .horse-grip {
+    background: none;
+    border: none;
+    padding: 0 1px;
+    font-size: 12px;
+    line-height: 1;
+    color: var(--muted);
+    opacity: 0.45;
+    cursor: pointer;
+}
+.horse-grip { cursor: grab; font-size: 10px; }
+.horsecol:hover .horse-move, .horsecol:hover .horse-grip { opacity: 1; }
+.horse-move:hover { color: var(--green); }
+/* name + usage, both rotated, side by side */
+.horsecol-stack { display: flex; justify-content: center; gap: 1px; }
+.horsecol-use {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.horsecol-use.free { color: var(--open); }
+.horsecol-use.busy { color: var(--muted); }
+.horsecol-use.blocked { color: var(--danger); }
+table.ridegrid { table-layout: auto; }
 /* block button pinned to the top, name hanging at the bottom */
 .horsecol-inner { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 4px; font-size: 11px; }
+table.ridegrid th.horsecol .horse-block-btn { display: block; margin: 0 auto 2px; padding: 0; font-size: 11px; opacity: 0.5; }
+table.ridegrid th.horsecol .horse-block-btn:hover { opacity: 1; }
 table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
 .horsecol-name {
     writing-mode: vertical-rl;
@@ -673,48 +682,62 @@ table.ridegrid th.horsecol .horsecol-name { display: inline-block; }
     white-space: nowrap;
 }
 table.ridegrid th.horsecol .horse-block-btn { margin: 2px 0 0; font-size: 11px; }
-td.horse-cell {
-    min-width: 26px;
-    width: 26px;
-    padding: 0;
+table.ridegrid td.horse-cell {
+    min-width: 46px;
+    width: 46px;
+    max-width: 46px;
+    padding: 2px;
     cursor: pointer;
     background: #fbfbf8;
 }
+.horse-fill {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 26px;
+    border-radius: 5px;
+}
 td.horse-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }
-td.horse-cell.used:hover { box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.45); }
+td.horse-cell.used:hover .horse-fill { box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35); }
 .ride-box {
     border: 1px solid var(--border);
     border-radius: 9px;
     padding: 8px 10px;
     background: var(--card);
+    overflow: hidden;
+    box-shadow: var(--shadow);
 }
 .ride-box.blocked { background: var(--blocked-bg); }
 .ride-box.invoiced { opacity: 0.75; }
-.ride-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.ride-open {
+.ride-top {
     display: flex;
     align-items: baseline;
-    gap: 7px;
-    background: none;
+    gap: 8px;
+    width: 100%;
+    margin: -8px -10px 0;
+    width: calc(100% + 20px);
+    padding: 5px 10px;
     border: none;
-    padding: 0;
-    color: var(--text);
+    border-radius: 8px 8px 0 0;
+    color: #fff;
     cursor: pointer;
+    text-align: left;
 }
-.ride-open:hover .ride-time { text-decoration: underline; }
-.ride-time { font-size: 14px; font-weight: 800; }
-.ride-dur { font-size: 11.5px; font-weight: 500; color: var(--muted); }
-.level-pill {
-    padding: 2px 9px;
-    border: 1px solid;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 700;
-    white-space: nowrap;
-}
-.ride-cols { display: flex; gap: 10px; margin-top: 5px; align-items: flex-start; }
+.ride-top:hover { filter: brightness(1.08); }
+.ride-time { font-size: 13.5px; font-weight: 800; }
+.ride-dur { font-size: 11.5px; font-weight: 500; opacity: 0.85; }
+.ride-level { margin-left: auto; font-size: 11.5px; font-weight: 700; letter-spacing: 0.2px; }
+.ride-cols { display: flex; gap: 10px; margin-top: 7px; align-items: stretch; }
 .ride-riders-col { flex: 1 1 62%; min-width: 0; }
-.ride-staff-col { flex: 0 0 34%; display: flex; flex-wrap: wrap; gap: 3px; align-content: flex-start; }
+.ride-staff-col {
+    flex: 0 0 34%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    align-content: flex-start;
+    border-left: 1px solid var(--border);
+    padding-left: 9px;
+}
 .staff-pill {
     display: inline-block;
     padding: 2px 8px;
@@ -727,8 +750,8 @@ td.horse-cell.used:hover { box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.45); }
 .rider-row {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 5px;
     padding: 2px 0;
     font-size: 13.5px;
 }
@@ -809,6 +832,9 @@ td.empty-ride { padding: 16px; color: var(--muted); font-size: 14px; }
 .assign-row.has { background: var(--green-light); border-color: var(--green); }
 .assign-name { font-size: 15.5px; }
 .assign-cur { font-size: 12.5px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.assign-cur s { opacity: 0.65; }
+.assign-cur b { color: var(--green-dark); }
+.assign-row:hover .assign-cur { color: var(--green-dark); }
 
 
 /* Empty hour rows: tappable like a normal calendar */
@@ -831,3 +857,12 @@ td.empty-ride { padding: 16px; color: var(--muted); font-size: 14px; }
 .hour-box:hover .hour-add { opacity: 1; }
 tr.hour-row td { background: #fcfcfa; }
 td.horse-cell.free-cell:hover { box-shadow: inset 0 0 0 2px var(--green); }
+
+/* Horse already used in another overlapping ride */
+table.ridegrid td.horse-cell.busy-elsewhere {
+    background: repeating-linear-gradient(45deg,
+        #efefe9, #efefe9 4px, #e2e2da 4px, #e2e2da 8px);
+}
+table.ridegrid td.horse-cell.busy-elsewhere:hover { box-shadow: inset 0 0 0 2px #b9b9ae; }
+.assign-row.busy { opacity: 0.62; }
+.assign-row.busy .assign-cur { color: #8a6a2a; }

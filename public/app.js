@@ -496,12 +496,7 @@
                 <button class="secondary" id="cal-date-btn">📅 ${esc(shortDate)}</button>
                 <button class="secondary daynav" id="cal-today">Today</button>
                 <button class="secondary daynav" id="cal-next">›</button>
-                <span class="spacer"></span>
-                <button class="secondary daynav" id="cal-horses">🐴 Horses</button>
                 <div class="day-title">${esc(fmtDate(date))}</div>
-            </div>
-            <div id="horse-drawer-backdrop" class="hidden">
-                <div id="horse-drawer"></div>
             </div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
@@ -532,51 +527,6 @@
             dayRides = ridesData.rides;
             drawDayGrid(dayRides, date);
 
-            // Slide-out horse availability panel (alphabetical, with day load)
-            const drawerLoad = horseDayLoad(dayRides);
-            const dayBlockedIds = new Set();
-            dayRides.forEach((r) => {
-                if (r.is_block && r.all_day) r.participants.forEach((p) => dayBlockedIds.add(String(p.horse_id)));
-            });
-            const $backdrop2 = document.getElementById('horse-drawer-backdrop');
-            document.getElementById('horse-drawer').innerHTML =
-                `<h2 style="margin-top:0">🐴 Horses — ${esc(shortDate)}</h2>` +
-                [...activeHorses()].sort((a, b) => a.name.localeCompare(b.name)).map((h) => {
-                    const l = drawerLoad[h.id];
-                    const status = dayBlockedIds.has(String(h.id))
-                        ? '<span class="chip draft">blocked</span>'
-                        : l ? `${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}`
-                        : '<span class="chip paid">free</span>';
-                    return `<div class="drawer-row">
-                        <span class="horse-dot" style="background:${esc(h.color)}"></span>
-                        <span class="drawer-name">${esc(h.name)}</span>
-                        <span class="drawer-load">${status}</span>
-                    </div>`;
-                }).join('');
-            document.getElementById('cal-horses').addEventListener('click', () => $backdrop2.classList.remove('hidden'));
-            $backdrop2.addEventListener('click', (e) => { if (e.target === $backdrop2) $backdrop2.classList.add('hidden'); });
-            const $cb = document.getElementById('credit-bar');
-            if ($cb && creditsData.credits.length) {
-                $cb.innerHTML = `
-                    <div class="credit-bar">
-                        <b>⟳ To reschedule:</b>
-                        ${creditsData.credits.map((cr) => {
-                            const c = contactById(cr.contact_id);
-                            const lvl = c && c.experience
-                                ? ` <span class="chip-level">${LEVEL_LABELS[c.experience]}</span>` : '';
-                            return `
-                            <button class="month-pill credit-chip" data-credit-contact="${cr.contact_id}">
-                                ${esc(cr.name)}${lvl}${cr.count > 1 ? ' ×' + cr.count : ''}</button>`;
-                        }).join('')}
-                    </div>`;
-                $cb.querySelectorAll('[data-credit-contact]').forEach((btn) => {
-                    btn.addEventListener('click', () => {
-                        const cr = creditsData.credits.find((x) =>
-                            String(x.contact_id) === btn.getAttribute('data-credit-contact'));
-                        openReschedulePicker(cr, date, dayRides);
-                    });
-                });
-            }
         } catch (err) {
             document.getElementById('cal-grid').textContent = err.message;
         }
@@ -637,15 +587,27 @@
         const dayRides = rides.filter((r) => !r.all_day)
             .sort((a, b) => hhmm(a.start_time).localeCompare(hhmm(b.start_time)));
 
+        const load = horseDayLoad(rides);
         let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
         html += '<tr><th class="ridecol">Ride</th>';
         horses.forEach((h) => {
             const blocked = dayBlocks[h.id];
-            html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" draggable="true"
-                        data-horse-col="${h.id}" title="Drag to reorder · ${esc(h.name)}">
+            const l = load[h.id];
+            const usage = blocked ? '<span class="horsecol-use blocked">blocked</span>'
+                : l ? `<span class="horsecol-use busy">${l.count} ride${l.count === 1 ? '' : 's'} · ${fmtMinutes(l.minutes)}</span>`
+                : '<span class="horsecol-use free">free</span>';
+            html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" data-horse-col="${h.id}">
+                <span class="horsecol-tools">
+                    <button class="horse-move" data-move-horse="${h.id}" data-dir="-1" title="Move ${esc(h.name)} left">‹</button>
+                    <span class="horse-grip" draggable="true" data-grip="${h.id}" title="Drag ${esc(h.name)} to reorder">⠿</span>
+                    <button class="horse-move" data-move-horse="${h.id}" data-dir="1" title="Move ${esc(h.name)} right">›</button>
+                </span>
                 <button class="horse-block-btn" data-block-horse="${h.id}"
                         title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">${blocked ? '🔓' : '🚫'}</button>
-                <span class="horsecol-name">${esc(h.name)}</span>
+                <span class="horsecol-stack">
+                    <span class="horsecol-name">${esc(h.name)}</span>
+                    ${usage}
+                </span>
             </th>`;
         });
         html += '</tr>';
@@ -698,11 +660,12 @@
             } else if (riders.length) {
                 riderRows = riders.map((p) => `
                     <div class="rider-row">
-                        <span class="rider-name">${esc(p.contact_name)}${p.needs_collection
-                            ? ` <span class="rider-pickup">pick-up${p.collection_teacher ? ': ' + esc(p.collection_teacher) : ''}${p.collection_class ? ', ' + esc(p.collection_class) : ''}</span>` : ''}</span>
+                        <span class="rider-name">${esc(p.contact_name)}</span>
                         ${p.horse_name
                             ? `<button class="rider-horse has" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">${esc(p.horse_name)}</button>`
                             : `<button class="rider-horse none" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">no horse yet</button>`}
+                        ${p.needs_collection
+                            ? `<span class="rider-pickup">pick-up${p.collection_teacher ? ': ' + esc(p.collection_teacher) : ''}${p.collection_class ? ', ' + esc(p.collection_class) : ''}</span>` : ''}
                     </div>`).join('');
             } else if (horsesOnly.length) {
                 riderRows = `<div class="rider-row"><span class="rider-name muted">Horses only</span>
@@ -717,13 +680,12 @@
 
             html += `<tr class="ride-row"><td class="ridecol">
                 <div class="ride-box ${r.is_block ? 'blocked' : ''} ${r.invoiced ? 'invoiced' : ''}">
-                    <div class="ride-top">
-                        <button class="ride-open" data-ride-id="${r.id}">
-                            <span class="ride-time">${esc(start)}–${esc(end)}</span>
-                            <span class="ride-dur">${r.duration_min} min</span>
-                        </button>
-                        ${r.level ? `<span class="level-pill" style="background:color-mix(in srgb, ${color} 22%, white);color:${color};border-color:${color}">${LEVEL_LABELS[r.level]}</span>` : ''}
-                    </div>
+                    <button class="ride-top" data-ride-id="${r.id}"
+                            style="background:color-mix(in srgb, ${color} 88%, black 0%);">
+                        <span class="ride-time">${esc(start)}–${esc(end)}</span>
+                        <span class="ride-dur">${r.duration_min} min</span>
+                        <span class="ride-level">${r.level ? LEVEL_LABELS[r.level] : ''}</span>
+                    </button>
                     <div class="ride-cols">
                         <div class="ride-riders-col">${riderRows}</div>
                         <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
@@ -738,10 +700,14 @@
                 const used = seat || mount;
                 const label = mount ? shortName(mount.guide_name)
                     : (seat && seat.contact_name) ? shortName(seat.contact_name) : '';
-                const fill = used ? `background:${color};` : '';
-                html += `<td class="horse-cell ${used ? 'used' : ''}" style="${fill}"
-                            data-ride="${r.id}" data-horse="${h.id}"
-                            title="${used ? esc(h.name) + (label ? ' — ' + esc(label) : '') : 'Tap to put ' + esc(h.name) + ' on this ride'}"></td>`;
+                const clash = used ? null : horseUsedBy(dayRides, r, h.id);
+                const title = used ? esc(h.name) + (label ? ' — ' + esc(label) : '')
+                    : clash ? `${esc(h.name)} is on ${esc(rideLabel(clash))} — tap to move it here`
+                    : 'Tap to put ' + esc(h.name) + ' on this ride';
+                html += `<td class="horse-cell ${used ? 'used' : ''} ${clash ? 'busy-elsewhere' : ''}"
+                            data-ride="${r.id}" data-horse="${h.id}" title="${title}">
+                    ${used ? `<span class="horse-fill" style="background:${color}"></span>` : ''}
+                </td>`;
             });
             html += '</tr>';
         }
@@ -782,16 +748,41 @@
             });
         });
 
-        // Drag horse column headers to reorder
-        let dragId = null;
-        grid.querySelectorAll('[data-horse-col]').forEach((th) => {
-            th.addEventListener('dragstart', (e) => {
-                dragId = th.getAttribute('data-horse-col');
-                e.dataTransfer.effectAllowed = 'move';
+        // Reorder horse columns: drag the grip, or nudge with ‹ ›
+        const saveOrder = async (order) => {
+            try {
+                await api('PUT', '/api/horses/reorder', { horse_ids: order });
+                state.horses = (await api('GET', '/api/horses')).horses;
+                renderCalendar();
+            } catch (err) {
+                toast(err.message, true);
+            }
+        };
+        grid.querySelectorAll('[data-move-horse]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const id = btn.getAttribute('data-move-horse');
+                const dir = Number(btn.getAttribute('data-dir'));
+                const order = horses.map((h) => String(h.id));
+                const i = order.indexOf(id);
+                const j = i + dir;
+                if (j < 0 || j >= order.length) return;
+                [order[i], order[j]] = [order[j], order[i]];
+                saveOrder(order);
             });
+        });
+        let dragId = null;
+        grid.querySelectorAll('[data-grip]').forEach((grip) => {
+            grip.addEventListener('dragstart', (e) => {
+                dragId = grip.getAttribute('data-grip');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', dragId);
+            });
+        });
+        grid.querySelectorAll('[data-horse-col]').forEach((th) => {
             th.addEventListener('dragover', (e) => { e.preventDefault(); th.classList.add('drop-target'); });
             th.addEventListener('dragleave', () => th.classList.remove('drop-target'));
-            th.addEventListener('drop', async (e) => {
+            th.addEventListener('drop', (e) => {
                 e.preventDefault();
                 th.classList.remove('drop-target');
                 const targetId = th.getAttribute('data-horse-col');
@@ -799,13 +790,7 @@
                 const order = horses.map((h) => String(h.id));
                 order.splice(order.indexOf(dragId), 1);
                 order.splice(order.indexOf(targetId), 0, dragId);
-                try {
-                    await api('PUT', '/api/horses/reorder', { horse_ids: order });
-                    state.horses = (await api('GET', '/api/horses')).horses;
-                    renderCalendar();
-                } catch (err) {
-                    toast(err.message, true);
-                }
+                saveOrder(order);
             });
         });
 
@@ -844,9 +829,11 @@
         ride.guides.forEach((g) => { if (g.horse_id) busy.add(String(g.horse_id)); });
         const prefs = prefsFor(seat.contact_id);
         const rank = (h) => prefs.preferred.has(String(h.id)) ? 0 : prefs.caution.has(String(h.id)) ? 2 : 1;
+        const clashOf = {};
+        activeHorses().forEach((h) => { clashOf[h.id] = horseUsedBy(dayRides, ride, h.id); });
         const options = activeHorses()
-            .filter((h) => !busy.has(String(h.id)) || String(h.id) === String(seat.horse_id))
-            .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+            .sort((a, b) => (clashOf[a.id] ? 1 : 0) - (clashOf[b.id] ? 1 : 0) ||
+                rank(a) - rank(b) || a.name.localeCompare(b.name));
 
         openDialog(`
             <div class="assign-head">
@@ -858,17 +845,19 @@
             </div>
             <p class="muted" style="margin:10px 0 4px">Which horse?</p>
             <div class="assign-list">
-                ${options.length ? options.map((h) => {
+                ${options.map((h) => {
                     const mark = prefs.preferred.has(String(h.id)) ? '⭐ '
                         : prefs.caution.has(String(h.id)) ? '⚠ ' : '';
                     const own = String(h.owner_contact_id) === String(seat.contact_id) ? '🏠 ' : '';
                     const has = String(h.id) === String(seat.horse_id);
-                    return `<button class="assign-row ${has ? 'has' : ''}" data-pick-horse="${h.id}">
+                    const clash = clashOf[h.id];
+                    return `<button class="assign-row ${has ? 'has' : ''} ${clash ? 'busy' : ''}" data-pick-horse="${h.id}">
                         <span class="assign-name">${own}${mark}${esc(h.name)}</span>
-                        <span class="assign-cur">${has ? '✓ assigned' : ''}${prefs.caution.has(String(h.id))
-                            ? esc(prefs.caution.get(String(h.id)) || 'caution') : ''}</span>
+                        <span class="assign-cur">${has ? '✓ assigned'
+                            : clash ? `busy: ${esc(rideLabel(clash))}`
+                            : prefs.caution.has(String(h.id)) ? esc(prefs.caution.get(String(h.id)) || 'caution') : 'free'}</span>
                     </button>`;
-                }).join('') : '<div class="muted">Every horse is busy at this time.</div>'}
+                }).join('')}
             </div>
             <div class="form-error"></div>
             <div class="form-actions">
@@ -877,6 +866,37 @@
         document.getElementById('rh-close').addEventListener('click', closeDialog);
 
         const save = async (horseId) => {
+            const clash = horseId ? horseUsedBy(dayRides, ride, horseId) : null;
+            if (clash) {
+                const hName = (activeHorses().find((h) => String(h.id) === String(horseId)) || {}).name || 'That horse';
+                if (clash.invoiced) {
+                    dialogError(`${hName} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
+                    return;
+                }
+                if (!confirm(`${hName} is on ${rideLabel(clash)}.\n\nTake it off that ride and use it here instead?`)) return;
+                try {
+                    await api('PUT', `/api/rides/${clash.id}`, {
+                        date: clash.date,
+                        start_time: hhmm(clash.start_time),
+                        duration_min: clash.duration_min,
+                        ride_type_id: clash.ride_type_id,
+                        is_block: clash.is_block,
+                        all_day: clash.all_day,
+                        level: clash.level,
+                        notes: clash.notes || '',
+                        participants: clash.participants.map((p) => ({
+                            horse_id: String(p.horse_id) === String(horseId) ? null : p.horse_id,
+                            contact_id: p.contact_id
+                        })).filter((p) => p.contact_id || p.horse_id),
+                        guides: clash.guides.map((g) => String(g.horse_id) === String(horseId)
+                            ? { guide_id: g.guide_id, mode: 'foot', horse_id: null }
+                            : { guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id })
+                    });
+                } catch (err) {
+                    dialogError(`Could not free that horse: ${err.message}`);
+                    return;
+                }
+            }
             const parts = ride.participants.map((p) => ({
                 horse_id: String(p.contact_id) === String(seat.contact_id) ? horseId : p.horse_id,
                 contact_id: p.contact_id
@@ -909,6 +929,26 @@
         if (clearBtn) clearBtn.addEventListener('click', () => save(null));
     }
 
+    // Which other ride (overlapping in time) is using this horse?
+    function horseUsedBy(dayRides, ride, horseId) {
+        const start = toMin(hhmm(ride.start_time));
+        const end = start + (ride.duration_min || 60);
+        return dayRides.find((o) => {
+            if (String(o.id) === String(ride.id) || o.status === 'cancelled') return false;
+            const s = o.all_day ? 0 : toMin(hhmm(o.start_time));
+            const e = o.all_day ? 24 * 60 : s + (o.duration_min || 60);
+            if (e <= start || s >= end) return false;
+            return o.participants.some((p) => String(p.horse_id) === String(horseId)) ||
+                o.guides.some((g) => String(g.horse_id) === String(horseId));
+        }) || null;
+    }
+
+    function rideLabel(o) {
+        if (o.all_day && o.is_block) return 'an all-day block';
+        const who = o.participants.filter((p) => p.contact_name).map((p) => shortName(p.contact_name));
+        return `the ${hhmm(o.start_time)} ride${who.length ? ' (' + who.join(', ') + ')' : ''}`;
+    }
+
     // Small picker: who on this ride gets this horse?
     function openHorseAssignDialog(ride, horse, date, dayRides) {
         if (ride.invoiced) {
@@ -929,16 +969,18 @@
                 : prefs.caution.has(String(horse.id)) ? '⚠ ' : '';
             return `<button class="assign-row ${has ? 'has' : ''}" data-assign-contact="${p.contact_id}">
                 <span class="assign-name">${mark}${esc(p.contact_name)}</span>
-                <span class="assign-cur">${has ? '✓ on ' + esc(horse.name)
-                    : p.horse_name ? 'on ' + esc(p.horse_name) : 'no horse yet'}</span>
+                <span class="assign-cur">${has ? `✓ on ${esc(horse.name)} — tap to remove`
+                    : p.horse_name ? `<s>${esc(p.horse_name)}</s> → <b>${esc(horse.name)}</b>`
+                    : `→ <b>${esc(horse.name)}</b>`}</span>
             </button>`;
         }).join('');
         const guideRows = ride.guides.map((g) => {
             const has = g.mode === 'horse' && String(g.horse_id) === String(horse.id);
             return `<button class="assign-row ${has ? 'has' : ''}" data-assign-guide="${g.guide_id}">
                 <span class="assign-name">${guideDot(g)}${esc(g.guide_name)} <span class="muted">(instructor)</span></span>
-                <span class="assign-cur">${has ? '✓ on ' + esc(horse.name)
-                    : g.mode === 'horse' && g.horse_name ? 'on ' + esc(g.horse_name) : esc(g.mode)}</span>
+                <span class="assign-cur">${has ? `✓ on ${esc(horse.name)} — tap to remove`
+                    : g.mode === 'horse' && g.horse_name ? `<s>${esc(g.horse_name)}</s> → <b>${esc(horse.name)}</b>`
+                    : `→ <b>${esc(horse.name)}</b>`}</span>
             </button>`;
         }).join('');
 
@@ -950,8 +992,9 @@
                 </div>
                 <button class="secondary assign-x" id="as-close">${ICON_X}</button>
             </div>
-            ${holder ? `<p class="muted" style="margin:10px 0 4px">${esc(horse.name)} is on <b>${esc(holder)}</b>. Pick someone else to move the horse, or remove it below.</p>`
-                : '<p class="muted" style="margin:10px 0 4px">Who rides this horse?</p>'}
+            <p class="muted" style="margin:10px 0 4px">${holder
+                ? `${esc(horse.name)} is on <b>${esc(holder)}</b>. Tap someone else to move the horse to them.`
+                : `Tap whoever should ride ${esc(horse.name)} — it replaces the horse they have now.`}</p>
             <div class="assign-list">${rows || '<div class="muted">No riders on this ride.</div>'}${guideRows}</div>
             <div class="form-error"></div>
             <div class="form-actions">
@@ -960,6 +1003,39 @@
         document.getElementById('as-close').addEventListener('click', closeDialog);
 
         const save = async (mutate) => {
+            // If the horse is on another overlapping ride, offer to move it
+            const clash = horseUsedBy(dayRides, ride, horse.id);
+            if (clash) {
+                if (clash.invoiced) {
+                    dialogError(`${horse.name} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
+                    return;
+                }
+                if (!confirm(`${horse.name} is on ${rideLabel(clash)}.\n\nTake ${horse.name} off that ride and use it here instead?`)) return;
+                const otherParts = clash.participants.map((p) => ({
+                    horse_id: String(p.horse_id) === String(horse.id) ? null : p.horse_id,
+                    contact_id: p.contact_id
+                })).filter((p) => p.contact_id || p.horse_id);
+                const otherGuides = clash.guides.map((g) => String(g.horse_id) === String(horse.id)
+                    ? { guide_id: g.guide_id, mode: 'foot', horse_id: null }
+                    : { guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id });
+                try {
+                    await api('PUT', `/api/rides/${clash.id}`, {
+                        date: clash.date,
+                        start_time: hhmm(clash.start_time),
+                        duration_min: clash.duration_min,
+                        ride_type_id: clash.ride_type_id,
+                        is_block: clash.is_block,
+                        all_day: clash.all_day,
+                        level: clash.level,
+                        notes: clash.notes || '',
+                        participants: otherParts,
+                        guides: otherGuides
+                    });
+                } catch (err) {
+                    dialogError(`Could not free ${horse.name}: ${err.message}`);
+                    return;
+                }
+            }
             const parts = ride.participants.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id }));
             const guides = ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }));
             mutate(parts, guides);
