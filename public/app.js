@@ -489,36 +489,11 @@
 
     async function renderCalendar() {
         const date = state.calendarDate;
-        const shortDate = new Date(date + 'T00:00:00').toLocaleDateString('en-GB',
-            { weekday: 'short', day: 'numeric', month: 'short' });
         $view.innerHTML = `
-            <div class="day-header">
-                <button class="secondary daynav" id="cal-prev">‹</button>
-                <button class="secondary" id="cal-date-btn">📅 ${esc(shortDate)}</button>
-                <button class="secondary daynav" id="cal-today">Today</button>
-                <button class="secondary daynav" id="cal-next">›</button>
-                <div class="day-title">${esc(fmtDate(date))}</div>
-            </div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
-            <p class="muted" style="margin:8px 2px">Tap an <b>empty hour</b> to add a ride, or a cell under a horse to add it with that horse. Tap a ride to change it, or a coloured cell to move the horse to someone else.</p>
-            <div class="calendar-legend">
-                <span class="legend-pill" style="background:var(--open-bg);border-color:#9fcba2;color:var(--open)">Open seat</span>
-                ${LEVELS.map((l) => `<span class="legend-pill" style="background:color-mix(in srgb, ${LEVEL_COLORS[l]} 26%, white);border-color:color-mix(in srgb, ${LEVEL_COLORS[l]} 60%, white);color:${LEVEL_COLORS[l]}">${LEVEL_LABELS[l]}</span>`).join('')}
-                <span class="legend-pill" style="background:color-mix(in srgb, ${DEFAULT_RIDE_COLOR} 26%, white);border-color:color-mix(in srgb, ${DEFAULT_RIDE_COLOR} 60%, white);color:${DEFAULT_RIDE_COLOR}">No level</span>
-                <span class="legend-pill" style="background:var(--blocked-bg);border-color:#ddd;color:#777">Blocked</span>
-            </div>
-            <div class="fab-row">
-                <button id="cal-add">＋ New ride</button>
-                <a class="btn secondary" href="#/fixed">🔁 Fixed slots</a>
-            </div>`;
-        document.getElementById('cal-prev').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, -1); });
-        document.getElementById('cal-next').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, 1); });
-        document.getElementById('cal-today').addEventListener('click', () => { location.hash = '#/calendar/' + todayStr(); });
-        document.getElementById('cal-date-btn').addEventListener('click', () => openDatePicker(date));
+`;
         let dayRides = [];
-        document.getElementById('cal-add').addEventListener('click', () =>
-            openRideDialog(null, { date, time: (state.settings.day_start || '08:00'), dayRides }));
 
         try {
             const [ridesData, creditsData] = await Promise.all([
@@ -590,7 +565,21 @@
 
         const load = horseDayLoad(rides);
         let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
-        html += '<tr><th class="ridecol">Ride</th>';
+        const shortDay = new Date(date + 'T00:00:00').toLocaleDateString('en-GB',
+            { weekday: 'short', day: 'numeric', month: 'short' });
+        html += `<tr><th class="ridecol">
+            <div class="cal-nav">
+                <button class="secondary daynav" id="cal-prev">‹</button>
+                <button class="secondary" id="cal-date-btn">📅 ${esc(shortDay)}</button>
+                <button class="secondary daynav" id="cal-today">Today</button>
+                <button class="secondary daynav" id="cal-next">›</button>
+            </div>
+            <div class="cal-longdate">${esc(fmtDate(date))}</div>
+            <div class="cal-actions">
+                <button class="small" id="cal-add">＋ New ride</button>
+                <a class="btn secondary small" href="#/fixed">🔁 Fixed rides</a>
+            </div>
+        </th>`;
         horses.forEach((h) => {
             const blocked = dayBlocks[h.id];
             const l = load[h.id];
@@ -647,8 +636,12 @@
             const horsesOnly = r.participants.filter((p) => !p.contact_id && p.horse_name);
 
             const staff = r.guides.map((g) => `
-                <span class="staff-pill" style="background:${esc(g.guide_color || '#4a4a46')}">
-                    ${esc(shortName(g.guide_name))}${g.is_assistant ? ' (ass)' : ''}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}${g.mode === 'horse' && g.horse_name ? ' · ' + esc(g.horse_name) : ''}
+                <span class="staff-item">
+                    <span class="staff-pill" style="background:${esc(g.guide_color || '#4a4a46')}">
+                        ${esc(shortName(g.guide_name))}${g.is_assistant ? ' (ass)' : ''}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}
+                    </span>
+                    ${g.mode === 'horse' && g.horse_name
+                        ? `<span class="rider-horse has">${esc(g.horse_name)}</span>` : ''}
                 </span>`).join('');
 
             let riderRows;
@@ -682,7 +675,7 @@
                             style="background:color-mix(in srgb, ${color} 88%, black 0%);">
                         <span class="ride-time">${esc(start)}–${esc(end)}</span>
                         <span class="ride-dur">${r.duration_min} min</span>
-                        <span class="ride-level">${r.level ? LEVEL_LABELS[r.level] : ''}</span>
+                        <span class="ride-level${r.level ? '' : ' none'}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
                     </button>
                     <div class="ride-cols">
                         <div class="ride-riders-col">${riderRows}</div>
@@ -721,6 +714,12 @@
                 dayRides: rides
             }));
         });
+        document.getElementById('cal-add').addEventListener('click', () =>
+            openRideDialog(null, { date, time: (state.settings.day_start || '09:00'), dayRides: rides }));
+        document.getElementById('cal-prev').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, -1); });
+        document.getElementById('cal-next').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, 1); });
+        document.getElementById('cal-today').addEventListener('click', () => { location.hash = '#/calendar/' + todayStr(); });
+        document.getElementById('cal-date-btn').addEventListener('click', () => openDatePicker(date));
         grid.querySelectorAll('[data-seat-contact]').forEach((btn) => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();

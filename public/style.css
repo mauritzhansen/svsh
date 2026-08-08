@@ -642,7 +642,7 @@ table.ridegrid th.horsecol .horsecol-stack {
     align-items: flex-end;
     justify-content: center;
     gap: 1px;
-    min-height: 124px;
+    min-height: 100px;
 }
 .horse-grip {
     display: block;
@@ -678,9 +678,9 @@ table.ridegrid { table-layout: auto; }
 table.ridegrid th.horsecol .horse-block-btn {
     display: block;
     width: 100%;
-    margin: 0 0 6px;
+    margin: 10px 0 0;
     padding: 0;
-    font-size: 19px;
+    font-size: 18px;
     line-height: 1;
     text-align: center;
     opacity: 0.5;
@@ -744,6 +744,7 @@ td.horse-cell.used:hover .horse-fill { box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35)
 .ride-time { font-size: 13.5px; font-weight: 800; }
 .ride-dur { font-size: 11.5px; font-weight: 500; opacity: 0.85; }
 .ride-level { margin-left: auto; font-size: 11.5px; font-weight: 700; letter-spacing: 0.2px; }
+.ride-level.none { font-weight: 500; font-style: italic; opacity: 0.85; }
 .ride-cols { display: flex; gap: 10px; margin-top: 7px; align-items: stretch; }
 .ride-riders-col { flex: 1 1 62%; min-width: 0; }
 .ride-staff-col {
@@ -909,3 +910,14 @@ body.page-calendar .fab-row { flex: 0 0 auto; }
 @media (max-height: 700px) {
     body.page-calendar .calendar-legend { display: none; }
 }
+
+
+/* Instructor + their horse, grouped like a rider row */
+.staff-item { display: inline-flex; align-items: center; gap: 3px; }
+
+/* Date controls inside the grid's top-left cell */
+.cal-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cal-nav .daynav { padding: 7px 12px; }
+.cal-longdate { margin-top: 6px; font-size: 13.5px; font-weight: 700; color: var(--green-dark); }
+table.ridegrid th.ridecol { vertical-align: middle; }
+.cal-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
