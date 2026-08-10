@@ -191,6 +191,60 @@
         return !busy || !busy.has(String(id)) || String(id) === String(selectedId);
     }
 
+    // ---------- Phone numbers (WhatsApp-first, +27 by default) ----------
+    const DEFAULT_CC = '+27';
+    const COUNTRY_CODES = ['+27', '+44', '+1', '+31', '+49', '+33', '+34', '+39',
+        '+61', '+64', '+263', '+264', '+267', '+265', '+258', '+254', '+971'];
+
+    // "+44 7700 900123" -> { cc: '+44', rest: '7700 900123' }
+    function splitPhone(value) {
+        const s = String(value || '').trim();
+        if (s.startsWith('+')) {
+            const cc = COUNTRY_CODES.slice().sort((a, b) => b.length - a.length)
+                .find((c) => s.startsWith(c));
+            if (cc) return { cc, rest: s.slice(cc.length).trim() };
+            const m = s.match(/^(\+\d{1,3})\s*(.*)$/);
+            if (m) return { cc: m[1], rest: m[2] };
+        }
+        // local format: 082 555 0101 -> drop the trunk zero
+        return { cc: DEFAULT_CC, rest: s.replace(/^0+/, '') };
+    }
+
+    function phoneFieldHtml(id, value) {
+        const { cc, rest } = splitPhone(value);
+        const codes = COUNTRY_CODES.includes(cc) ? COUNTRY_CODES : [cc, ...COUNTRY_CODES];
+        return `<div class="phone-field">
+            <select id="${id}-cc" class="phone-cc">
+                ${codes.map((c) => `<option value="${c}" ${c === cc ? 'selected' : ''}>${c}</option>`).join('')}
+            </select>
+            <input id="${id}" type="tel" inputmode="tel" value="${esc(rest)}" placeholder="82 555 0101">
+        </div>`;
+    }
+
+    function readPhoneField(id) {
+        const rest = (document.getElementById(id).value || '').trim().replace(/^0+/, '');
+        const cc = (document.getElementById(id + '-cc') || {}).value || DEFAULT_CC;
+        return rest ? `${cc} ${rest}` : '';
+    }
+
+    // wa.me wants digits only, in full international form
+    function waNumber(phone) {
+        let digits = String(phone || '').replace(/[^\d+]/g, '');
+        if (digits.startsWith('+')) return digits.slice(1);
+        if (digits.startsWith('0')) return DEFAULT_CC.slice(1) + digits.slice(1);
+        return digits;
+    }
+
+    // The number opens WhatsApp; the small icon still dials.
+    function phoneLinks(phone) {
+        if (!phone) return '';
+        const wa = waNumber(phone);
+        return `<a class="wa-link" href="https://wa.me/${esc(wa)}" target="_blank" rel="noopener"
+                   onclick="event.stopPropagation()" title="Message on WhatsApp">💬 ${esc(phone)}</a>
+                <a class="tel-link" href="tel:${esc(phone.replace(/\s+/g, ''))}"
+                   onclick="event.stopPropagation()" title="Call">📞</a>`;
+    }
+
     function contactOptions(selectedId, emptyLabel, busy) {
         return `<option value="">${esc(emptyLabel || '')}</option>` +
             state.contacts.filter((c) => keepOption(c.id, selectedId, busy)).map((c) =>
@@ -569,6 +623,10 @@
         const load = horseDayLoad(rides);
         let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
         html += `<tr><th class="ridecol">
+            <div class="page-tabs">
+                <button class="page-tab active">🐴 Ride schedule</button>
+                <button class="page-tab" id="tab-fixed">🔁 Fixed rides</button>
+            </div>
             <div class="cal-nav">
                 <button class="secondary daynav" id="cal-prev">‹</button>
                 <button class="secondary" id="cal-date-btn">📅 ${esc(fmtDate(date))}</button>
@@ -577,7 +635,6 @@
             </div>
             <div class="cal-actions">
                 <button class="small" id="cal-add">＋ New ride</button>
-                <a class="btn secondary small" href="#/fixed">🔁 Fixed rides</a>
             </div>
         </th>`;
         horses.forEach((h) => {
@@ -731,6 +788,7 @@
         });
         document.getElementById('cal-add').addEventListener('click', () =>
             openRideDialog(null, { date, time: (state.settings.day_start || '09:00'), dayRides: rides }));
+        document.getElementById('tab-fixed').addEventListener('click', () => { location.hash = '#/fixed'; });
         document.getElementById('cal-prev').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, -1); });
         document.getElementById('cal-next').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, 1); });
         document.getElementById('cal-today').addEventListener('click', () => { location.hash = '#/calendar/' + todayStr(); });
@@ -1677,16 +1735,16 @@
     // ---------- Fixed (recurring) rides — weekly group templates ----------
     async function renderFixed() {
         $view.innerHTML = `
-            <h1>🔁 Fixed weekly rides</h1>
+            <div class="page-tabs" style="margin-bottom:12px">
+                <button class="page-tab" id="tab-day">🐴 Ride schedule</button>
+                <button class="page-tab active">🔁 Fixed rides</button>
+            </div>
             <p class="muted">A fixed ride repeats every week: same day, time, riders and instructors.
                Riders are weekly by default; individual riders can be set to every second week.
-               Horses are usually assigned on the day, in the calendar.</p>
-            <div id="fixed-list">Loading…</div>
-            <div class="fab-row">
-                <button id="fixed-add">＋ Add fixed ride</button>
-                <a class="btn secondary" href="#/calendar">← Back to calendar</a>
-            </div>`;
-        document.getElementById('fixed-add').addEventListener('click', () => openFixedDialog(null));
+               New fixed rides are made in the day calendar — add the ride, then tick
+               <b>Repeats every week</b>. Horses are assigned on the day.</p>
+            <div id="fixed-list">Loading…</div>`;
+        document.getElementById('tab-day').addEventListener('click', () => { location.hash = '#/calendar'; });
         try {
             const data = await api('GET', '/api/recurring');
             const list = document.getElementById('fixed-list');
@@ -1887,7 +1945,7 @@
             renderContacts();
         });
         const addBtn = document.getElementById('dir-add');
-        if (addBtn) addBtn.addEventListener('click', () => openDirectoryDialog(null));
+        if (addBtn) addBtn.addEventListener('click', () => openNewRecord('other'));
         let entries = [];
         try {
             entries = (await api('GET', '/api/service-contacts')).service_contacts;
@@ -1900,7 +1958,7 @@
             const match = (s) => !q || String(s || '').toLowerCase().includes(q);
             const svc = entries.filter((e) => match(e.name) || match(e.category) || match(e.phone));
             const instructors = state.guides.filter((g) => g.active && (match(g.name) || match(g.phone)));
-            const telLink = (p) => p ? `<a href="tel:${esc(p)}" onclick="event.stopPropagation()">${esc(p)}</a>` : '';
+            const telLink = (p) => phoneLinks(p);
             document.getElementById('dir-list').classList.remove('muted');
             document.getElementById('dir-list').innerHTML = `
                 <h2>School contacts</h2>
@@ -1914,10 +1972,11 @@
                     </div>`).join('') : '<div class="card muted">No entries yet — add the vet, farrier, handyman…</div>'}
                 <h2>Instructors</h2>
                 ${instructors.map((g) => `
-                    <div class="list-item">
+                    <div class="list-item" data-dir-guide="${g.id}" style="${canInvoice() ? 'cursor:pointer' : ''}">
+                        <span class="horse-dot" style="background:${esc(g.color || '#6a6a66')};width:13px;height:13px"></span>
                         <div class="li-main">
                             <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}</div>
-                            <div class="li-sub">${telLink(g.phone) || '<span class="muted">no number — add it under Settings</span>'}</div>
+                            <div class="li-sub">${telLink(g.phone) || '<span class="muted">no number yet — tap to add</span>'}</div>
                         </div>
                     </div>`).join('')}`;
             if (canInvoice()) {
@@ -1927,21 +1986,63 @@
                         openDirectoryDialog(e);
                     });
                 });
+                document.querySelectorAll('[data-dir-guide]').forEach((el) => {
+                    el.addEventListener('click', () => {
+                        const g = state.guides.find((x) => String(x.id) === el.getAttribute('data-dir-guide'));
+                        if (g) openGuideDialog(g, renderDirectory);
+                    });
+                });
             }
         };
         draw('');
         document.getElementById('dir-search').addEventListener('input', (e) => draw(e.target.value));
     }
 
-    function openDirectoryDialog(entry) {
+    // One "New" dialog with a type switcher at the top; the tabs on the
+    // Contacts page are only filters.
+    const NEW_TYPES = [
+        { key: 'rider', label: 'Rider / parent' },
+        { key: 'interested', label: '🌱 Interested' },
+        { key: 'instructor', label: 'Instructor' },
+        { key: 'other', label: 'Other contact' }
+    ];
+
+    function newTypeTabsHtml(active) {
+        return `<div class="page-tabs new-type-tabs">
+            ${NEW_TYPES.map((t) => `<button class="page-tab ${t.key === active ? 'active' : ''}"
+                data-newtype="${t.key}">${t.label}</button>`).join('')}
+        </div>`;
+    }
+
+    function wireNewTypeTabs() {
+        $dialog.querySelectorAll('[data-newtype]').forEach((btn) => {
+            btn.addEventListener('click', () => openNewRecord(btn.getAttribute('data-newtype')));
+        });
+    }
+
+    function openNewRecord(type) {
+        if (type === 'interested') return openIntakeDialog();
+        if (type === 'instructor') return openGuideDialog(null, backToContacts, true);
+        if (type === 'other') return openDirectoryDialog(null, true);
+        return openContactDialog(null, true);
+    }
+
+    function backToContacts() {
+        if (state.contactsTab === 'directory') return renderDirectory();
+        if (state.contactsTab === 'interested') return renderInterested();
+        return renderContacts();
+    }
+
+    function openDirectoryDialog(entry, withTabs) {
         openDialog(`
-            <h2>${entry ? 'Edit directory entry' : 'New directory entry'}</h2>
+            ${withTabs ? newTypeTabsHtml('other') : ''}
+            <h2>${entry ? 'Edit directory entry' : 'New contact (vet, farrier, …)'}</h2>
             <label>Name</label>
             <input id="dc-name" value="${esc(entry ? entry.name : '')}">
             <label>What / role (e.g. Vet, Farrier, Handyman)</label>
             <input id="dc-category" value="${esc(entry ? entry.category : '')}">
-            <label>Phone</label>
-            <input id="dc-phone" type="tel" value="${esc(entry ? entry.phone : '')}">
+            <label>Phone (WhatsApp)</label>
+            ${phoneFieldHtml('dc-phone', entry ? entry.phone : '')}
             <label>Email</label>
             <input id="dc-email" type="email" value="${esc(entry ? entry.email : '')}">
             <label>Notes</label>
@@ -1952,12 +2053,13 @@
                 <button class="secondary" id="dc-cancel">Cancel</button>
                 <button id="dc-save">Save</button>
             </div>`);
+        wireNewTypeTabs();
         document.getElementById('dc-cancel').addEventListener('click', closeDialog);
         document.getElementById('dc-save').addEventListener('click', async () => {
             const body = {
                 name: document.getElementById('dc-name').value,
                 category: document.getElementById('dc-category').value,
-                phone: document.getElementById('dc-phone').value,
+                phone: readPhoneField('dc-phone'),
                 email: document.getElementById('dc-email').value,
                 notes: document.getElementById('dc-notes').value
             };
@@ -1966,7 +2068,7 @@
                 else await api('POST', '/api/service-contacts', body);
                 closeDialog();
                 toast('Saved.');
-                renderDirectory();
+                backToContacts();
             } catch (err) {
                 dialogError(err.message);
             }
@@ -2010,7 +2112,7 @@
             state.contactsTab = 'directory';
             renderContacts();
         });
-        document.getElementById('intake-add').addEventListener('click', openIntakeDialog);
+        document.getElementById('intake-add').addEventListener('click', () => openNewRecord('interested'));
         try {
             state.contacts = (await api('GET', '/api/contacts')).contacts;
         } catch (err) {
@@ -2038,7 +2140,7 @@
             const parent = key.startsWith('self-') ? null : contactById(key);
             return `<div class="card">
                 ${parent ? `<div style="font-weight:700">${esc(parent.name)}
-                    ${parent.phone ? ` · <a href="tel:${esc(parent.phone)}">${esc(parent.phone)}</a>` : ''}</div>` : ''}
+                    ${parent.phone ? ' · ' + phoneLinks(parent.phone) : ''}</div>` : ''}
                 ${kids.map((c) => `
                     <div class="list-item" data-prospect-id="${c.id}" style="margin:8px 0 0;cursor:pointer">
                         <div class="li-main">
@@ -2059,7 +2161,7 @@
 
     // One dialog for the whole intake call: parent (existing or new) + kids +
     // shared availability, everything created on save.
-    function openIntakeDialog() {
+    function openIntakeDialog(withTabs) {
         const kidRow = () => `
             <div class="pick-row" data-kind="intake-kid">
                 <input class="ik-name" placeholder="Rider name">
@@ -2068,12 +2170,13 @@
                 <button type="button" class="danger small row-x">${ICON_X}</button>
             </div>`;
         openDialog(`
+            ${newTypeTabsHtml('interested')}
             <h2>🌱 Interested rider(s)</h2>
             <label>Parent / payer — pick existing or enter a new one</label>
             <select id="in-parent">${parentOptions(null, null)}</select>
             <div class="form-row">
                 <div><input id="in-parent-name" placeholder="…or new parent name"></div>
-                <div><input id="in-parent-phone" type="tel" placeholder="Parent phone"></div>
+                <div>${phoneFieldHtml('in-parent-phone', '')}</div>
             </div>
             <label>Riders</label>
             <div id="intake-kids">${kidRow()}</div>
@@ -2095,6 +2198,7 @@
         });
         $dialog.querySelectorAll('.avail-cell').forEach((cell) =>
             cell.addEventListener('click', () => cell.classList.toggle('on')));
+        wireNewTypeTabs();
         document.getElementById('in-cancel').addEventListener('click', closeDialog);
         document.getElementById('in-save').addEventListener('click', async () => {
             const kids = [...$dialog.querySelectorAll('[data-kind="intake-kid"]')].map((row) => ({
@@ -2112,7 +2216,7 @@
                 if (!parentId && newParentName) {
                     const res = await api('POST', '/api/contacts', {
                         name: newParentName,
-                        phone: document.getElementById('in-parent-phone').value,
+                        phone: readPhoneField('in-parent-phone'),
                         notes
                     });
                     parentId = res.contact.id;
@@ -2200,7 +2304,7 @@
         };
         draw('');
         document.getElementById('contact-search').addEventListener('input', (e) => draw(e.target.value));
-        document.getElementById('contact-add').addEventListener('click', () => openContactDialog(null));
+        document.getElementById('contact-add').addEventListener('click', () => openNewRecord('rider'));
         document.querySelectorAll('.level-pill').forEach((btn) => {
             btn.addEventListener('click', () => {
                 const level = btn.getAttribute('data-level');
@@ -2272,13 +2376,14 @@
         return out;
     }
 
-    function openContactDialog(contact) {
+    function openContactDialog(contact, withTabs) {
         openDialog(`
-            <h2>${contact ? 'Edit contact' : 'New contact'}</h2>
+            ${withTabs ? newTypeTabsHtml('rider') : ''}
+            <h2>${contact ? 'Edit contact' : 'New rider or parent'}</h2>
             <label>Name</label>
             <input id="ct-name" value="${esc(contact ? contact.name : '')}">
-            <label>Phone</label>
-            <input id="ct-phone" type="tel" value="${esc(contact ? contact.phone : '')}">
+            <label>Phone (WhatsApp)</label>
+            ${phoneFieldHtml('ct-phone', contact ? contact.phone : '')}
             <label>Email</label>
             <input id="ct-email" type="email" value="${esc(contact ? contact.email : '')}">
             <label>Address (optional)</label>
@@ -2345,11 +2450,12 @@
         document.getElementById('ct-collect').addEventListener('change', (e) => {
             document.getElementById('ct-collect-details').style.display = e.target.checked ? 'flex' : 'none';
         });
+        wireNewTypeTabs();
         document.getElementById('ct-cancel').addEventListener('click', closeDialog);
         document.getElementById('ct-save').addEventListener('click', async () => {
             const body = {
                 name: document.getElementById('ct-name').value,
-                phone: document.getElementById('ct-phone').value,
+                phone: readPhoneField('ct-phone'),
                 email: document.getElementById('ct-email').value,
                 address: document.getElementById('ct-address').value,
                 parent_id: document.getElementById('ct-parent').value || null,
@@ -2406,7 +2512,7 @@
                 <a href="#/contacts" class="muted">← All contacts</a>
                 <h1>${esc(c.name)}</h1>
                 <div class="card">
-                    ${c.phone ? `<div>📞 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ''}
+                    ${c.phone ? `<div>${phoneLinks(c.phone)}</div>` : ''}
                     ${c.email ? `<div>✉️ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ''}
                     ${c.address ? `<div>🏠 ${esc(c.address)}</div>` : ''}
                     ${c.parent_id ? `<div>🧒 Rider — invoices go to <a href="#/contacts/${c.parent_id}">${esc(c.parent_name)}</a></div>` : ''}
@@ -2858,7 +2964,7 @@
         const today = todayStr();
         const short = (d) => new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
         $view.innerHTML = `
-            <h1>✅ To-dos</h1>
+            <h1>📅 Calendar</h1>
             <div class="day-header">
                 <button class="secondary daynav" id="tw-prev">‹</button>
                 <div class="day-title" style="width:auto;flex:1">${short(days[0])} – ${short(days[6])}</div>
@@ -3100,11 +3206,11 @@
             <h1>⚙️ Settings</h1>
 
             <h2>Horses</h2>
-            <div id="set-horses"></div>
+            <div id="set-horses" class="settings-grid"></div>
             <button class="secondary small" id="horse-add">＋ Add horse</button>
 
             <h2>Instructors</h2>
-            <div id="set-guides"></div>
+            <div id="set-guides" class="settings-grid"></div>
             <button class="secondary small" id="guide-add">＋ Add instructor</button>
 
             <h2>Ride types &amp; prices</h2>
@@ -3162,7 +3268,8 @@
             </div>`;
 
         const drawHorses = () => {
-            document.getElementById('set-horses').innerHTML = state.horses.map((h) => `
+            document.getElementById('set-horses').innerHTML = [...state.horses]
+                .sort((a, b) => a.name.localeCompare(b.name)).map((h) => `
                 <div class="list-item" data-horse-id="${h.id}">
                     <span class="horse-dot" style="background:${esc(h.color)};width:14px;height:14px"></span>
                     <div class="li-main">
@@ -3195,7 +3302,8 @@
             });
         };
         const drawGuides = () => {
-            document.getElementById('set-guides').innerHTML = state.guides.map((g) => `
+            document.getElementById('set-guides').innerHTML = [...state.guides]
+                .sort((a, b) => a.name.localeCompare(b.name)).map((g) => `
                 <div class="list-item" data-guide-id="${g.id}">
                     <span class="horse-dot" style="background:${esc(g.color || '#6a6a66')};width:14px;height:14px"></span>
                     <div class="li-main">
@@ -3324,8 +3432,9 @@
         });
     }
 
-    function openGuideDialog(guide) {
+    function openGuideDialog(guide, onSaved, withTabs) {
         openDialog(`
+            ${withTabs ? newTypeTabsHtml('instructor') : ''}
             <h2>${guide ? 'Edit instructor' : 'New instructor'}</h2>
             <label>Name</label>
             <input id="g-name" value="${esc(guide ? guide.name : '')}">
@@ -3333,8 +3442,8 @@
                 <input type="checkbox" id="g-assistant" style="width:auto" ${guide && guide.is_assistant ? 'checked' : ''}>
                 Assistant instructor
             </label>
-            <label>Phone</label>
-            <input id="g-phone" type="tel" value="${esc(guide ? guide.phone || '' : '')}">
+            <label>Phone (WhatsApp)</label>
+            ${phoneFieldHtml('g-phone', guide ? guide.phone || '' : '')}
             <label>Notes</label>
             <input id="g-notes" value="${esc(guide ? guide.notes || '' : '')}">
             <label>Colour (dot on the calendar)</label>
@@ -3346,11 +3455,12 @@
                 <button class="secondary" id="g-cancel">Cancel</button>
                 <button id="g-save">Save</button>
             </div>`);
+        wireNewTypeTabs();
         document.getElementById('g-cancel').addEventListener('click', closeDialog);
         document.getElementById('g-save').addEventListener('click', async () => {
             const body = {
                 name: document.getElementById('g-name').value,
-                phone: document.getElementById('g-phone').value,
+                phone: readPhoneField('g-phone'),
                 is_assistant: document.getElementById('g-assistant').checked,
                 notes: document.getElementById('g-notes').value,
                 color: document.getElementById('g-color').value
@@ -3362,7 +3472,7 @@
                 state.guides = (await api('GET', '/api/guides')).guides;
                 closeDialog();
                 toast('Saved.');
-                renderSettings();
+                if (onSaved) onSaved(); else renderSettings();
             } catch (err) {
                 dialogError(err.message);
             }
