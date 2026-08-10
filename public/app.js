@@ -648,8 +648,8 @@
             html += `<th class="horsecol ${blocked ? 'blocked-th' : ''}" data-horse-col="${h.id}">
                 <span class="horse-grip" draggable="true" data-grip="${h.id}"
                       title="Drag ${esc(h.name)} left or right to reorder">⠿</span>
-                <button class="horse-block-btn" data-block-horse="${h.id}"
-                        title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name) + ' for the whole day'}">${blocked ? '🔓' : '🚫'}</button>
+                <button class="horse-block-btn ${blocked ? 'is-blocked' : ''}" data-block-horse="${h.id}"
+                        title="${blocked ? 'Unblock ' + esc(h.name) : 'Block ' + esc(h.name)}">${blocked ? '🟢' : '🚫'}</button>
                 <span class="horsecol-stack">
                     <span class="horsecol-name">${esc(h.name)}</span>
                     ${usage}
@@ -872,19 +872,8 @@
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const horse = horses.find((h) => String(h.id) === btn.getAttribute('data-block-horse'));
-                const block = dayBlocks[horse.id];
-                if (block) {
-                    if (!confirm(`Unblock ${horse.name} for ${date}?`)) return;
-                    try {
-                        await api('DELETE', `/api/rides/${block.id}`);
-                        toast(`${horse.name} is available again.`);
-                        renderCalendar();
-                    } catch (err) {
-                        toast(err.message, true);
-                    }
-                } else {
-                    openBlockDayDialog(horse, date, rides);
-                }
+                if (dayBlocks[horse.id]) openUnblockDialog(horse, date);
+                else openBlockDayDialog(horse, date, rides);
             });
         });
     }
@@ -1177,123 +1166,170 @@
     }
 
     function openBlockDayDialog(horse, date, dayRides) {
-        // Rides where this horse carries a rider or a guide (blocks at specific
-        // times are also listed — they get moved or stand in the way the same way)
+        // Rides on the clicked day that use this horse must be dealt with first
         const involved = dayRides.filter((r) => !(r.is_block && r.all_day) &&
             (r.participants.some((p) => String(p.horse_id) === String(horse.id)) ||
              r.guides.some((g) => String(g.horse_id) === String(horse.id))));
-
-        if (!involved.length) {
-            if (!confirm(`Block ${horse.name} for the whole day (${date})?`)) return;
-            createDayBlock(horse.id, date)
-                .then(() => { toast(`${horse.name} blocked for ${date}.`); renderCalendar(); })
-                .catch((err) => toast(err.message, true));
-            return;
-        }
-
         const anyInvoiced = involved.some((r) => r.invoiced);
+
         const rows = involved.map((r) => {
             const time = hhmm(r.start_time);
             const part = r.participants.find((p) => String(p.horse_id) === String(horse.id));
             const gd = r.guides.find((g) => String(g.horse_id) === String(horse.id));
             const who = r.is_block ? 'Blocked'
                 : part ? (part.contact_name || 'Open seat')
-                : gd ? `${gd.guide_name} (guide)` : '';
+                : gd ? `${gd.guide_name} (instructor)` : '';
             const label = `${time} · ${who}${r.ride_type_name ? ' · ' + r.ride_type_name : ''}`;
             if (r.invoiced) {
                 return `<div class="pick-row"><div style="flex:2">${esc(label)}</div>
                         <div class="muted" style="flex:1">🧾 invoiced — cannot move</div></div>`;
             }
-            // Horses still free during this ride's window. Don't exclude this
-            // ride: only one seat moves, its other horses (incl. guide mounts)
-            // stay occupied — and the moving horse itself is taken by definition.
             const taken = busyAt(dayRides, time, null, r.duration_min || 60).horses;
             const seatPrefs = part && part.contact_id ? prefsFor(part.contact_id) : null;
             const prefMark = (h) => !seatPrefs ? ''
                 : seatPrefs.preferred.has(String(h.id)) ? '⭐ '
                 : seatPrefs.caution.has(String(h.id)) ? '⚠ ' : '';
-            const prefRank = (h) => !seatPrefs ? 1
-                : seatPrefs.preferred.has(String(h.id)) ? 0
-                : seatPrefs.caution.has(String(h.id)) ? 2 : 1;
-            const free = activeHorses().filter((h) => !taken.has(String(h.id)))
-                .sort((a, b) => prefRank(a) - prefRank(b));
-            // No free horse (or by choice): the seat can be cancelled instead.
-            // Whole ride goes only when this horse is its last participant.
+            const free = activeHorses().filter((h) => !taken.has(String(h.id)));
             const cancelLabel = part
                 ? (r.participants.length > 1 ? '✕ Remove rider from this ride' : '✕ Cancel this ride')
-                : '✕ Remove guide from this ride';
+                : '✕ Remove instructor from this ride';
             return `<div class="pick-row" data-move-ride="${r.id}">
                     <div style="flex:2">${esc(label)}</div>
                     <select class="mv-horse" style="flex:1">
-                        ${free.map((h) => `<option value="${h.id}">${prefMark(h)}→ ${esc(h.name)}</option>`).join('')}
+                        ${free.map((h) => `<option value="${h.id}">→ ${prefMark(h)}${esc(h.name)}</option>`).join('')}
                         <option value="__cancel">${cancelLabel}</option>
                     </select>
                 </div>`;
         }).join('');
 
         openDialog(`
-            <h2>🚫 Block ${esc(horse.name)} — ${esc(date)}</h2>
-            <p class="muted">${esc(horse.name)} is in ${involved.length} ride${involved.length === 1 ? '' : 's'} on this day.
-               Move ${involved.length === 1 ? 'it' : 'them'} to another horse, then ${esc(horse.name)} will be blocked for the whole day.</p>
-            ${rows}
+            <div class="assign-head">
+                <div>
+                    <h2 style="margin:0">🚫 Block ${esc(horse.name)}</h2>
+                    <div class="muted">The horse is unavailable on these days.</div>
+                </div>
+                <button class="secondary assign-x" id="bk-close">${ICON_X}</button>
+            </div>
+            <div class="form-row" style="margin-top:10px">
+                <div><label>From</label><input type="date" id="bk-from" value="${date}"></div>
+                <div><label>To</label><input type="date" id="bk-to" value="${date}"></div>
+            </div>
+            <div class="form-actions" style="justify-content:flex-start;margin-top:6px">
+                <button type="button" class="secondary small" id="bk-1day">Just this day</button>
+                <button type="button" class="secondary small" id="bk-week">1 week</button>
+                <button type="button" class="secondary small" id="bk-month">1 month</button>
+            </div>
+            ${involved.length ? `
+                <label>${esc(horse.name)} is in ${involved.length} ride${involved.length === 1 ? '' : 's'} on ${esc(date)}</label>
+                <div class="muted" style="margin-bottom:6px">Move ${involved.length === 1 ? 'it' : 'them'} to another horse, or cancel.
+                    Later days in the range that already have rides are skipped.</div>
+                ${rows}` : ''}
             <div class="form-error"></div>
             <div class="form-actions">
-                <button class="secondary" id="blk-cancel">Cancel</button>
-                ${anyInvoiced ? '' : '<button id="blk-save">Move rides &amp; block</button>'}
+                <button class="secondary" id="bk-cancel">Cancel</button>
+                ${anyInvoiced ? '' : `<button id="bk-save">Block ${esc(horse.name)}</button>`}
             </div>`);
-        document.getElementById('blk-cancel').addEventListener('click', closeDialog);
+        document.getElementById('bk-close').addEventListener('click', closeDialog);
+        document.getElementById('bk-cancel').addEventListener('click', closeDialog);
         if (anyInvoiced) {
-            dialogError('Some rides are already invoiced and cannot be moved, so this horse cannot be blocked for this day.');
+            dialogError('Some rides that day are already invoiced and cannot be moved, so this horse cannot be blocked then.');
             return;
         }
-        document.getElementById('blk-save').addEventListener('click', async () => {
+        const setTo = (days) => { document.getElementById('bk-to').value = shiftDate(date, days); };
+        document.getElementById('bk-1day').addEventListener('click', () => setTo(0));
+        document.getElementById('bk-week').addEventListener('click', () => setTo(6));
+        document.getElementById('bk-month').addEventListener('click', () => setTo(29));
+
+        document.getElementById('bk-save').addEventListener('click', async () => {
+            const from = document.getElementById('bk-from').value;
+            const to = document.getElementById('bk-to').value;
+            if (!from || !to || from > to) return dialogError('Pick a valid date range.');
             try {
+                // clear the clicked day first, as chosen above
                 for (const row of $dialog.querySelectorAll('[data-move-ride]')) {
                     const choice = row.querySelector('.mv-horse').value;
                     const r = involved.find((x) => String(x.id) === row.getAttribute('data-move-ride'));
-                    const basePayload = {
-                        date: r.date,
-                        start_time: hhmm(r.start_time),
-                        ride_type_id: r.ride_type_id,
-                        is_block: r.is_block,
-                        notes: r.notes || ''
+                    const base = {
+                        date: r.date, start_time: hhmm(r.start_time), duration_min: r.duration_min,
+                        ride_type_id: r.ride_type_id, is_block: r.is_block, level: r.level, notes: r.notes || ''
                     };
                     if (choice === '__cancel') {
-                        const otherParts = r.participants.filter((p) => String(p.horse_id) !== String(horse.id));
-                        if (!otherParts.length) {
-                            // Last (or only) seat: the whole ride goes
-                            await api('DELETE', `/api/rides/${r.id}`);
-                        } else {
-                            await api('PUT', `/api/rides/${r.id}`, {
-                                ...basePayload,
-                                participants: otherParts.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id })),
-                                guides: r.guides
-                                    .filter((g) => String(g.horse_id) !== String(horse.id))
-                                    .map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
-                            });
-                        }
+                        const others = r.participants.filter((p) => String(p.horse_id) !== String(horse.id));
+                        if (!others.length) await api('DELETE', `/api/rides/${r.id}?scope=one`);
+                        else await api('PUT', `/api/rides/${r.id}`, {
+                            ...base,
+                            participants: others.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id })),
+                            guides: r.guides.filter((g) => String(g.horse_id) !== String(horse.id))
+                                .map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
+                        });
                     } else {
                         await api('PUT', `/api/rides/${r.id}`, {
-                            ...basePayload,
+                            ...base,
                             participants: r.participants.map((p) => ({
                                 horse_id: String(p.horse_id) === String(horse.id) ? choice : p.horse_id,
                                 contact_id: p.contact_id
                             })),
                             guides: r.guides.map((g) => ({
-                                guide_id: g.guide_id,
-                                mode: g.mode,
+                                guide_id: g.guide_id, mode: g.mode,
                                 horse_id: String(g.horse_id) === String(horse.id) ? choice : g.horse_id
                             }))
                         });
                     }
                 }
-                await createDayBlock(horse.id, date);
+                const res = await api('POST', `/api/horses/${horse.id}/block`, { from, to });
                 closeDialog();
-                toast(`${horse.name} blocked for ${date}.`);
+                toast(res.skipped.length
+                    ? `${horse.name} blocked on ${res.created} day(s); ${res.skipped.length} skipped (rides booked).`
+                    : `${horse.name} blocked on ${res.created} day(s).`);
                 renderCalendar();
             } catch (err) {
                 dialogError(err.message);
             }
+        });
+    }
+
+    async function openUnblockDialog(horse, date) {
+        let future = [];
+        try {
+            future = (await api('GET', `/api/horses/${horse.id}/blocks?from=${date}`)).dates;
+        } catch (err) { /* fall back to the single day */ }
+        const later = future.filter((d) => d > date);
+        openDialog(`
+            <div class="assign-head">
+                <div>
+                    <h2 style="margin:0">🟢 Unblock ${esc(horse.name)}</h2>
+                    <div class="muted">${esc(horse.name)} is blocked on ${esc(date)}${
+                        later.length ? ` and ${later.length} later day${later.length === 1 ? '' : 's'}` : ''}.</div>
+                </div>
+                <button class="secondary assign-x" id="ub-close">${ICON_X}</button>
+            </div>
+            <div class="assign-list" style="margin-top:10px">
+                <button class="assign-row" data-unblock="one">
+                    <span class="assign-name">Just this day</span>
+                    <span class="assign-cur">${esc(date)}</span>
+                </button>
+                ${later.length ? `
+                <button class="assign-row" data-unblock="future">
+                    <span class="assign-name">This day and all later blocks</span>
+                    <span class="assign-cur">${later.length + 1} days · to ${esc(later[later.length - 1])}</span>
+                </button>` : ''}
+            </div>
+            <div class="form-error"></div>
+            <div class="form-actions"><button class="secondary" id="ub-cancel">Cancel</button></div>`);
+        document.getElementById('ub-close').addEventListener('click', closeDialog);
+        document.getElementById('ub-cancel').addEventListener('click', closeDialog);
+        $dialog.querySelectorAll('[data-unblock]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                try {
+                    const res = await api('DELETE',
+                        `/api/horses/${horse.id}/block?from=${date}&scope=${btn.getAttribute('data-unblock')}`);
+                    closeDialog();
+                    toast(`${horse.name} is available again (${res.removed} day${res.removed === 1 ? '' : 's'}).`);
+                    renderCalendar();
+                } catch (err) {
+                    dialogError(err.message);
+                }
+            });
         });
     }
 

@@ -986,3 +986,4 @@ table.ridegrid th.ridecol { vertical-align: middle; }
 .phone-field input { flex: 1 1 auto; min-width: 0; }
 .wa-link { font-weight: 600; }
 .tel-link { margin-left: 6px; text-decoration: none; }
+.horse-block-btn.is-blocked { opacity: 0.95; }

@@ -546,6 +546,87 @@ app.post('/api/horses', requireRole('helper'), async (req, res) => {
     }
 });
 
+// Block a horse for whole days across a date range (injury, resting, …).
+// Days where the horse already has a ride or block are skipped and reported.
+app.post('/api/horses/:id/block', requireAuth, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { from, to } = req.body || {};
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+            return res.status(400).json({ error: 'A valid date range is required.' });
+        }
+        const dates = datesInRange(from, to);
+        if (dates.length > 366) return res.status(400).json({ error: 'Range too long (max 1 year).' });
+        const { rows: horseRows } = await pool.query('SELECT name FROM horses WHERE id = $1', [req.params.id]);
+        if (!horseRows[0]) return res.status(404).json({ error: 'Horse not found.' });
+
+        const skipped = [];
+        let created = 0;
+        await client.query('BEGIN');
+        for (const date of dates) {
+            const { rows: busy } = await client.query(
+                `SELECT 1 FROM rides r
+                  WHERE r.date = $1 AND r.status = 'active'
+                    AND (EXISTS (SELECT 1 FROM ride_participants rp
+                                  WHERE rp.ride_id = r.id AND rp.horse_id = $2)
+                      OR EXISTS (SELECT 1 FROM ride_guides rg
+                                  WHERE rg.ride_id = r.id AND rg.horse_id = $2))
+                  LIMIT 1`, [date, req.params.id]);
+            if (busy[0]) { skipped.push(date); continue; }
+            const { rows: ins } = await client.query(
+                `INSERT INTO rides (date, start_time, is_block, all_day, notes)
+                 VALUES ($1, '00:00', true, true, $2) RETURNING id`,
+                [date, (req.body || {}).notes || '']);
+            await client.query(
+                'INSERT INTO ride_participants (ride_id, horse_id) VALUES ($1, $2)',
+                [ins[0].id, req.params.id]);
+            created++;
+        }
+        await client.query('COMMIT');
+        res.json({ created, skipped, horse: horseRows[0].name });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Blocking the horse');
+    } finally {
+        client.release();
+    }
+});
+
+// scope 'one' = just that date; 'future' = that date and everything after it
+app.delete('/api/horses/:id/block', requireAuth, async (req, res) => {
+    try {
+        const from = req.query.from;
+        if (!DATE_RE.test(from || '')) return res.status(400).json({ error: 'A valid date is required.' });
+        const scope = req.query.scope === 'future' ? 'future' : 'one';
+        const { rowCount } = await pool.query(
+            `DELETE FROM rides r
+              WHERE r.is_block AND r.all_day
+                AND (${scope === 'future' ? 'r.date >= $2' : 'r.date = $2'})
+                AND EXISTS (SELECT 1 FROM ride_participants rp
+                             WHERE rp.ride_id = r.id AND rp.horse_id = $1)`,
+            [req.params.id, from]);
+        res.json({ removed: rowCount });
+    } catch (err) {
+        handleError(res, err, 'Unblocking the horse');
+    }
+});
+
+// How many whole-day blocks does this horse have from a date onwards?
+app.get('/api/horses/:id/blocks', requireAuth, async (req, res) => {
+    try {
+        const from = DATE_RE.test(req.query.from || '') ? req.query.from : todayISO();
+        const { rows } = await pool.query(
+            `SELECT r.date FROM rides r
+              WHERE r.is_block AND r.all_day AND r.date >= $2
+                AND EXISTS (SELECT 1 FROM ride_participants rp
+                             WHERE rp.ride_id = r.id AND rp.horse_id = $1)
+              ORDER BY r.date`, [req.params.id, from]);
+        res.json({ dates: rows.map((r) => r.date) });
+    } catch (err) {
+        handleError(res, err, 'Loading blocks');
+    }
+});
+
 // Drag-to-reorder the calendar's horse columns
 app.put('/api/horses/reorder', requireRole('helper'), async (req, res) => {
     const client = await pool.connect();
@@ -924,6 +1005,10 @@ function datesInRange(from, to) {
         out.push(d.toISOString().slice(0, 10));
     }
     return out;
+}
+
+function todayISO() {
+    return new Date().toISOString().slice(0, 10);
 }
 
 function shiftDays(dateStr, days) {
