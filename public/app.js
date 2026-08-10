@@ -213,11 +213,13 @@
     function phoneFieldHtml(id, value) {
         const { cc, rest } = splitPhone(value);
         const codes = COUNTRY_CODES.includes(cc) ? COUNTRY_CODES : [cc, ...COUNTRY_CODES];
-        return `<div class="phone-field">
-            <select id="${id}-cc" class="phone-cc">
+        // inline layout so it can't be broken by a stale stylesheet
+        return `<div class="phone-field" style="display:flex;gap:6px;align-items:center">
+            <select id="${id}-cc" class="phone-cc" style="flex:0 0 74px;width:74px;padding-left:6px;padding-right:2px">
                 ${codes.map((c) => `<option value="${c}" ${c === cc ? 'selected' : ''}>${c}</option>`).join('')}
             </select>
-            <input id="${id}" type="tel" inputmode="tel" value="${esc(rest)}" placeholder="82 555 0101">
+            <input id="${id}" type="tel" inputmode="tel" style="flex:1 1 auto;min-width:0"
+                   value="${esc(rest)}" placeholder="82 555 0101">
         </div>`;
     }
 

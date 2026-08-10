@@ -979,3 +979,10 @@ table.ridegrid th.ridecol { vertical-align: middle; }
 /* Type switcher inside the "New" dialog */
 .new-type-tabs { margin: -4px 0 12px; }
 .new-type-tabs .page-tab { font-size: 12px; padding: 7px 4px; }
+
+/* Phone entry: country code beside the number */
+.phone-field { display: flex; gap: 6px; align-items: center; }
+.phone-field .phone-cc { flex: 0 0 74px; width: 74px; padding-left: 6px; padding-right: 2px; }
+.phone-field input { flex: 1 1 auto; min-width: 0; }
+.wa-link { font-weight: 600; }
+.tel-link { margin-left: 6px; text-decoration: none; }
