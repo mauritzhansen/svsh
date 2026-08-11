@@ -1082,7 +1082,7 @@ async function findConflicts(date, time, horseIds, guideIds, excludeRideId, allD
 
 // Validate and normalize a ride payload. Returns { error } or the clean parts.
 function parseRideBody(body) {
-    const { date, ride_type_id, is_block, all_day, level, duration_min, notes, venue } = body || {};
+    const { date, ride_type_id, is_block, all_day, level, duration_min, notes, venue, instructor_notes } = body || {};
     const isBlock = !!is_block;
     const rideLevel = LEVELS.includes(level) ? level : null;
     const allDay = isBlock && !!all_day; // only blocks can span the whole day
@@ -1142,6 +1142,7 @@ function parseRideBody(body) {
         duration_min: Number.isInteger(duration_min) && duration_min > 0 ? duration_min : null,
         ride_type_id: ride_type_id || null,
         notes: notes || '',
+        instructor_notes: instructor_notes || '',
         participants, guides,
         horseIds: [...horsesUsed],
         guideIds: guides.map((g) => String(g.guide_id))
@@ -1219,10 +1220,10 @@ async function materializeRecurring(from, to) {
             try {
                 await client.query('BEGIN');
                 const { rows } = await client.query(
-                    `INSERT INTO rides (date, start_time, duration_min, ride_type_id, recurring_id, level, venue, notes)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    `INSERT INTO rides (date, start_time, duration_min, ride_type_id, recurring_id, level, venue, notes, instructor_notes)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                      ON CONFLICT (recurring_id, date) DO NOTHING RETURNING id`,
-                    [date, t.start_time, t.duration_min, t.ride_type_id, t.id, t.level, t.venue || 'instructor', t.notes || '']);
+                    [date, t.start_time, t.duration_min, t.ride_type_id, t.id, t.level, t.venue || 'instructor', t.notes || '', t.instructor_notes || '']);
                 if (rows[0]) {
                     await insertRideChildren(client, rows[0].id,
                         dueParts.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id, from_recurring: true, price_cents: null })),
@@ -1343,9 +1344,9 @@ app.post('/api/rides', requireAuth, async (req, res) => {
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
         const { rows } = await client.query(
-            `INSERT INTO rides (date, start_time, duration_min, ride_type_id, is_block, all_day, level, venue, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-            [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes]);
+            `INSERT INTO rides (date, start_time, duration_min, ride_type_id, is_block, all_day, level, venue, notes, instructor_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+            [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes, parsed.instructor_notes]);
         await insertRideChildren(client, rows[0].id, parsed.participants, parsed.guides);
         await client.query('COMMIT');
         res.json({ ride_id: rows[0].id });
@@ -1377,9 +1378,9 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
         await client.query(
-            `UPDATE rides SET date = $2, start_time = $3, duration_min = $4, ride_type_id = $5, is_block = $6, all_day = $7, level = $8, venue = $9, notes = $10
+            `UPDATE rides SET date = $2, start_time = $3, duration_min = $4, ride_type_id = $5, is_block = $6, all_day = $7, level = $8, venue = $9, notes = $10, instructor_notes = $11
               WHERE id = $1`,
-            [req.params.id, parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes]);
+            [req.params.id, parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes, parsed.instructor_notes]);
         // Children are replaced wholesale — carry the fixed-lesson provenance
         // over for riders who were already on the ride from the template
         const { rows: prevParts } = await client.query(
@@ -1421,10 +1422,10 @@ app.post('/api/rides/:id/repeat', requireRole('helper'), async (req, res) => {
         await client.query('BEGIN');
         const { rows: tpl } = await client.query(
             `INSERT INTO recurring_rides (weekday, start_time, duration_min, ride_type_id, level, venue,
-                                          start_date, end_date, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+                                          start_date, end_date, notes, instructor_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
             [isoWeekday(ride.date), ride.start_time, ride.duration_min, ride.ride_type_id,
-             ride.level, ride.venue, ride.date, endDate, ride.notes || '']);
+             ride.level, ride.venue, ride.date, endDate, ride.notes || '', ride.instructor_notes || '']);
         // Horses are usually assigned per day, so the template carries riders only
         const freq = {};
         (Array.isArray((req.body || {}).participants) ? req.body.participants : []).forEach((p) => {
@@ -2527,7 +2528,7 @@ app.get('/api/public/schedule', async (req, res) => {
                         level: r.level,
                         venue: r.venue,
                         is_block: r.is_block,
-                        notes: r.notes || '',
+                        instructor_notes: r.instructor_notes || '',
                         riders: r.participants.filter((p) => p.contact_id).map((p) => ({
                             name: p.contact_name,
                             horse: p.horse_name,

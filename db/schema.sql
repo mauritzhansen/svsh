@@ -110,6 +110,7 @@ CREATE TABLE recurring_rides (
     ride_type_id BIGINT REFERENCES ride_types(id),
     level TEXT CHECK (level IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     venue TEXT NOT NULL DEFAULT 'instructor' CHECK (venue IN ('instructor', 'arena', 'outride')),
+    instructor_notes TEXT NOT NULL DEFAULT '', -- shown to instructors on the schedule
     active BOOLEAN NOT NULL DEFAULT true,
     start_date DATE NOT NULL DEFAULT CURRENT_DATE,
     end_date DATE,
@@ -158,7 +159,8 @@ CREATE TABLE rides (
     -- hidden everywhere but kept so re-materialization does not recreate it.
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
     recurring_id BIGINT REFERENCES recurring_rides(id) ON DELETE SET NULL,
-    notes TEXT,
+    notes TEXT, -- private: only visible when the ride is opened
+    instructor_notes TEXT NOT NULL DEFAULT '', -- shown on the ride and the schedule
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (recurring_id, date)
 );

@@ -95,7 +95,8 @@
                       style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
             </div>
             <div class="ride-cols">
-                <div class="ride-riders-col">${riderRows}</div>
+                <div class="ride-riders-col">${riderRows}${r.instructor_notes
+                    ? `<div class="rider-row instructor-note">📝 ${esc(r.instructor_notes)}</div>` : ''}</div>
                 <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
             </div>
         </div>`;

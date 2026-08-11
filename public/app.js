@@ -36,6 +36,8 @@
 
     function hhmm(t) { return String(t || '').slice(0, 5); }
 
+    const minToHHMM = (m) => `${pad2(Math.floor(m / 60) % 24)}:${pad2(m % 60)}`;
+
     const shortDate = (d) => new Date(d + 'T00:00:00')
         .toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 
@@ -167,6 +169,8 @@
     // Turns every native time input inside `root` into a trigger for our picker
     function enhanceTimeInputs(root) {
         root.querySelectorAll('input[type="time"]').forEach((inp) => {
+            if (inp.dataset.timepicker) return; // already wired
+            inp.dataset.timepicker = '1';
             inp.readOnly = true; // suppresses the platform widget and keyboard
             inp.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -710,7 +714,20 @@
             if (r.is_block && r.all_day) r.participants.forEach((p) => { dayBlocks[p.horse_id] = r; });
         });
 
-        const dayRides = rides.filter((r) => !r.all_day)
+        // Timed blocks are not rides — they shade the horse's cells instead
+        const timedBlocks = {};
+        rides.filter((r) => r.is_block && !r.all_day).forEach((r) => {
+            const s = toMin(hhmm(r.start_time));
+            const e = s + (r.duration_min || 60);
+            r.participants.forEach((p) => {
+                if (!p.horse_id) return;
+                (timedBlocks[p.horse_id] = timedBlocks[p.horse_id] || []).push({ s, e, ride: r });
+            });
+        });
+        const blockedAt = (horseId, startMin, durMin) =>
+            (timedBlocks[horseId] || []).find((b) => b.s < startMin + durMin && b.e > startMin) || null;
+
+        const dayRides = rides.filter((r) => !r.all_day && !r.is_block)
             .sort((a, b) => hhmm(a.start_time).localeCompare(hhmm(b.start_time)));
 
         const load = horseDayLoad(rides);
@@ -771,7 +788,11 @@
                 </button></td>`;
             horses.forEach((h) => {
                 if (dayBlocks[h.id]) { html += '<td class="blocked-col"></td>'; return; }
-                html += `<td class="horse-cell free-cell" data-new-time="${hour}:00" data-new-horse="${h.id}"
+                const hb = blockedAt(h.id, toMin(hour + ':00'), 60);
+                html += hb
+                    ? `<td class="horse-cell cell-blocked" data-unblock-ride="${hb.ride.id}" data-horse-name="${esc(h.name)}"
+                            title="${esc(h.name)} is blocked ${esc(hhmm(hb.ride.start_time))}–${esc(minToHHMM(hb.e))}"></td>`
+                    : `<td class="horse-cell free-cell" data-new-time="${hour}:00" data-new-horse="${h.id}"
                             title="New ride at ${hour}:00 on ${esc(h.name)}"></td>`;
             });
             html += '</tr>';
@@ -816,6 +837,8 @@
                 riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
             }
             // riders in the weekly series who aren't on this week
+            const inote = r.instructor_notes
+                ? `<div class="rider-row instructor-note">📝 ${esc(r.instructor_notes)}</div>` : '';
             riderRows += (r.off_riders || []).map((o) => `
                 <div class="rider-row off-rider">
                     <span class="rider-name">${esc(o.contact_name)}</span>
@@ -837,7 +860,7 @@
                               style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
                     </button>
                     <div class="ride-cols">
-                        <div class="ride-riders-col">${riderRows}</div>
+                        <div class="ride-riders-col">${riderRows}${inote}</div>
                         <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
                     </div>
                     ${flags.length ? `<div class="ride-flags">${esc(flags.join(' · '))}</div>` : ''}
@@ -851,13 +874,15 @@
                 const used = seat || mount;
                 const label = mount ? shortName(mount.guide_name)
                     : (seat && seat.contact_name) ? shortName(seat.contact_name) : '';
-                const clash = used ? null : horseUsedBy(dayRides, r, h.id);
+                const tBlock = used ? null : blockedAt(h.id, toMin(start), r.duration_min || 60);
+                const clash = used || tBlock ? null : horseUsedBy(dayRides, r, h.id);
                 const title = used ? esc(h.name) + (label ? ' — ' + esc(label) : '')
                     : clash ? `${esc(h.name)} is on ${esc(rideLabel(clash))} — tap to move it here`
                     : 'Tap to put ' + esc(h.name) + ' on this ride';
-                html += `<td class="horse-cell ${used ? 'used' : ''} ${clash && !altSeat ? 'busy-elsewhere' : ''}"
-                            data-ride="${r.id}" data-horse="${h.id}"
-                            title="${altSeat && !used ? esc(h.name) + ' — alternative for ' + esc(altSeat.contact_name || 'this ride') : title}">
+                html += `<td class="horse-cell ${used ? 'used' : ''} ${clash && !altSeat ? 'busy-elsewhere' : ''} ${tBlock ? 'cell-blocked' : ''}"
+                            ${tBlock ? `data-unblock-ride="${tBlock.ride.id}" data-horse-name="${esc(h.name)}"` : `data-ride="${r.id}" data-horse="${h.id}"`}
+                            title="${tBlock ? `${esc(h.name)} is blocked ${esc(hhmm(tBlock.ride.start_time))}–${esc(minToHHMM(tBlock.e))}`
+                                : altSeat && !used ? esc(h.name) + ' — alternative for ' + esc(altSeat.contact_name || 'this ride') : title}">
                     ${used ? `<span class="horse-fill" style="background:${color}"></span>`
                         : altSeat ? `<span class="horse-fill alt" style="border-color:${color};color:${color}">alt</span>` : ''}
                 </td>`;
@@ -880,6 +905,21 @@
             }
         }
 
+        grid.querySelectorAll('[data-unblock-ride]').forEach((td) => {
+            td.addEventListener('click', async () => {
+                const name = td.getAttribute('data-horse-name');
+                const choice = await askChoice(`${name} is blocked`, 'Lift this block?',
+                    [{ key: 'yes', label: 'Unblock these hours' }]);
+                if (choice !== 'yes') return;
+                try {
+                    await api('DELETE', `/api/rides/${td.getAttribute('data-unblock-ride')}?scope=one`);
+                    toast(`${name} is available again.`);
+                    renderCalendar();
+                } catch (err) {
+                    toast(err.message, true);
+                }
+            });
+        });
         grid.querySelectorAll('[data-new-time]').forEach((el) => {
             el.addEventListener('click', () => openRideDialog(null, {
                 date,
@@ -1352,7 +1392,6 @@
             if (part) document.getElementById('bk-to').value = document.getElementById('bk-from').value;
         };
         modeSel.addEventListener('change', syncMode);
-        enhanceTimeInputs($dialog);
         const setTo = (days) => { document.getElementById('bk-to').value = shiftDate(date, days); };
         document.getElementById('bk-1day').addEventListener('click', () => setTo(0));
         document.getElementById('bk-week').addEventListener('click', () => setTo(6));
@@ -1462,10 +1501,10 @@
     // ---------- Ride dialog ----------
     // Horse options for a rider row: ⭐ preferred first, then standard; the
     // rider's caution horses leave the standard list into a flagged group.
-    function partHorseOptions(selectedId, busy, contactId) {
+    function partHorseOptions(selectedId, busy, contactId, placeholder) {
         const prefs = prefsFor(contactId);
         const opt = (h, pre) => `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${pre}${esc(h.name)}</option>`;
-        let head = '<option value="">(no horse yet)</option>';
+        let head = `<option value="">${placeholder || '(no horse yet)'}</option>`;
         const avail = activeHorses().filter((h) => keepOption(h.id, selectedId, busy))
             .sort((a, b) => a.name.localeCompare(b.name));
         const isOwn = (h) => contactId && String(h.owner_contact_id) === String(contactId);
@@ -1500,6 +1539,12 @@
         return html;
     }
 
+    // Same list as the primary picker — only horses free at that time, with the
+    // same preferred/caution grouping — so an alternative is always a real option.
+    function altHorseOptions(selectedId, busy, contactId) {
+        return partHorseOptions(selectedId, busy, contactId, '(no alternative)');
+    }
+
     function participantRowHtml(p, withResched, freq) {
         return `
             <div class="pick-row" data-kind="part">
@@ -1507,9 +1552,7 @@
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
                 <select class="pr-alt ${p && p.alt_horse_id ? '' : 'hidden'}" title="Alternative horse — instructor picks on the day">
-                    <option value="">(no alternative)</option>
-                    ${[...activeHorses()].sort((a, b) => a.name.localeCompare(b.name)).map((h) =>
-                        `<option value="${h.id}" ${p && String(p.alt_horse_id) === String(h.id) ? 'selected' : ''}>alt: ${esc(h.name)}</option>`).join('')}
+                    ${altHorseOptions(p ? p.alt_horse_id : null, null, p ? p.contact_id : null)}
                 </select>
                 <select class="pr-freq hidden" title="How often this rider comes">
                     <option value="weekly" ${freq === 'biweekly' ? '' : 'selected'}>Every week</option>
@@ -1585,6 +1628,8 @@
                 const horseSel = row.querySelector('.pr-horse');
                 const contactSel = row.querySelector('.pr-contact');
                 horseSel.innerHTML = partHorseOptions(horseSel.value, takenSets(horseSel).horses, contactSel.value);
+                const altSel = row.querySelector('.pr-alt');
+                if (altSel) altSel.innerHTML = altHorseOptions(altSel.value, takenSets(altSel).horses, contactSel.value);
                 contactSel.innerHTML = partContactOptions(contactSel.value, takenSets(contactSel).contacts, weekday, startMin, dur);
             });
             $dialog.querySelectorAll('.gr-horse').forEach((sel) => {
@@ -1736,8 +1781,11 @@
             <label>Instructors</label>
             <div id="ride-guides"></div>
             <button type="button" class="secondary small" id="guide-add">＋ Add instructor</button>
-            <label>Notes</label>
+            <label>Notes (private — only visible here)</label>
             <input id="ride-notes" value="${esc(isEdit ? ride.notes || '' : '')}">
+            <label>Instructor notes (shown on the ride and the instructor schedule)</label>
+            <input id="ride-inotes" value="${esc(isEdit ? ride.instructor_notes || '' : '')}"
+                   placeholder="e.g. Nolan on the lunge for the first 10 min">
             <label>Where</label>
             <select id="ride-venue">${venueOptions(isEdit ? (ride.venue || 'instructor') : 'instructor')}</select>
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
@@ -1815,6 +1863,7 @@
                 venue: document.getElementById('ride-venue').value,
                 duration_min: parseInt(document.getElementById('ride-duration').value, 10) || null,
                 notes: document.getElementById('ride-notes').value,
+                instructor_notes: document.getElementById('ride-inotes').value,
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('rescheduled'))
                     .map((row) => ({
