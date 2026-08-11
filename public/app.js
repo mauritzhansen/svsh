@@ -97,6 +97,33 @@
         enhanceTimeInputs($dialog);
     }
 
+    // Small choice overlay that can sit above an open dialog
+    function askChoice(title, message, options) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'timepick-backdrop';
+            overlay.innerHTML = `
+                <div class="timepick" style="max-width:420px">
+                    <h2 style="margin:0 0 4px">${esc(title)}</h2>
+                    ${message ? `<p class="muted" style="margin:0 0 10px">${esc(message)}</p>` : ''}
+                    <div class="assign-list">
+                        ${options.map((o) => `<button class="assign-row" data-choice="${esc(o.key)}">
+                            <span class="assign-name">${esc(o.label)}</span>
+                            <span class="assign-cur">${esc(o.hint || '')}</span>
+                        </button>`).join('')}
+                    </div>
+                    <div class="form-actions"><button class="secondary" data-choice="">Cancel</button></div>
+                </div>`;
+            document.body.appendChild(overlay);
+            const done = (val) => { overlay.remove(); resolve(val); };
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) return done(null);
+                const btn = e.target.closest('[data-choice]');
+                if (btn) done(btn.getAttribute('data-choice') || null);
+            });
+        });
+    }
+
     // ---------- Time picker (replaces the platform-dependent native widget) ----------
     const pad2 = (n) => String(n).padStart(2, '0');
 
@@ -193,8 +220,56 @@
 
     // ---------- Phone numbers (WhatsApp-first, +27 by default) ----------
     const DEFAULT_CC = '+27';
-    const COUNTRY_CODES = ['+27', '+44', '+1', '+31', '+49', '+33', '+34', '+39',
-        '+61', '+64', '+263', '+264', '+267', '+265', '+258', '+254', '+971'];
+    // Full dialing-code list, shown as "+27 South Africa". South Africa first,
+    // then alphabetical by country.
+    const COUNTRIES = [
+        ['+27', 'South Africa'],
+        ['+93', 'Afghanistan'], ['+355', 'Albania'], ['+213', 'Algeria'], ['+376', 'Andorra'],
+        ['+244', 'Angola'], ['+54', 'Argentina'], ['+374', 'Armenia'], ['+61', 'Australia'],
+        ['+43', 'Austria'], ['+994', 'Azerbaijan'], ['+973', 'Bahrain'], ['+880', 'Bangladesh'],
+        ['+375', 'Belarus'], ['+32', 'Belgium'], ['+501', 'Belize'], ['+229', 'Benin'],
+        ['+975', 'Bhutan'], ['+591', 'Bolivia'], ['+387', 'Bosnia & Herzegovina'],
+        ['+267', 'Botswana'], ['+55', 'Brazil'], ['+673', 'Brunei'], ['+359', 'Bulgaria'],
+        ['+226', 'Burkina Faso'], ['+257', 'Burundi'], ['+855', 'Cambodia'], ['+237', 'Cameroon'],
+        ['+1', 'Canada / USA'], ['+238', 'Cape Verde'], ['+236', 'Central African Republic'],
+        ['+235', 'Chad'], ['+56', 'Chile'], ['+86', 'China'], ['+57', 'Colombia'],
+        ['+269', 'Comoros'], ['+242', 'Congo (Brazzaville)'], ['+243', 'Congo (Kinshasa)'],
+        ['+506', 'Costa Rica'], ['+225', "Cote d'Ivoire"], ['+385', 'Croatia'], ['+53', 'Cuba'],
+        ['+357', 'Cyprus'], ['+420', 'Czechia'], ['+45', 'Denmark'], ['+253', 'Djibouti'],
+        ['+593', 'Ecuador'], ['+20', 'Egypt'], ['+503', 'El Salvador'], ['+240', 'Equatorial Guinea'],
+        ['+291', 'Eritrea'], ['+372', 'Estonia'], ['+268', 'Eswatini'], ['+251', 'Ethiopia'],
+        ['+679', 'Fiji'], ['+358', 'Finland'], ['+33', 'France'], ['+241', 'Gabon'],
+        ['+220', 'Gambia'], ['+995', 'Georgia'], ['+49', 'Germany'], ['+233', 'Ghana'],
+        ['+30', 'Greece'], ['+502', 'Guatemala'], ['+224', 'Guinea'], ['+245', 'Guinea-Bissau'],
+        ['+592', 'Guyana'], ['+509', 'Haiti'], ['+504', 'Honduras'], ['+852', 'Hong Kong'],
+        ['+36', 'Hungary'], ['+354', 'Iceland'], ['+91', 'India'], ['+62', 'Indonesia'],
+        ['+98', 'Iran'], ['+964', 'Iraq'], ['+353', 'Ireland'], ['+972', 'Israel'],
+        ['+39', 'Italy'], ['+81', 'Japan'], ['+962', 'Jordan'], ['+7', 'Kazakhstan / Russia'],
+        ['+254', 'Kenya'], ['+965', 'Kuwait'], ['+996', 'Kyrgyzstan'], ['+856', 'Laos'],
+        ['+371', 'Latvia'], ['+961', 'Lebanon'], ['+266', 'Lesotho'], ['+231', 'Liberia'],
+        ['+218', 'Libya'], ['+423', 'Liechtenstein'], ['+370', 'Lithuania'], ['+352', 'Luxembourg'],
+        ['+853', 'Macau'], ['+261', 'Madagascar'], ['+265', 'Malawi'], ['+60', 'Malaysia'],
+        ['+960', 'Maldives'], ['+223', 'Mali'], ['+356', 'Malta'], ['+222', 'Mauritania'],
+        ['+230', 'Mauritius'], ['+52', 'Mexico'], ['+373', 'Moldova'], ['+377', 'Monaco'],
+        ['+976', 'Mongolia'], ['+382', 'Montenegro'], ['+212', 'Morocco'], ['+258', 'Mozambique'],
+        ['+95', 'Myanmar'], ['+264', 'Namibia'], ['+977', 'Nepal'], ['+31', 'Netherlands'],
+        ['+64', 'New Zealand'], ['+505', 'Nicaragua'], ['+227', 'Niger'], ['+234', 'Nigeria'],
+        ['+389', 'North Macedonia'], ['+47', 'Norway'], ['+968', 'Oman'], ['+92', 'Pakistan'],
+        ['+970', 'Palestine'], ['+507', 'Panama'], ['+675', 'Papua New Guinea'], ['+595', 'Paraguay'],
+        ['+51', 'Peru'], ['+63', 'Philippines'], ['+48', 'Poland'], ['+351', 'Portugal'],
+        ['+974', 'Qatar'], ['+40', 'Romania'], ['+250', 'Rwanda'], ['+966', 'Saudi Arabia'],
+        ['+221', 'Senegal'], ['+381', 'Serbia'], ['+248', 'Seychelles'], ['+232', 'Sierra Leone'],
+        ['+65', 'Singapore'], ['+421', 'Slovakia'], ['+386', 'Slovenia'], ['+252', 'Somalia'],
+        ['+82', 'South Korea'], ['+211', 'South Sudan'], ['+34', 'Spain'], ['+94', 'Sri Lanka'],
+        ['+249', 'Sudan'], ['+597', 'Suriname'], ['+46', 'Sweden'], ['+41', 'Switzerland'],
+        ['+963', 'Syria'], ['+886', 'Taiwan'], ['+992', 'Tajikistan'], ['+255', 'Tanzania'],
+        ['+66', 'Thailand'], ['+228', 'Togo'], ['+676', 'Tonga'], ['+216', 'Tunisia'],
+        ['+90', 'Turkiye'], ['+993', 'Turkmenistan'], ['+256', 'Uganda'], ['+380', 'Ukraine'],
+        ['+971', 'United Arab Emirates'], ['+44', 'United Kingdom'], ['+598', 'Uruguay'],
+        ['+998', 'Uzbekistan'], ['+58', 'Venezuela'], ['+84', 'Vietnam'], ['+967', 'Yemen'],
+        ['+260', 'Zambia'], ['+263', 'Zimbabwe']
+    ];
+    const COUNTRY_CODES = [...new Set(COUNTRIES.map((c) => c[0]))];
 
     // "+44 7700 900123" -> { cc: '+44', rest: '7700 900123' }
     function splitPhone(value) {
@@ -212,11 +287,16 @@
 
     function phoneFieldHtml(id, value) {
         const { cc, rest } = splitPhone(value);
-        const codes = COUNTRY_CODES.includes(cc) ? COUNTRY_CODES : [cc, ...COUNTRY_CODES];
+        const known = COUNTRIES.some((c) => c[0] === cc);
+        const list = known ? COUNTRIES : [[cc, '']].concat(COUNTRIES);
+        let picked = false;
         // inline layout so it can't be broken by a stale stylesheet
         return `<div class="phone-field" style="display:flex;gap:6px;align-items:center">
-            <select id="${id}-cc" class="phone-cc" style="flex:0 0 74px;width:74px;padding-left:6px;padding-right:2px">
-                ${codes.map((c) => `<option value="${c}" ${c === cc ? 'selected' : ''}>${c}</option>`).join('')}
+            <select id="${id}-cc" class="phone-cc" style="flex:0 0 112px;width:112px;padding-left:6px;padding-right:2px">
+                ${list.map(([c, name]) => {
+                    const sel = !picked && c === cc ? (picked = true, 'selected') : '';
+                    return `<option value="${c}" ${sel}>${c}${name ? ' ' + esc(name) : ''}</option>`;
+                }).join('')}
             </select>
             <input id="${id}" type="tel" inputmode="tel" style="flex:1 1 auto;min-width:0"
                    value="${esc(rest)}" placeholder="82 555 0101">
@@ -254,7 +334,7 @@
     }
 
     function horseOptions(selectedId, busy) {
-        return activeHorses().filter((h) => keepOption(h.id, selectedId, busy)).map((h) =>
+        return [...activeHorses()].sort((a, b) => a.name.localeCompare(b.name)).filter((h) => keepOption(h.id, selectedId, busy)).map((h) =>
             `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${esc(h.name)}</option>`).join('');
     }
 
@@ -287,7 +367,10 @@
         if (!state.user) return renderLogin();
         document.body.classList.toggle('page-calendar', parts[0] === 'calendar' || !parts[0]);
         if (parts[0] === 'calendar') {
-            if (/^\d{4}-\d{2}-\d{2}$/.test(parts[1] || '')) state.calendarDate = parts[1];
+            if (/^\d{4}-\d{2}-\d{2}$/.test(parts[1] || '') && parts[1] !== state.calendarDate) {
+                state.calendarDate = parts[1];
+                state.calScroll = null; // a different day starts at the top
+            }
             return renderCalendar();
         }
         if (parts[0] === 'contacts' && parts[1]) return renderContactDetail(parts[1]);
@@ -378,7 +461,12 @@
     const DEFAULT_RIDE_COLOR = '#8a6d4f';
     const rideColor = (r) => LEVEL_COLORS[r.level] || DEFAULT_RIDE_COLOR;
     const MODE_ICON = { foot: '', running: '🏃', cycling: '🚴', horse: '' };
-    const levelOptions = (selected) => '<option value="">(no level)</option>' +
+    const VENUES = { instructor: '', arena: 'Arena', outride: 'Outride' };
+    const VENUE_COLORS = { arena: '#e65100', outride: '#2e7d32' };
+    const venueOptions = (selected) => Object.entries(VENUES).map(([k, label]) =>
+        `<option value="${k}" ${selected === k ? 'selected' : ''}>${label || "Instructor's choice"}</option>`).join('');
+
+    const levelOptions = (selected) = '<option value="">(no level)</option>' +
         LEVELS.map((l) => `<option value="${l}" ${selected === l ? 'selected' : ''}>${LEVEL_LABELS[l]}</option>`).join('');
     const guideDisplayName = (g) => `${g.guide_name || g.name}${(g.is_assistant) ? ' (ass)' : ''}`;
     const guideDot = (g) => `<span class="guide-dot" style="background:${esc(g.guide_color || g.color || '#6a6a66')}"></span>`;
@@ -548,6 +636,9 @@
 
     async function renderCalendar() {
         const date = state.calendarDate;
+        // remember where we were before the view is rebuilt
+        const oldScroller = $view.querySelector('.calendar-scroller');
+        if (oldScroller) state.calScroll = { x: oldScroller.scrollLeft, y: oldScroller.scrollTop };
         $view.innerHTML = `
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
@@ -714,6 +805,7 @@
                         ${p.horse_name
                             ? `<button class="rider-horse has" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">${esc(p.horse_name)}</button>`
                             : `<button class="rider-horse none" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">no horse yet</button>`}
+                        ${p.alt_horse_name ? `<span class="rider-alt">or ${esc(p.alt_horse_name)}</span>` : ''}
                         ${p.needs_collection
                             ? `<span class="rider-pickup">pick-up${p.collection_teacher ? ': ' + esc(p.collection_teacher) : ''}${p.collection_class ? ', ' + esc(p.collection_class) : ''}</span>` : ''}
                     </div>`).join('');
@@ -740,6 +832,7 @@
                     <button class="ride-top" data-ride-id="${r.id}">
                         <span class="ride-time">${esc(start)}–${esc(end)}</span>
                         <span class="ride-dur">${r.duration_min} min</span>
+                        ${VENUES[r.venue] ? `<span class="ride-venue" style="color:${VENUE_COLORS[r.venue]}">${VENUES[r.venue]}</span>` : ''}
                         <span class="ride-level${r.level ? '' : ' none'}"
                               style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
                     </button>
@@ -754,6 +847,7 @@
                 if (dayBlocks[h.id]) { html += '<td class="blocked-col"></td>'; return; }
                 const seat = r.participants.find((p) => String(p.horse_id) === String(h.id));
                 const mount = r.guides.find((g) => g.mode === 'horse' && String(g.horse_id) === String(h.id));
+                const altSeat = r.participants.find((p) => String(p.alt_horse_id) === String(h.id));
                 const used = seat || mount;
                 const label = mount ? shortName(mount.guide_name)
                     : (seat && seat.contact_name) ? shortName(seat.contact_name) : '';
@@ -761,23 +855,29 @@
                 const title = used ? esc(h.name) + (label ? ' — ' + esc(label) : '')
                     : clash ? `${esc(h.name)} is on ${esc(rideLabel(clash))} — tap to move it here`
                     : 'Tap to put ' + esc(h.name) + ' on this ride';
-                html += `<td class="horse-cell ${used ? 'used' : ''} ${clash ? 'busy-elsewhere' : ''}"
-                            data-ride="${r.id}" data-horse="${h.id}" title="${title}">
-                    ${used ? `<span class="horse-fill" style="background:${color}"></span>` : ''}
+                html += `<td class="horse-cell ${used ? 'used' : ''} ${clash && !altSeat ? 'busy-elsewhere' : ''}"
+                            data-ride="${r.id}" data-horse="${h.id}"
+                            title="${altSeat && !used ? esc(h.name) + ' — alternative for ' + esc(altSeat.contact_name || 'this ride') : title}">
+                    ${used ? `<span class="horse-fill" style="background:${color}"></span>`
+                        : altSeat ? `<span class="horse-fill alt" style="border-color:${color};color:${color}">alt</span>` : ''}
                 </td>`;
             });
             html += '</tr>';
         }
         html += '</table></div>';
-        // keep the scroll position across re-renders (assigning a horse
-        // shouldn't jump you back to the top of the day)
-        const prev = grid.querySelector('.calendar-scroller');
-        const keep = prev ? { x: prev.scrollLeft, y: prev.scrollTop } : null;
+        // restore the scroll position captured before the view was rebuilt
+        const inGrid = grid.querySelector('.calendar-scroller');
+        const keep = inGrid ? { x: inGrid.scrollLeft, y: inGrid.scrollTop } : state.calScroll;
         grid.classList.remove('muted');
         grid.innerHTML = html;
         if (keep) {
             const next = grid.querySelector('.calendar-scroller');
-            if (next) { next.scrollLeft = keep.x; next.scrollTop = keep.y; }
+            if (next) {
+                next.scrollLeft = keep.x;
+                next.scrollTop = keep.y;
+                // a second pass after layout settles (sticky header, fonts)
+                requestAnimationFrame(() => { next.scrollLeft = keep.x; next.scrollTop = keep.y; });
+            }
         }
 
         grid.querySelectorAll('[data-new-time]').forEach((el) => {
@@ -1210,14 +1310,23 @@
                 </div>
                 <button class="secondary assign-x" id="bk-close">${ICON_X}</button>
             </div>
+            <label>How long</label>
+            <select id="bk-mode">
+                <option value="day">Whole day(s)</option>
+                <option value="part">Part of the day (set hours)</option>
+            </select>
             <div class="form-row" style="margin-top:10px">
                 <div><label>From</label><input type="date" id="bk-from" value="${date}"></div>
                 <div><label>To</label><input type="date" id="bk-to" value="${date}"></div>
             </div>
-            <div class="form-actions" style="justify-content:flex-start;margin-top:6px">
+            <div class="form-actions" id="bk-presets" style="justify-content:flex-start;margin-top:6px">
                 <button type="button" class="secondary small" id="bk-1day">Just this day</button>
                 <button type="button" class="secondary small" id="bk-week">1 week</button>
                 <button type="button" class="secondary small" id="bk-month">1 month</button>
+            </div>
+            <div class="form-row hidden" id="bk-times">
+                <div><label>Start</label><input type="time" id="bk-start" value="09:00"></div>
+                <div><label>End</label><input type="time" id="bk-end" value="12:00"></div>
             </div>
             ${involved.length ? `
                 <label>${esc(horse.name)} is in ${involved.length} ride${involved.length === 1 ? '' : 's'} on ${esc(date)}</label>
@@ -1235,6 +1344,15 @@
             dialogError('Some rides that day are already invoiced and cannot be moved, so this horse cannot be blocked then.');
             return;
         }
+        const modeSel = document.getElementById('bk-mode');
+        const syncMode = () => {
+            const part = modeSel.value === 'part';
+            document.getElementById('bk-times').classList.toggle('hidden', !part);
+            document.getElementById('bk-presets').classList.toggle('hidden', part);
+            if (part) document.getElementById('bk-to').value = document.getElementById('bk-from').value;
+        };
+        modeSel.addEventListener('change', syncMode);
+        enhanceTimeInputs($dialog);
         const setTo = (days) => { document.getElementById('bk-to').value = shiftDate(date, days); };
         document.getElementById('bk-1day').addEventListener('click', () => setTo(0));
         document.getElementById('bk-week').addEventListener('click', () => setTo(6));
@@ -1276,7 +1394,15 @@
                         });
                     }
                 }
-                const res = await api('POST', `/api/horses/${horse.id}/block`, { from, to });
+                const body = { from, to };
+                if (modeSel.value === 'part') {
+                    const s = document.getElementById('bk-start').value;
+                    const e = document.getElementById('bk-end').value;
+                    if (!s || !e || e <= s) return dialogError('Give a start and end time.');
+                    body.start_time = s;
+                    body.duration_min = toMin(e) - toMin(s);
+                }
+                const res = await api('POST', `/api/horses/${horse.id}/block`, body);
                 closeDialog();
                 toast(res.skipped.length
                     ? `${horse.name} blocked on ${res.created} day(s); ${res.skipped.length} skipped (rides booked).`
@@ -1340,7 +1466,8 @@
         const prefs = prefsFor(contactId);
         const opt = (h, pre) => `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${pre}${esc(h.name)}</option>`;
         let head = '<option value="">(no horse yet)</option>';
-        const avail = activeHorses().filter((h) => keepOption(h.id, selectedId, busy));
+        const avail = activeHorses().filter((h) => keepOption(h.id, selectedId, busy))
+            .sort((a, b) => a.name.localeCompare(b.name));
         const isOwn = (h) => contactId && String(h.owner_contact_id) === String(contactId);
         const ownedByOther = (h) => h.owner_contact_id && !isOwn(h);
         // Rider's own horse first, then ⭐ preferred, then the standard list;
@@ -1376,8 +1503,14 @@
     function participantRowHtml(p, withResched, freq) {
         return `
             <div class="pick-row" data-kind="part">
-                <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(open seat)')}</select>
+                <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)')}</select>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
+                <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
+                <select class="pr-alt ${p && p.alt_horse_id ? '' : 'hidden'}" title="Alternative horse — instructor picks on the day">
+                    <option value="">(no alternative)</option>
+                    ${[...activeHorses()].sort((a, b) => a.name.localeCompare(b.name)).map((h) =>
+                        `<option value="${h.id}" ${p && String(p.alt_horse_id) === String(h.id) ? 'selected' : ''}>alt: ${esc(h.name)}</option>`).join('')}
+                </select>
                 <select class="pr-freq hidden" title="How often this rider comes">
                     <option value="weekly" ${freq === 'biweekly' ? '' : 'selected'}>Every week</option>
                     <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
@@ -1510,8 +1643,25 @@
             }
         }
 
+        const removeFromSeries = [];   // contact ids to drop from the weekly template
         function wireRow(row) {
-            row.querySelector('.row-x').addEventListener('click', () => { row.remove(); refreshOptions(); });
+            row.querySelector('.row-x').addEventListener('click', async () => {
+                const contactSel = row.querySelector('.pr-contact');
+                const cid = contactSel && contactSel.value;
+                const inSeries = isEdit && ride.recurring_id && cid;
+                if (inSeries) {
+                    const name = (contactById(cid) || {}).name || 'this rider';
+                    const choice = await askChoice(`Remove ${name}`,
+                        'They are on the weekly fixed ride.', [
+                            { key: 'week', label: 'Just this week', hint: 'stays on the weekly schedule' },
+                            { key: 'series', label: 'Remove from the weekly schedule', hint: 'this week and from now on' }
+                        ]);
+                    if (!choice) return;
+                    if (choice === 'series') removeFromSeries.push(cid);
+                }
+                row.remove();
+                refreshOptions();
+            });
             const reschedBtn = row.querySelector('.row-resched');
             if (reschedBtn) {
                 reschedBtn.addEventListener('click', () => {
@@ -1534,6 +1684,10 @@
                     updateReschedInfo();
                 });
             }
+            const altToggle = row.querySelector('.pr-alt-toggle');
+            if (altToggle) altToggle.addEventListener('click', () => {
+                row.querySelector('.pr-alt').classList.toggle('hidden');
+            });
             const modeSel = row.querySelector('.gr-mode');
             if (modeSel) {
                 modeSel.addEventListener('change', () => {
@@ -1584,6 +1738,8 @@
             <button type="button" class="secondary small" id="guide-add">＋ Add instructor</button>
             <label>Notes</label>
             <input id="ride-notes" value="${esc(isEdit ? ride.notes || '' : '')}">
+            <label>Where</label>
+            <select id="ride-venue">${venueOptions(isEdit ? (ride.venue || 'instructor') : 'instructor')}</select>
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
                 <input type="checkbox" id="ride-repeat" style="width:auto" ${isEdit && ride.recurring_id ? 'checked' : ''}>
                 🔁 Repeats every week (fixed ride)
@@ -1656,12 +1812,14 @@
                 ride_type_id: document.getElementById('ride-type').value || null,
                 is_block: document.getElementById('ride-block').checked,
                 level: document.getElementById('ride-level').value || null,
+                venue: document.getElementById('ride-venue').value,
                 duration_min: parseInt(document.getElementById('ride-duration').value, 10) || null,
                 notes: document.getElementById('ride-notes').value,
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('rescheduled'))
                     .map((row) => ({
                         horse_id: row.querySelector('.pr-horse').value || null,
+                        alt_horse_id: (row.querySelector('.pr-alt') || {}).value || null,
                         contact_id: row.querySelector('.pr-contact').value || null
                     })).filter((p) => p.horse_id || p.contact_id),
                 guides: [...$dialog.querySelectorAll('[data-kind="guide"]')].map((row) => {
@@ -1687,6 +1845,9 @@
                     await api('POST', '/api/credits/consume', {
                         contact_id: defaults.addContactId, ride_id: ride.id
                     });
+                }
+                for (const cid of removeFromSeries) {
+                    await api('DELETE', `/api/rides/${ride.id}/repeat-riders/${cid}`);
                 }
                 const box = document.getElementById('ride-repeat');
                 const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')].map((row) => ({
@@ -2201,11 +2362,20 @@
     // shared availability, everything created on save.
     function openIntakeDialog(withTabs) {
         const kidRow = () => `
-            <div class="pick-row" data-kind="intake-kid">
-                <input class="ik-name" placeholder="Rider name">
-                <input class="ik-age" type="number" inputmode="numeric" placeholder="Age" style="flex:0 0 74px">
-                <select class="ik-level" style="flex:0 0 130px">${levelOptions('')}</select>
-                <button type="button" class="danger small row-x">${ICON_X}</button>
+            <div class="intake-kid" data-kind="intake-kid">
+                <div class="pick-row" style="margin-bottom:4px">
+                    <input class="ik-name" placeholder="Rider name">
+                    <input class="ik-age" type="number" inputmode="numeric" placeholder="Age" style="flex:0 0 74px">
+                    <select class="ik-level" style="flex:0 0 130px">${levelOptions('')}</select>
+                    <button type="button" class="secondary small ik-avail-toggle" title="Availability">🕒</button>
+                    <button type="button" class="danger small row-x">${ICON_X}</button>
+                </div>
+                <div class="ik-avail hidden">
+                    <div class="muted" style="margin:2px 0 4px">Availability — tap the hours this rider can come
+                        (leave empty for no restriction)</div>
+                    ${availGridHtml([])}
+                    <button type="button" class="secondary small ik-copy-avail" style="margin-top:6px">Copy to all riders</button>
+                </div>
             </div>`;
         openDialog(`
             ${newTypeTabsHtml('interested')}
@@ -2219,8 +2389,6 @@
             <label>Riders</label>
             <div id="intake-kids">${kidRow()}</div>
             <button type="button" class="secondary small" id="intake-kid-add">＋ Another rider</button>
-            <label>Availability — tap the hours they can ride (applies to all riders above)</label>
-            ${availGridHtml([])}
             <label>Notes</label>
             <input id="in-notes" placeholder="e.g. friends of the Smiths, wants to start in September">
             <div class="form-error"></div>
@@ -2228,24 +2396,40 @@
                 <button class="secondary" id="in-cancel">Cancel</button>
                 <button id="in-save">Save</button>
             </div>`);
-        const wire = (row) => row.querySelector('.row-x').addEventListener('click', () => row.remove());
+        const wire = (row) => {
+            row.querySelector('.row-x').addEventListener('click', () => row.remove());
+            row.querySelector('.ik-avail-toggle').addEventListener('click', () => {
+                row.querySelector('.ik-avail').classList.toggle('hidden');
+            });
+            row.querySelectorAll('.avail-cell').forEach((cell) =>
+                cell.addEventListener('click', () => cell.classList.toggle('on')));
+            row.querySelector('.ik-copy-avail').addEventListener('click', () => {
+                const on = [...row.querySelectorAll('.avail-cell')]
+                    .filter((c) => c.classList.contains('on'))
+                    .map((c) => c.getAttribute('data-avail'));
+                $dialog.querySelectorAll('[data-kind="intake-kid"]').forEach((other) => {
+                    if (other === row) return;
+                    other.querySelectorAll('.avail-cell').forEach((c) =>
+                        c.classList.toggle('on', on.includes(c.getAttribute('data-avail'))));
+                });
+                toast('Availability copied to the other riders.');
+            });
+        };
         wire($dialog.querySelector('[data-kind="intake-kid"]'));
         document.getElementById('intake-kid-add').addEventListener('click', () => {
             document.getElementById('intake-kids').insertAdjacentHTML('beforeend', kidRow());
             wire(document.getElementById('intake-kids').lastElementChild);
         });
-        $dialog.querySelectorAll('.avail-cell').forEach((cell) =>
-            cell.addEventListener('click', () => cell.classList.toggle('on')));
         wireNewTypeTabs();
         document.getElementById('in-cancel').addEventListener('click', closeDialog);
         document.getElementById('in-save').addEventListener('click', async () => {
             const kids = [...$dialog.querySelectorAll('[data-kind="intake-kid"]')].map((row) => ({
                 name: row.querySelector('.ik-name').value.trim(),
                 age: parseInt(row.querySelector('.ik-age').value, 10) || null,
-                level: row.querySelector('.ik-level').value || null
+                level: row.querySelector('.ik-level').value || null,
+                availability: collectAvailability(row)
             })).filter((k) => k.name);
             if (!kids.length) return dialogError('Add at least one rider.');
-            const availability = collectAvailability();
             const notes = document.getElementById('in-notes').value;
             const year = new Date().getFullYear();
             try {
@@ -2266,7 +2450,7 @@
                         experience: k.level,
                         birth_year: k.age ? year - k.age : null,
                         is_prospect: true,
-                        availability,
+                        availability: k.availability,
                         notes
                     });
                 }
@@ -2390,10 +2574,10 @@
         return html + '</div>';
     }
 
-    function collectAvailability() {
+    function collectAvailability(root) {
         // Merge contiguous toggled hour cells into ranges per weekday
         const byDay = {};
-        $dialog.querySelectorAll('.avail-cell.on').forEach((cell) => {
+        (root || $dialog).querySelectorAll('.avail-cell.on').forEach((cell) => {
             const [w, h] = cell.getAttribute('data-avail').split('|').map(Number);
             (byDay[w] = byDay[w] || []).push(h);
         });
@@ -2673,6 +2857,51 @@
         });
     }
 
+    // Edit a draft term pass and its invoice together
+    function openEditPassDialog(tp) {
+        openDialog(`
+            <div class="assign-head">
+                <div>
+                    <h2 style="margin:0">Edit ${esc(tp.contact_name)}'s term pass</h2>
+                    <div class="muted">${esc(tp.invoice_number || 'no invoice')} · draft — the PDF updates when you save.</div>
+                </div>
+                <button class="secondary assign-x" id="ep-close">${ICON_X}</button>
+            </div>
+            <div class="form-row" style="margin-top:10px">
+                <div><label>From</label><input type="date" id="ep-start" value="${esc(tp.period_start)}"></div>
+                <div><label>To</label><input type="date" id="ep-end" value="${esc(tp.period_end)}"></div>
+            </div>
+            <label>Price (${esc(state.settings.currency || 'R')})</label>
+            <input id="ep-amount" type="number" inputmode="decimal" step="0.01"
+                   value="${((tp.total_cents || 0) / 100).toFixed(2)}">
+            <label>Invoice line text</label>
+            <input id="ep-desc" value="${esc(tp.invoice_line || '')}">
+            <div class="muted" style="margin-top:6px">${tp.lessons_so_far} lesson${tp.lessons_so_far === 1 ? '' : 's'} ridden so far in this period.
+                Changing the dates changes what the pass covers.</div>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                <button class="secondary" id="ep-cancel">Cancel</button>
+                <button id="ep-save">Save</button>
+            </div>`);
+        document.getElementById('ep-close').addEventListener('click', closeDialog);
+        document.getElementById('ep-cancel').addEventListener('click', closeDialog);
+        document.getElementById('ep-save').addEventListener('click', async () => {
+            try {
+                await api('PUT', `/api/term-passes/${tp.id}`, {
+                    period_start: document.getElementById('ep-start').value,
+                    period_end: document.getElementById('ep-end').value,
+                    amount_cents: Math.round(parseFloat(document.getElementById('ep-amount').value || '0') * 100),
+                    description: document.getElementById('ep-desc').value
+                });
+                closeDialog();
+                toast('Term pass and invoice updated.');
+                renderInvoices();
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+    }
+
     function openBulkPassDialog() {
         const [qs, qe] = quarterBounds(0);
         openDialog(`
@@ -2817,11 +3046,19 @@
                             <select class="pass-status" data-pass-inv="${tp.invoice_id}" style="width:auto">
                                 ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${tp.invoice_status === s ? 'selected' : ''}>${s}</option>`).join('')}
                             </select>
+                            ${tp.invoice_status === 'draft'
+                                ? `<button class="secondary small" data-pass-edit="${tp.id}">Edit</button>` : ''}
                             <a class="btn secondary small" href="/api/invoices/${tp.invoice_id}/pdf" target="_blank">PDF</a>` : ''}
                         <div class="li-right">${money(tp.total_cents || 0)}</div>
                         <button class="danger small" data-pass-del="${tp.id}" data-pass-name="${esc(tp.contact_name)}">${ICON_X}</button>
                     </div>`;
                 }).join('');
+                $passes.querySelectorAll('[data-pass-edit]').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                        const tp = passesData.passes.find((x) => String(x.id) === btn.getAttribute('data-pass-edit'));
+                        if (tp) openEditPassDialog(tp);
+                    });
+                });
                 $passes.querySelectorAll('.pass-status').forEach((sel) => {
                     sel.addEventListener('change', async () => {
                         try {
@@ -3026,6 +3263,16 @@
                 </div>
             </div>
             <div id="todo-overdue"></div>
+            <div class="card" id="ical-card" style="margin-top:12px">
+                <div style="font-weight:700">📆 Subscribe in your phone calendar</div>
+                <p class="muted" style="margin:4px 0 8px">Dated to-dos appear in Apple/Google Calendar and
+                   stay up to date on their own. Keep the link private — anyone with it can read the list.</p>
+                <div class="form-actions" style="justify-content:flex-start;margin-top:0">
+                    <a class="btn small" id="ical-sub" href="#">Subscribe</a>
+                    <button class="secondary small" id="ical-copy">Copy link</button>
+                    ${isAdmin() ? '<span class="spacer"></span><button class="secondary small" id="ical-rotate">New link</button>' : ''}
+                </div>
+            </div>
             <h2>No date yet</h2>
             <div id="todo-list" class="muted">Loading…</div>
             <div class="fab-row">
@@ -3047,6 +3294,29 @@
                 toast(err.message, true);
             }
         };
+        const icalUrl = () => `${location.origin}/api/ical/todos.ics?token=${state.settings.ical_token || ''}`;
+        const subBtn = document.getElementById('ical-sub');
+        if (subBtn) {
+            subBtn.href = icalUrl().replace(/^https?:/, 'webcal:');
+            subBtn.setAttribute('target', '_blank');
+        }
+        const icalCopy = document.getElementById('ical-copy');
+        if (icalCopy) icalCopy.addEventListener('click', () => {
+            navigator.clipboard.writeText(icalUrl()).then(() => toast('Calendar link copied.'),
+                () => toast(icalUrl(), true));
+        });
+        const icalRotate = document.getElementById('ical-rotate');
+        if (icalRotate) icalRotate.addEventListener('click', async () => {
+            if (!confirm('Make a new calendar link? Any device already subscribed stops updating.')) return;
+            try {
+                const res = await api('POST', '/api/settings/rotate-ical-token');
+                state.settings.ical_token = res.token;
+                toast('New calendar link created — subscribe again.');
+                renderTodos();
+            } catch (err) {
+                toast(err.message, true);
+            }
+        });
         document.getElementById('td-add').addEventListener('click', add);
         document.getElementById('td-new-title').addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
 

@@ -14,6 +14,8 @@
         'intermediate-advanced': '#e65100', 'advanced': '#8e24aa'
     };
     const MODE = { running: ' 🏃', cycling: ' 🚴', horse: '', foot: '' };
+    const VENUES = { instructor: '', arena: 'Arena', outride: 'Outride' };
+    const VENUE_COLORS = { arena: '#e65100', outride: '#2e7d32' };
 
     let date = todayStr();
     let week = false;
@@ -68,6 +70,7 @@
                     <span class="rider-name">${esc(rd.name)}</span>
                     ${rd.horse ? `<span class="rider-horse has">${esc(rd.horse)}</span>`
                         : '<span class="rider-horse none">no horse yet</span>'}
+                    ${rd.alt_horse ? `<span class="rider-alt">or ${esc(rd.alt_horse)}</span>` : ''}
                     ${rd.pickup ? `<span class="rider-pickup">pick-up: ${esc(rd.pickup)}</span>` : ''}
                 </div>`).join('');
         } else if (r.horses_only.length) {
@@ -87,6 +90,7 @@
             <div class="ride-top">
                 <span class="ride-time">${esc(r.start_time)}–${esc(endTime(r.start_time, r.duration_min))}</span>
                 <span class="ride-dur">${r.duration_min} min</span>
+                ${VENUES[r.venue] ? `<span class="ride-venue" style="color:${VENUE_COLORS[r.venue]}">${VENUES[r.venue]}</span>` : ''}
                 <span class="ride-level${r.level ? '' : ' none'}"
                       style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
             </div>

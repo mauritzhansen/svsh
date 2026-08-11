@@ -109,6 +109,7 @@ CREATE TABLE recurring_rides (
     duration_min INT,
     ride_type_id BIGINT REFERENCES ride_types(id),
     level TEXT CHECK (level IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
+    venue TEXT NOT NULL DEFAULT 'instructor' CHECK (venue IN ('instructor', 'arena', 'outride')),
     active BOOLEAN NOT NULL DEFAULT true,
     start_date DATE NOT NULL DEFAULT CURRENT_DATE,
     end_date DATE,
@@ -149,6 +150,8 @@ CREATE TABLE rides (
     ride_type_name TEXT, -- snapshot, filled when the ride type is deleted so history keeps its label
     is_block BOOLEAN NOT NULL DEFAULT false,
     all_day BOOLEAN NOT NULL DEFAULT false, -- whole-day block (only used with is_block)
+    -- where it happens; 'instructor' = the instructor decides on the day
+    venue TEXT NOT NULL DEFAULT 'instructor' CHECK (venue IN ('instructor', 'arena', 'outride')),
     -- Experience level of the ride; drives the calendar colour coding
     level TEXT CHECK (level IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- 'cancelled' is a tombstone for a deleted occurrence of a recurring ride:
@@ -164,6 +167,7 @@ CREATE TABLE ride_participants (
     id BIGSERIAL PRIMARY KEY,
     ride_id BIGINT NOT NULL REFERENCES rides(id) ON DELETE CASCADE,
     horse_id BIGINT REFERENCES horses(id), -- NULL = horse not assigned yet
+    alt_horse_id BIGINT REFERENCES horses(id), -- optional stand-in, instructor picks on the day
     contact_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL, -- NULL = open seat
     -- Seat came from the weekly template (a fixed lesson) — term passes cover
     -- only these (plus credit-based make-ups), not extra ad-hoc bookings

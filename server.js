@@ -557,6 +557,13 @@ app.post('/api/horses/:id/block', requireAuth, async (req, res) => {
         }
         const dates = datesInRange(from, to);
         if (dates.length > 366) return res.status(400).json({ error: 'Range too long (max 1 year).' });
+        // optional part-day block: a timed block instead of a whole-day one
+        const startTime = TIME_RE.test((req.body || {}).start_time || '') ? req.body.start_time : null;
+        const durationMin = Number.isInteger((req.body || {}).duration_min) && req.body.duration_min > 0
+            ? req.body.duration_min : null;
+        if (startTime && !durationMin) {
+            return res.status(400).json({ error: 'Give an end time for a part-day block.' });
+        }
         const { rows: horseRows } = await pool.query('SELECT name FROM horses WHERE id = $1', [req.params.id]);
         if (!horseRows[0]) return res.status(404).json({ error: 'Horse not found.' });
 
@@ -564,19 +571,21 @@ app.post('/api/horses/:id/block', requireAuth, async (req, res) => {
         let created = 0;
         await client.query('BEGIN');
         for (const date of dates) {
-            const { rows: busy } = await client.query(
-                `SELECT 1 FROM rides r
-                  WHERE r.date = $1 AND r.status = 'active'
-                    AND (EXISTS (SELECT 1 FROM ride_participants rp
-                                  WHERE rp.ride_id = r.id AND rp.horse_id = $2)
-                      OR EXISTS (SELECT 1 FROM ride_guides rg
-                                  WHERE rg.ride_id = r.id AND rg.horse_id = $2))
-                  LIMIT 1`, [date, req.params.id]);
-            if (busy[0]) { skipped.push(date); continue; }
+            const conflicts = startTime
+                ? await findConflicts(date, startTime, [req.params.id], [], null, false, durationMin)
+                : (await client.query(
+                    `SELECT 1 FROM rides r
+                      WHERE r.date = $1 AND r.status = 'active'
+                        AND (EXISTS (SELECT 1 FROM ride_participants rp
+                                      WHERE rp.ride_id = r.id AND rp.horse_id = $2)
+                          OR EXISTS (SELECT 1 FROM ride_guides rg
+                                      WHERE rg.ride_id = r.id AND rg.horse_id = $2))
+                      LIMIT 1`, [date, req.params.id])).rows.length ? ['busy'] : [];
+            if (conflicts.length) { skipped.push(date); continue; }
             const { rows: ins } = await client.query(
-                `INSERT INTO rides (date, start_time, is_block, all_day, notes)
-                 VALUES ($1, '00:00', true, true, $2) RETURNING id`,
-                [date, (req.body || {}).notes || '']);
+                `INSERT INTO rides (date, start_time, duration_min, is_block, all_day, notes)
+                 VALUES ($1, $2, $3, true, $4, $5) RETURNING id`,
+                [date, startTime || '00:00', durationMin, !startTime, (req.body || {}).notes || '']);
             await client.query(
                 'INSERT INTO ride_participants (ride_id, horse_id) VALUES ($1, $2)',
                 [ins[0].id, req.params.id]);
@@ -1073,7 +1082,7 @@ async function findConflicts(date, time, horseIds, guideIds, excludeRideId, allD
 
 // Validate and normalize a ride payload. Returns { error } or the clean parts.
 function parseRideBody(body) {
-    const { date, ride_type_id, is_block, all_day, level, duration_min, notes } = body || {};
+    const { date, ride_type_id, is_block, all_day, level, duration_min, notes, venue } = body || {};
     const isBlock = !!is_block;
     const rideLevel = LEVELS.includes(level) ? level : null;
     const allDay = isBlock && !!all_day; // only blocks can span the whole day
@@ -1098,6 +1107,7 @@ function parseRideBody(body) {
         }
         participants.push({
             horse_id: horseId,
+            alt_horse_id: p.alt_horse_id || null,
             contact_id: contactId,
             price_cents: Number.isInteger(p.price_cents) ? p.price_cents : null
         });
@@ -1128,6 +1138,7 @@ function parseRideBody(body) {
     return {
         date, start_time, isBlock, allDay,
         level: rideLevel,
+        venue: ['arena', 'outride'].includes(venue) ? venue : 'instructor',
         duration_min: Number.isInteger(duration_min) && duration_min > 0 ? duration_min : null,
         ride_type_id: ride_type_id || null,
         notes: notes || '',
@@ -1140,9 +1151,9 @@ function parseRideBody(body) {
 async function insertRideChildren(client, rideId, participants, guides) {
     for (const p of participants) {
         await client.query(
-            `INSERT INTO ride_participants (ride_id, horse_id, contact_id, from_recurring, price_cents)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [rideId, p.horse_id, p.contact_id, !!p.from_recurring, p.price_cents]);
+            `INSERT INTO ride_participants (ride_id, horse_id, alt_horse_id, contact_id, from_recurring, price_cents)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [rideId, p.horse_id, p.alt_horse_id || null, p.contact_id, !!p.from_recurring, p.price_cents]);
     }
     for (const g of guides) {
         await client.query(
@@ -1208,10 +1219,10 @@ async function materializeRecurring(from, to) {
             try {
                 await client.query('BEGIN');
                 const { rows } = await client.query(
-                    `INSERT INTO rides (date, start_time, duration_min, ride_type_id, recurring_id, level, notes)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    `INSERT INTO rides (date, start_time, duration_min, ride_type_id, recurring_id, level, venue, notes)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                      ON CONFLICT (recurring_id, date) DO NOTHING RETURNING id`,
-                    [date, t.start_time, t.duration_min, t.ride_type_id, t.id, t.level, t.notes || '']);
+                    [date, t.start_time, t.duration_min, t.ride_type_id, t.id, t.level, t.venue || 'instructor', t.notes || '']);
                 if (rows[0]) {
                     await insertRideChildren(client, rows[0].id,
                         dueParts.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id, from_recurring: true, price_cents: null })),
@@ -1239,7 +1250,7 @@ async function fetchRides(from, to) {
     if (!rides.length) return [];
     const ids = rides.map((r) => r.id);
     const { rows: parts } = await pool.query(
-        `SELECT rp.*, h.name AS horse_name, c.name AS contact_name,
+        `SELECT rp.*, h.name AS horse_name, ah.name AS alt_horse_name, c.name AS contact_name,
                 c.needs_collection, c.collection_teacher, c.collection_class,
                 (il.id IS NOT NULL) AS invoiced,
                 EXISTS (SELECT 1 FROM term_passes tp
@@ -1250,6 +1261,7 @@ async function fetchRides(from, to) {
            FROM ride_participants rp
            JOIN rides r ON r.id = rp.ride_id
            LEFT JOIN horses h ON h.id = rp.horse_id
+           LEFT JOIN horses ah ON ah.id = rp.alt_horse_id
            LEFT JOIN contacts c ON c.id = rp.contact_id
            LEFT JOIN invoice_lines il ON il.participant_id = rp.id
           WHERE rp.ride_id = ANY($1::bigint[])
@@ -1331,9 +1343,9 @@ app.post('/api/rides', requireAuth, async (req, res) => {
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
         const { rows } = await client.query(
-            `INSERT INTO rides (date, start_time, duration_min, ride_type_id, is_block, all_day, level, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-            [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.notes]);
+            `INSERT INTO rides (date, start_time, duration_min, ride_type_id, is_block, all_day, level, venue, notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+            [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes]);
         await insertRideChildren(client, rows[0].id, parsed.participants, parsed.guides);
         await client.query('COMMIT');
         res.json({ ride_id: rows[0].id });
@@ -1365,9 +1377,9 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
         await client.query(
-            `UPDATE rides SET date = $2, start_time = $3, duration_min = $4, ride_type_id = $5, is_block = $6, all_day = $7, level = $8, notes = $9
+            `UPDATE rides SET date = $2, start_time = $3, duration_min = $4, ride_type_id = $5, is_block = $6, all_day = $7, level = $8, venue = $9, notes = $10
               WHERE id = $1`,
-            [req.params.id, parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.notes]);
+            [req.params.id, parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes]);
         // Children are replaced wholesale — carry the fixed-lesson provenance
         // over for riders who were already on the ride from the template
         const { rows: prevParts } = await client.query(
@@ -1408,11 +1420,11 @@ app.post('/api/rides/:id/repeat', requireRole('helper'), async (req, res) => {
 
         await client.query('BEGIN');
         const { rows: tpl } = await client.query(
-            `INSERT INTO recurring_rides (weekday, start_time, duration_min, ride_type_id, level,
+            `INSERT INTO recurring_rides (weekday, start_time, duration_min, ride_type_id, level, venue,
                                           start_date, end_date, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
             [isoWeekday(ride.date), ride.start_time, ride.duration_min, ride.ride_type_id,
-             ride.level, ride.date, endDate, ride.notes || '']);
+             ride.level, ride.venue, ride.date, endDate, ride.notes || '']);
         // Horses are usually assigned per day, so the template carries riders only
         const freq = {};
         (Array.isArray((req.body || {}).participants) ? req.body.participants : []).forEach((p) => {
@@ -1472,6 +1484,44 @@ app.put('/api/rides/:id/repeat-riders', requireRole('helper'), async (req, res) 
     } catch (err) {
         await client.query('ROLLBACK');
         handleError(res, err, 'Updating the repeat');
+    } finally {
+        client.release();
+    }
+});
+
+// Take a rider off the weekly series entirely, from this date onwards.
+// Their seat on past rides (and any invoiced ride) is left untouched.
+app.delete('/api/rides/:id/repeat-riders/:contactId', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [req.params.id]);
+        const ride = rows[0];
+        if (!ride) return res.status(404).json({ error: 'Ride not found.' });
+        if (!ride.recurring_id) return res.status(400).json({ error: 'This ride does not repeat.' });
+        await client.query('BEGIN');
+        await client.query(
+            'DELETE FROM recurring_participants WHERE recurring_id = $1 AND contact_id = $2',
+            [ride.recurring_id, req.params.contactId]);
+        // drop their seat from later, not-yet-invoiced occurrences
+        await client.query(
+            `DELETE FROM ride_participants rp
+              USING rides r
+              WHERE rp.ride_id = r.id AND r.recurring_id = $1 AND r.date > $2
+                AND rp.contact_id = $3
+                AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)`,
+            [ride.recurring_id, ride.date, req.params.contactId]);
+        // tidy up occurrences that are now completely empty
+        await client.query(
+            `DELETE FROM rides r
+              WHERE r.recurring_id = $1 AND r.date > $2
+                AND NOT EXISTS (SELECT 1 FROM ride_participants rp WHERE rp.ride_id = r.id)
+                AND NOT EXISTS (SELECT 1 FROM ride_guides rg WHERE rg.ride_id = r.id)`,
+            [ride.recurring_id, ride.date]);
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Removing the rider from the series');
     } finally {
         client.release();
     }
@@ -1929,6 +1979,8 @@ app.get('/api/term-passes', requireRole('helper'), async (req, res) => {
         const { rows } = await pool.query(
             `SELECT tp.*, c.name AS contact_name,
                     i.number AS invoice_number, i.status AS invoice_status, i.total_cents,
+                    (SELECT il.description FROM invoice_lines il
+                      WHERE il.invoice_id = i.id ORDER BY il.id LIMIT 1) AS invoice_line,
                     (SELECT count(*)::int FROM ride_participants rp
                       JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                      WHERE rp.contact_id = tp.contact_id
@@ -1989,6 +2041,68 @@ app.post('/api/term-passes', requireRole('helper'), async (req, res) => {
     } catch (err) {
         await client.query('ROLLBACK');
         handleError(res, err, 'Creating term pass');
+    } finally {
+        client.release();
+    }
+});
+
+// Edit a term pass and its advance invoice together, while the invoice is
+// still a draft (period, amount and the line text). Anything already sent or
+// paid is refused — issue a separate invoice for the difference instead.
+app.put('/api/term-passes/:id', requireRole('helper'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { rows } = await pool.query(
+            `SELECT tp.*, i.status AS invoice_status, i.number AS invoice_number,
+                    c.name AS contact_name
+               FROM term_passes tp
+               JOIN contacts c ON c.id = tp.contact_id
+               LEFT JOIN invoices i ON i.id = tp.invoice_id
+              WHERE tp.id = $1`, [req.params.id]);
+        const pass = rows[0];
+        if (!pass) return res.status(404).json({ error: 'Term pass not found.' });
+        if (pass.invoice_id && pass.invoice_status !== 'draft') {
+            return res.status(400).json({
+                error: `${pass.invoice_number} is already marked ${pass.invoice_status} and cannot be changed. ` +
+                       'Issue a separate invoice for the difference instead.'
+            });
+        }
+        const { period_start, period_end, amount_cents, description } = req.body || {};
+        if (!DATE_RE.test(period_start || '') || !DATE_RE.test(period_end || '') || period_start > period_end) {
+            return res.status(400).json({ error: 'A valid period is required.' });
+        }
+        if (!Number.isInteger(amount_cents) || amount_cents <= 0) {
+            return res.status(400).json({ error: 'A price is required.' });
+        }
+
+        await client.query('BEGIN');
+        await client.query(
+            'UPDATE term_passes SET period_start = $2, period_end = $3 WHERE id = $1',
+            [pass.id, period_start, period_end]);
+        if (pass.invoice_id) {
+            await client.query(
+                `UPDATE invoices SET period_start = $2, period_end = $3, total_cents = $4
+                  WHERE id = $1`,
+                [pass.invoice_id, period_start, period_end, amount_cents]);
+            const desc = String(description || '').trim() ||
+                `Term fee ${pass.contact_name}: fixed lessons ${period_start} to ${period_end}`;
+            // the advance invoice always has exactly one line
+            const { rowCount } = await client.query(
+                `UPDATE invoice_lines SET description = $2, ride_date = $3, amount_cents = $4
+                  WHERE invoice_id = $1`,
+                [pass.invoice_id, desc, period_start, amount_cents]);
+            if (!rowCount) {
+                await client.query(
+                    `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
+                     VALUES ($1, $2, $3, $4)`,
+                    [pass.invoice_id, desc, period_start, amount_cents]);
+            }
+        }
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Updating the term pass');
     } finally {
         client.release();
     }
@@ -2289,6 +2403,91 @@ app.get('/api/invoices/batch-pdf', requireRole('helper'), async (req, res) => {
     }
 });
 
+// ---------- iCal subscription (dated to-dos) ----------
+// Calendar apps poll this URL, so it is guarded by its own token rather than
+// a session. Only dated, still-open to-dos are published.
+function icsEscape(text) {
+    return String(text || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/;/g, '\\;')
+        .replace(/,/g, '\\,')
+        .replace(/\r?\n/g, '\\n');
+}
+
+function icsFold(line) {
+    // RFC 5545: fold lines longer than 75 octets with a leading space
+    if (line.length <= 73) return line;
+    const parts = [];
+    for (let i = 0; i < line.length; i += 73) parts.push(i ? ' ' + line.slice(i, i + 73) : line.slice(0, 73));
+    return parts.join('\r\n');
+}
+
+app.get('/api/ical/todos.ics', async (req, res) => {
+    try {
+        const { rows: tok } = await pool.query(
+            "SELECT value FROM settings WHERE key = 'ical_token'");
+        const token = tok[0] && tok[0].value;
+        const given = String(req.query.token || '');
+        if (!token || given.length !== token.length ||
+            !crypto.timingSafeEqual(Buffer.from(given.padEnd(token.length).slice(0, token.length)), Buffer.from(token))) {
+            return res.status(404).type('text/plain').send('Not found');
+        }
+        const { rows: todos } = await pool.query(
+            `SELECT id, title, todo_date, todo_time, done_at FROM todos
+              WHERE todo_date IS NOT NULL AND done_at IS NULL
+              ORDER BY todo_date`);
+        const settings = await loadSettings();
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+
+        const lines = [
+            'BEGIN:VCALENDAR', 'VERSION:2.0',
+            'PRODID:-//SVSH//Stable to-dos//EN',
+            'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+            `X-WR-CALNAME:${icsEscape((settings.business_name || 'Stable') + ' to-dos')}`,
+            'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H'
+        ];
+        for (const t of todos) {
+            const day = String(t.todo_date).replace(/-/g, '');
+            lines.push('BEGIN:VEVENT');
+            lines.push(`UID:todo-${t.id}@svsh`);
+            lines.push(`DTSTAMP:${stamp}`);
+            if (t.todo_time) {
+                const hm = String(t.todo_time).slice(0, 5).replace(':', '');
+                const endMin = parseInt(hm.slice(0, 2), 10) * 60 + parseInt(hm.slice(2), 10) + 60;
+                const end = `${String(Math.floor(endMin / 60) % 24).padStart(2, '0')}${String(endMin % 60).padStart(2, '0')}`;
+                lines.push(`DTSTART:${day}T${hm}00`);
+                lines.push(`DTEND:${day}T${end}00`);
+            } else {
+                lines.push(`DTSTART;VALUE=DATE:${day}`);
+                lines.push(`DTEND;VALUE=DATE:${shiftDays(t.todo_date, 1).replace(/-/g, '')}`);
+            }
+            lines.push(icsFold(`SUMMARY:${icsEscape(t.title)}`));
+            lines.push('END:VEVENT');
+        }
+        lines.push('END:VCALENDAR');
+
+        res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+        res.setHeader('Content-Disposition', 'inline; filename="svsh-todos.ics"');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(lines.join('\r\n') + '\r\n');
+    } catch (err) {
+        console.error('iCal feed failed:', err);
+        res.status(500).type('text/plain').send('Error');
+    }
+});
+
+app.post('/api/settings/rotate-ical-token', requireRole('admin'), async (req, res) => {
+    try {
+        const token = crypto.randomBytes(32).toString('hex');
+        await pool.query(
+            `INSERT INTO settings (key, value) VALUES ('ical_token', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [token]);
+        res.json({ token });
+    } catch (err) {
+        handleError(res, err, 'Rotating the calendar link');
+    }
+});
+
 // ---------- Public read-only schedule (instructors, no login) ----------
 // Guarded by an unguessable token, not a password: one link to paste into the
 // staff WhatsApp group. Shows only what instructors need for the day.
@@ -2326,11 +2525,13 @@ app.get('/api/public/schedule', async (req, res) => {
                         start_time: String(r.start_time).slice(0, 5),
                         duration_min: r.duration_min,
                         level: r.level,
+                        venue: r.venue,
                         is_block: r.is_block,
                         notes: r.notes || '',
                         riders: r.participants.filter((p) => p.contact_id).map((p) => ({
                             name: p.contact_name,
                             horse: p.horse_name,
+                            alt_horse: p.alt_horse_name,
                             pickup: p.needs_collection
                                 ? [p.collection_teacher, p.collection_class].filter(Boolean).join(', ') || 'yes'
                                 : null

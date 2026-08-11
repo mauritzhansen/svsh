@@ -987,3 +987,22 @@ table.ridegrid th.ridecol { vertical-align: middle; }
 .wa-link { font-weight: 600; }
 .tel-link { margin-left: 6px; text-decoration: none; }
 .horse-block-btn.is-blocked { opacity: 0.95; }
+.intake-kid { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
+.intake-kid:last-child { border-bottom: none; }
+
+/* Alternative horse: offered, not assigned */
+.rider-alt { font-size: 11.5px; font-weight: 600; color: var(--muted); font-style: italic; }
+.horse-fill.alt {
+    background: none;
+    border: 2px dashed;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+}
+.pr-alt-toggle { flex: 0 0 auto; font-size: 11px; padding: 6px 7px; }
+.ride-venue { margin-left: auto; font-size: 11.5px; font-weight: 800; letter-spacing: 0.3px; text-transform: uppercase; }
+.ride-venue + .ride-level { margin-left: 10px; }
