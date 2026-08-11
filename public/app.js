@@ -466,7 +466,7 @@
     const venueOptions = (selected) => Object.entries(VENUES).map(([k, label]) =>
         `<option value="${k}" ${selected === k ? 'selected' : ''}>${label || "Instructor's choice"}</option>`).join('');
 
-    const levelOptions = (selected) = '<option value="">(no level)</option>' +
+    const levelOptions = (selected) => '<option value="">(no level)</option>' +
         LEVELS.map((l) => `<option value="${l}" ${selected === l ? 'selected' : ''}>${LEVEL_LABELS[l]}</option>`).join('');
     const guideDisplayName = (g) => `${g.guide_name || g.name}${(g.is_assistant) ? ' (ass)' : ''}`;
     const guideDot = (g) => `<span class="guide-dot" style="background:${esc(g.guide_color || g.color || '#6a6a66')}"></span>`;
