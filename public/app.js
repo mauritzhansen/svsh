@@ -56,6 +56,12 @@
             { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
     }
 
+    // Compact form for the tight day-grid header: "Wed, 12 Aug 2026"
+    function fmtDateShort(dateStr) {
+        return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB',
+            { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    }
+
     const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     let toastTimer = null;
@@ -739,7 +745,7 @@
             </div>
             <div class="cal-nav">
                 <button class="secondary daynav" id="cal-prev">‹</button>
-                <button class="secondary" id="cal-date-btn">📅 ${esc(fmtDate(date))}</button>
+                <button class="secondary" id="cal-date-btn">📅 ${esc(fmtDateShort(date))}</button>
                 <button class="secondary daynav" id="cal-next">›</button>
                 <button class="secondary daynav" id="cal-today">Today</button>
             </div>
@@ -1501,11 +1507,15 @@
     // ---------- Ride dialog ----------
     // Horse options for a rider row: ⭐ preferred first, then standard; the
     // rider's caution horses leave the standard list into a flagged group.
-    function partHorseOptions(selectedId, busy, contactId, placeholder) {
+    function partHorseOptions(selectedId, busy, contactId, opts) {
+        opts = opts || {};
         const prefs = prefsFor(contactId);
-        const opt = (h, pre) => `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${pre}${esc(h.name)}</option>`;
-        let head = `<option value="">${placeholder || '(no horse yet)'}</option>`;
-        const avail = activeHorses().filter((h) => keepOption(h.id, selectedId, busy))
+        // Alternatives keep busy horses on the list, just labelled — the instructor
+        // may still want one if the other ride frees up. Primary picks hide them.
+        const inUse = (h) => busy && busy.has(String(h.id)) && String(h.id) !== String(selectedId);
+        const opt = (h, pre) => `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${pre}${esc(h.name)}${opts.markInUse && inUse(h) ? ' — in use' : ''}</option>`;
+        let head = `<option value="">${opts.placeholder || '(no horse yet)'}</option>`;
+        const avail = activeHorses().filter((h) => opts.markInUse || keepOption(h.id, selectedId, busy))
             .sort((a, b) => a.name.localeCompare(b.name));
         const isOwn = (h) => contactId && String(h.owner_contact_id) === String(contactId);
         const ownedByOther = (h) => h.owner_contact_id && !isOwn(h);
@@ -1539,10 +1549,11 @@
         return html;
     }
 
-    // Same list as the primary picker — only horses free at that time, with the
-    // same preferred/caution grouping — so an alternative is always a real option.
+    // Every horse stays selectable as an alternative; the ones already booked at
+    // that time are flagged rather than hidden.
     function altHorseOptions(selectedId, busy, contactId) {
-        return partHorseOptions(selectedId, busy, contactId, '(no alternative)');
+        return partHorseOptions(selectedId, busy, contactId,
+            { placeholder: '(no alternative)', markInUse: true });
     }
 
     function participantRowHtml(p, withResched, freq) {

@@ -921,8 +921,11 @@ body.page-calendar .fab-row { flex: 0 0 auto; }
 .staff-item { display: inline-flex; align-items: center; gap: 3px; }
 
 /* Date controls inside the grid's top-left cell */
-.cal-nav { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; }
-.cal-nav .daynav { padding: 7px 12px; }
+.cal-nav { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }
+.cal-nav .daynav { padding: 7px 10px; }
+/* keep the whole date row on one line in the grid's corner cell */
+.cal-nav #cal-date-btn { white-space: nowrap; padding: 7px 9px; }
+.cal-nav #cal-today { white-space: nowrap; padding: 7px 9px; }
 table.ridegrid th.ridecol { vertical-align: middle; }
 .cal-actions { display: flex; width: 100%; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
 
