@@ -922,10 +922,30 @@ body.page-calendar .fab-row { flex: 0 0 auto; }
 
 /* Date controls inside the grid's top-left cell */
 .cal-nav { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }
-.cal-nav .daynav { padding: 7px 10px; }
 /* keep the whole date row on one line in the grid's corner cell */
-.cal-nav #cal-date-btn { white-space: nowrap; padding: 7px 9px; }
-.cal-nav #cal-today { white-space: nowrap; padding: 7px 9px; }
+.cal-nav #cal-date-btn, .cal-nav #cal-today { white-space: nowrap; }
+.cal-nav #cal-date-btn { padding: 6px 8px; }
+/* big chevrons, no button chrome — the arrow itself is the target */
+.cal-nav .daynav {
+    padding: 0 6px;
+    min-width: 30px;
+    font-size: 30px;
+    line-height: 1;
+    border: none;
+    background: none;
+    color: var(--green);
+}
+.cal-nav .daynav:hover { background: none; color: var(--text); }
+/* Today reads as a link so it's obviously clickable next to the arrows */
+.cal-nav #cal-today {
+    padding: 6px 4px;
+    border: none;
+    background: none;
+    color: var(--green);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.cal-nav #cal-today:hover { background: none; color: var(--text); }
 table.ridegrid th.ridecol { vertical-align: middle; }
 .cal-actions { display: flex; width: 100%; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
 

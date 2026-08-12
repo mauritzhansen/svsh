@@ -354,14 +354,20 @@
     }
 
     // An instructor may run two rides at once, so overlapping ones stay on the
-    // list — labelled with how long the clash is. `busy` only hides instructors
-    // already picked on another row of this same ride.
+    // list — but below the free ones, labelled with how long the clash is.
+    // `busy` only hides instructors already picked on another row of this ride.
     function guideOptions(selectedId, busy, overlaps) {
-        return '<option value="">(no instructor)</option>' +
-            state.guides.filter((g) => g.active && keepOption(g.id, selectedId, busy)).map((g) => {
-                const mins = overlaps && overlaps[String(g.id)];
-                return `<option value="${g.id}" ${String(selectedId) === String(g.id) ? 'selected' : ''}>${esc(g.name)}${g.is_assistant ? ' (ass)' : ''}${mins ? ` (overlaps ${mins} min)` : ''}</option>`;
-            }).join('');
+        const clash = (g) => (overlaps && overlaps[String(g.id)]) || 0;
+        const opt = (g) => `<option value="${g.id}" ${String(selectedId) === String(g.id) ? 'selected' : ''}>${esc(g.name)}${g.is_assistant ? ' (ass)' : ''}${clash(g) ? ` (overlaps ${clash(g)} min)` : ''}</option>`;
+        const avail = state.guides.filter((g) => g.active && keepOption(g.id, selectedId, busy))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        let html = '<option value="">(no instructor)</option>' +
+            avail.filter((g) => !clash(g)).map(opt).join('');
+        const busyNow = avail.filter(clash);
+        if (busyNow.length) {
+            html += `<optgroup label="⧉ Already on another ride">${busyNow.map(opt).join('')}</optgroup>`;
+        }
+        return html;
     }
 
     // Possible parents: contacts that are not riders themselves (and not the contact being edited)
@@ -797,10 +803,10 @@
                 <button class="page-tab" id="tab-fixed">🔁 Fixed rides</button>
             </div>
             <div class="cal-nav">
-                <button class="secondary daynav" id="cal-prev">‹</button>
-                <button class="secondary" id="cal-date-btn">📅 ${esc(fmtDateShort(date))}</button>
-                <button class="secondary daynav" id="cal-next">›</button>
-                <button class="secondary daynav" id="cal-today">Today</button>
+                <button class="secondary daynav" id="cal-prev" title="Previous day" aria-label="Previous day">‹</button>
+                <button class="secondary" id="cal-date-btn" title="Pick a date">${esc(fmtDateShort(date))}</button>
+                <button class="secondary daynav" id="cal-next" title="Next day" aria-label="Next day">›</button>
+                <button class="secondary" id="cal-today" title="Jump to today">Today</button>
             </div>
             <div class="cal-actions">
                 <button class="small" id="cal-add">＋ New ride</button>
