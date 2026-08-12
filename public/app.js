@@ -1659,6 +1659,8 @@
         const locked = isEdit && ride.invoiced;
         const time = isEdit ? hhmm(ride.start_time) : (defaults.time || '09:00');
         const dayRides = defaults.dayRides || [];
+        // The reports page opens this dialog too — redraw whatever opened it
+        const afterSave = defaults.onSaved || renderCalendar;
         const currentDuration = () => {
             const manual = parseInt((document.getElementById('ride-duration') || {}).value, 10);
             if (manual > 0) return manual;
@@ -1994,7 +1996,7 @@
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
                     : (defaults.addContactId ? 'Saved — reschedule credit used.' : 'Saved.'));
-                renderCalendar();
+                afterSave();
             } catch (err) {
                 dialogError(err.message);
             }
@@ -2016,7 +2018,7 @@
                 toast(scope === 'all' ? 'The whole series was deleted.'
                     : scope === 'future' ? 'This and all later rides were deleted.'
                     : 'Deleted.');
-                renderCalendar();
+                afterSave();
             } catch (err) {
                 dialogError(err.message);
             }
@@ -3556,9 +3558,15 @@
 
     async function renderReports() {
         if (!state.reportRange) state.reportRange = monthBounds(0);
+        if (!state.reportTab) state.reportTab = 'horses';
         const [from, to] = state.reportRange;
+        const tab = state.reportTab;
         $view.innerHTML = `
-            <h1>📊 Rides per horse</h1>
+            <h1>📊 Reports</h1>
+            <div class="page-tabs">
+                <button class="page-tab ${tab === 'horses' ? 'active' : ''}" data-rep-tab="horses">🐴 Rides per horse</button>
+                <button class="page-tab ${tab === 'types' ? 'active' : ''}" data-rep-tab="types">🏷️ Ride types</button>
+            </div>
             <div class="card">
                 <div class="form-row">
                     <div><label>From</label><input type="date" id="rep-from" value="${from}"></div>
@@ -3572,11 +3580,17 @@
                 </div>
             </div>
             <div id="rep-result" class="muted">Loading…</div>
-            <p class="muted">Counts booked riders plus horses ridden by a guide. Open seats and blocked horses don't count; guide rides earn no income.</p>`;
+            <p class="muted">${tab === 'horses'
+                ? "Counts booked riders plus horses ridden by a guide. Open seats and blocked horses don't count; guide rides earn no income."
+                : 'Tap a ride type to break it down by date, then tap a date to see and edit the rides themselves. Blocks are excluded.'}</p>`;
         const rerun = (range) => {
             state.reportRange = range;
             renderReports();
         };
+        $view.querySelectorAll('[data-rep-tab]').forEach((b) => b.addEventListener('click', () => {
+            state.reportTab = b.getAttribute('data-rep-tab');
+            renderReports();
+        }));
         document.getElementById('rep-this').addEventListener('click', () => rerun(monthBounds(0)));
         document.getElementById('rep-last').addEventListener('click', () => rerun(monthBounds(-1)));
         document.getElementById('rep-go').addEventListener('click', () => {
@@ -3584,6 +3598,8 @@
             const t = document.getElementById('rep-to').value;
             if (f && t) rerun([f, t]);
         });
+
+        if (tab === 'types') return renderRideTypeReport(from, to);
 
         try {
             const data = await api('GET', `/api/reports/horse-usage?from=${from}&to=${to}`);
@@ -3633,6 +3649,152 @@
         } catch (err) {
             document.getElementById('rep-result').textContent = err.message;
         }
+    }
+
+    // Ride types, drilled down three levels: type → dates → the rides themselves.
+    // Expanded rows are remembered in state so a save can redraw without
+    // collapsing everything the user opened.
+    async function renderRideTypeReport(from, to) {
+        const $res = document.getElementById('rep-result');
+        state.repOpenTypes = state.repOpenTypes || new Set();
+        state.repOpenDates = state.repOpenDates || new Set();
+        let data;
+        try {
+            data = await api('GET', `/api/reports/ride-types?from=${from}&to=${to}`);
+        } catch (err) {
+            $res.textContent = err.message;
+            return;
+        }
+        if (!data.rows.length) {
+            $res.classList.remove('muted');
+            $res.innerHTML = '<div class="card">No rides in this period.</div>';
+            return;
+        }
+
+        const types = [];       // {name, rides, seats, cents, mins, days:[...]}
+        const byName = {};
+        data.rows.forEach((r) => {
+            let t = byName[r.ride_type_name];
+            if (!t) {
+                t = byName[r.ride_type_name] = { name: r.ride_type_name, rides: 0, seats: 0, cents: 0, mins: 0, days: [] };
+                types.push(t);
+            }
+            t.rides += r.rides; t.seats += r.seats; t.cents += r.cents; t.mins += r.mins;
+            t.days.push(r);
+        });
+        types.sort((a, b) => b.rides - a.rides || a.name.localeCompare(b.name));
+        const total = types.reduce((acc, t) => ({
+            rides: acc.rides + t.rides, seats: acc.seats + t.seats,
+            cents: acc.cents + t.cents, mins: acc.mins + t.mins
+        }), { rides: 0, seats: 0, cents: 0, mins: 0 });
+
+        const hours = (m) => (m / 60).toFixed(1);
+        const per = (seats, rides) => (rides ? (seats / rides).toFixed(1) : '—');
+        const caret = (open) => `<span class="caret">${open ? '▾' : '▸'}</span>`;
+
+        $res.classList.remove('muted');
+        $res.innerHTML = `<div class="table-wrap"><table class="plain rep-tree">
+            <tr><th>Ride type</th><th class="num">Rides</th><th class="num">Riders</th>
+                <th class="num">Per ride</th><th class="num">Hours</th><th class="num">Income</th></tr>
+            ${types.map((t) => {
+                const open = state.repOpenTypes.has(t.name);
+                let rows = `<tr class="rep-type ${open ? 'open' : ''}" data-type="${esc(t.name)}">
+                    <td>${caret(open)}${esc(t.name)}</td>
+                    <td class="num"><b>${t.rides}</b></td>
+                    <td class="num">${t.seats}</td>
+                    <td class="num">${per(t.seats, t.rides)}</td>
+                    <td class="num">${hours(t.mins)}</td>
+                    <td class="num"><b>${money(t.cents)}</b></td></tr>`;
+                if (!open) return rows;
+                t.days.forEach((d) => {
+                    const key = t.name + '|' + d.date;
+                    const dOpen = state.repOpenDates.has(key);
+                    rows += `<tr class="rep-date ${dOpen ? 'open' : ''}" data-key="${esc(key)}" data-date="${d.date}">
+                        <td class="indent1">${caret(dOpen)}${esc(shortDate(d.date))}
+                            <span class="muted">${esc(WEEKDAYS[isoDow(d.date) - 1].slice(0, 3))}</span></td>
+                        <td class="num">${d.rides}</td>
+                        <td class="num">${d.seats}</td>
+                        <td class="num">${per(d.seats, d.rides)}</td>
+                        <td class="num">${hours(d.mins)}</td>
+                        <td class="num">${money(d.cents)}</td></tr>`;
+                    if (dOpen) {
+                        rows += `<tr class="rep-rides"><td colspan="6" class="indent2">
+                            <div class="rep-ride-list" data-for="${esc(key)}">Loading…</div></td></tr>`;
+                    }
+                });
+                return rows;
+            }).join('')}
+            <tr class="rep-total"><td><b>Total</b></td>
+                <td class="num"><b>${total.rides}</b></td>
+                <td class="num"><b>${total.seats}</b></td>
+                <td class="num"><b>${per(total.seats, total.rides)}</b></td>
+                <td class="num"><b>${hours(total.mins)}</b></td>
+                <td class="num"><b>${money(total.cents)}</b></td></tr>
+        </table></div>`;
+
+        const toggle = (set, key) => {
+            if (set.has(key)) set.delete(key); else set.add(key);
+            renderRideTypeReport(from, to);
+        };
+        $res.querySelectorAll('.rep-type').forEach((tr) => tr.addEventListener('click', () =>
+            toggle(state.repOpenTypes, tr.getAttribute('data-type'))));
+        $res.querySelectorAll('.rep-date').forEach((tr) => tr.addEventListener('click', () =>
+            toggle(state.repOpenDates, tr.getAttribute('data-key'))));
+
+        // Third level: the day's actual rides of that type, editable in place
+        for (const box of $res.querySelectorAll('.rep-ride-list')) {
+            const key = box.getAttribute('data-for');
+            const [typeName, date] = key.split('|');
+            try {
+                const dayRides = (await api('GET', `/api/rides?from=${date}&to=${date}`)).rides
+                    .filter((r) => !r.is_block && !r.all_day);
+                const mine = dayRides.filter((r) => rideTypeName(r) === typeName)
+                    .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
+                box.innerHTML = mine.map((r) => reportRideBox(r)).join('') ||
+                    '<span class="muted">No rides.</span>';
+                box.querySelectorAll('[data-ride-id]').forEach((el) => el.addEventListener('click', () => {
+                    const r = mine.find((x) => String(x.id) === el.getAttribute('data-ride-id'));
+                    if (r) openRideDialog(r, { date, dayRides, onSaved: () => renderRideTypeReport(from, to) });
+                }));
+            } catch (err) {
+                box.textContent = err.message;
+            }
+        }
+    }
+
+    const rideTypeName = (r) => r.ride_type_name || '(no type)';
+
+    // The calendar's ride box, read-only and standalone (no horse grid around it)
+    function reportRideBox(r) {
+        const start = hhmm(r.start_time);
+        const endMin = toMin(start) + (r.duration_min || 60);
+        const end = `${pad2(Math.floor(endMin / 60) % 24)}:${pad2(endMin % 60)}`;
+        const color = rideColor(r);
+        const riders = r.participants.filter((p) => p.contact_id);
+        const staff = r.guides.map((g) => `
+            <span class="staff-pill" style="background:${esc(g.guide_color || '#4a4a46')}">
+                ${esc(shortName(g.guide_name))}${g.is_assistant ? ' (ass)' : ''}
+            </span>`).join(' ');
+        return `<div class="ride-box rep-box ${r.invoiced ? 'invoiced' : ''}">
+            <button class="ride-top" data-ride-id="${r.id}" title="Edit this ride">
+                <span class="ride-time">${esc(start)}–${esc(end)}</span>
+                <span class="ride-dur">${r.duration_min} min</span>
+                ${VENUES[r.venue] ? `<span class="ride-venue" style="color:${VENUE_COLORS[r.venue]}">${VENUES[r.venue]}</span>` : ''}
+                <span class="ride-level${r.level ? '' : ' none'}"
+                      style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
+            </button>
+            <div class="ride-cols">
+                <div class="ride-riders-col">${riders.length ? riders.map((p) => `
+                    <div class="rider-row">
+                        <span class="rider-name">${esc(p.contact_name)}</span>
+                        ${p.horse_name ? `<span class="rider-horse has">${esc(p.horse_name)}</span>`
+                            : '<span class="rider-horse none">no horse yet</span>'}
+                    </div>`).join('') : '<div class="rider-row"><span class="rider-name muted">No riders</span></div>'}
+                    ${r.instructor_notes ? `<div class="rider-row instructor-note">📝 ${esc(r.instructor_notes)}</div>` : ''}
+                </div>
+                <div class="ride-staff-col">${staff || '<span class="muted">no instructor</span>'}</div>
+            </div>
+        </div>`;
     }
 
     // ---------- Settings ----------

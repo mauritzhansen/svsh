@@ -1776,6 +1776,54 @@ app.delete('/api/service-contacts/:id', requireRole('helper'), async (req, res) 
 // ---------- Reports ----------
 // Rides per ride type per horse in a period. A horse "worked" when it carried
 // a booked rider or a guide; open seats and blocked entries don't count.
+// Ride types broken down by day: how many ride slots ran, how many rider seats
+// were filled and what they were worth. The UI rolls this up per type and can
+// drill into a single date.
+app.get('/api/reports/ride-types', requireAuth, async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+            return res.status(400).json({ error: 'Valid from/to dates are required.' });
+        }
+        const days = datesInRange(from, to).length;
+        if (days > 366) return res.status(400).json({ error: 'Period too large (max 1 year).' });
+        if (days <= 92) await materializeRecurring(from, to);
+        // Seats are counted per ride first — folding the participant join into the
+        // outer group would multiply each ride's duration by its seat count.
+        const { rows } = await pool.query(
+            `WITH ride_rows AS (
+                 SELECT r.id, r.date,
+                        COALESCE(rt.name, r.ride_type_name, '(no type)') AS tname,
+                        COALESCE(r.duration_min, rt.duration_min, 60) AS mins,
+                        rt.price_cents AS type_price
+                   FROM rides r
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE r.date BETWEEN $1 AND $2
+                    AND r.status = 'active' AND NOT r.is_block
+             ), seat_rows AS (
+                 SELECT rr.id, count(rp.id)::int AS seats,
+                        COALESCE(SUM(COALESCE(rp.price_cents, rr.type_price, 0)), 0)::int AS cents
+                   FROM ride_rows rr
+                   LEFT JOIN ride_participants rp
+                          ON rp.ride_id = rr.id AND rp.contact_id IS NOT NULL
+                  GROUP BY rr.id
+             )
+             SELECT rr.date::text AS date, rr.tname AS ride_type_name,
+                    count(*)::int AS rides,
+                    SUM(s.seats)::int AS seats,
+                    SUM(s.cents)::int AS cents,
+                    SUM(rr.mins)::int AS mins
+               FROM ride_rows rr
+               JOIN seat_rows s ON s.id = rr.id
+              GROUP BY rr.date, rr.tname
+              ORDER BY rr.date, 2`,
+            [from, to]);
+        res.json({ rows, from, to });
+    } catch (err) {
+        handleError(res, err, 'Loading report');
+    }
+});
+
 app.get('/api/reports/horse-usage', requireAuth, async (req, res) => {
     try {
         const { from, to } = req.query;
