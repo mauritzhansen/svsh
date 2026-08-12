@@ -572,7 +572,7 @@ app.post('/api/horses/:id/block', requireAuth, async (req, res) => {
         await client.query('BEGIN');
         for (const date of dates) {
             const conflicts = startTime
-                ? await findConflicts(date, startTime, [req.params.id], [], null, false, durationMin)
+                ? await findConflicts(date, startTime, [req.params.id], null, false, durationMin)
                 : (await client.query(
                     `SELECT 1 FROM rides r
                       WHERE r.date = $1 AND r.status = 'active'
@@ -1037,12 +1037,14 @@ async function rideDurationMin(rideTypeId) {
     return (rows[0] && rows[0].duration_min) || 60;
 }
 
-// Which of these horses/guides are already in another active ride during
+// Which of these horses are already in another active ride during
 // [time, time + durationMin)? Partial overlaps count: an existing ride blocks
 // the whole window its ride type's duration covers (60 min when no type).
 // All-day blocks occupy every time of their date, in both directions.
+// Instructors are deliberately NOT checked — one instructor can run two
+// overlapping rides; the UI flags the overlap instead of forbidding it.
 // Returns human-readable messages (empty = all clear).
-async function findConflicts(date, time, horseIds, guideIds, excludeRideId, allDay, durationMin) {
+async function findConflicts(date, time, horseIds, excludeRideId, allDay, durationMin) {
     const conflicts = [];
     const overlap = `(r.all_day OR $5 OR (
             r.start_time < $2::time + make_interval(mins => $6) AND
@@ -1064,18 +1066,6 @@ async function findConflicts(date, time, horseIds, guideIds, excludeRideId, allD
                               AND r.status = 'active' AND r.id <> $4))`,
             params(horseIds));
         rows.forEach((r) => conflicts.push(`${r.name} is already in another ride or blocked during that time.`));
-    }
-    if (guideIds.length) {
-        const { rows } = await pool.query(
-            `SELECT DISTINCT g.name FROM guides g
-              WHERE g.id = ANY($3::bigint[])
-                AND EXISTS (SELECT 1 FROM ride_guides rg
-                             JOIN rides r ON r.id = rg.ride_id
-                             LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                            WHERE rg.guide_id = g.id AND r.date = $1 AND ${overlap}
-                              AND r.status = 'active' AND r.id <> $4)`,
-            params(guideIds));
-        rows.forEach((r) => conflicts.push(`Guide ${r.name} is already on another ride during that time.`));
     }
     return conflicts;
 }
@@ -1144,8 +1134,7 @@ function parseRideBody(body) {
         notes: notes || '',
         instructor_notes: instructor_notes || '',
         participants, guides,
-        horseIds: [...horsesUsed],
-        guideIds: guides.map((g) => String(g.guide_id))
+        horseIds: [...horsesUsed]
     };
 }
 
@@ -1213,7 +1202,7 @@ async function materializeRecurring(from, to) {
                 ...tGuides.filter((g) => g.mode === 'horse').map((g) => g.horse_id)
             ].filter(Boolean);
             if (horseIds.length) {
-                const conflicts = await findConflicts(date, t.start_time, horseIds, [], null, false, t.eff_duration);
+                const conflicts = await findConflicts(date, t.start_time, horseIds, null, false, t.eff_duration);
                 if (conflicts.length) continue;
             }
             const client = await pool.connect();
@@ -1339,7 +1328,7 @@ app.post('/api/rides', requireAuth, async (req, res) => {
         const parsed = parseRideBody(req.body);
         if (parsed.error) return res.status(400).json({ error: parsed.error });
         const conflicts = await findConflicts(parsed.date, parsed.start_time,
-            parsed.horseIds, parsed.guideIds, null, parsed.allDay,
+            parsed.horseIds, null, parsed.allDay,
             parsed.duration_min || await rideDurationMin(parsed.ride_type_id));
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
@@ -1373,7 +1362,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         const parsed = parseRideBody(req.body);
         if (parsed.error) return res.status(400).json({ error: parsed.error });
         const conflicts = await findConflicts(parsed.date, parsed.start_time,
-            parsed.horseIds, parsed.guideIds, req.params.id, parsed.allDay,
+            parsed.horseIds, req.params.id, parsed.allDay,
             parsed.duration_min || await rideDurationMin(parsed.ride_type_id));
         if (conflicts.length) return res.status(400).json({ error: conflicts.join(' ') });
         await client.query('BEGIN');
@@ -2505,6 +2494,35 @@ async function requirePublicToken(req, res) {
     return true;
 }
 
+// One instructor can run two overlapping rides; both rides carry the clash so
+// the schedule can flag it on either side. rideId -> guideId -> minutes.
+function staffOverlapMap(dayRides) {
+    const toMin = (t) => {
+        const [h, m] = String(t).split(':').map(Number);
+        return h * 60 + (m || 0);
+    };
+    const map = {};
+    const timed = dayRides.filter((r) => !r.all_day && r.guides.length);
+    const mark = (r, gid, mins) => {
+        const byGuide = map[r.id] = map[r.id] || {};
+        byGuide[gid] = Math.max(byGuide[gid] || 0, mins);
+    };
+    timed.forEach((a, i) => {
+        const aS = toMin(a.start_time), aE = aS + (a.duration_min || 60);
+        timed.slice(i + 1).forEach((b) => {
+            const bS = toMin(b.start_time), bE = bS + (b.duration_min || 60);
+            const mins = Math.min(aE, bE) - Math.max(aS, bS);
+            if (mins <= 0) return;
+            a.guides.forEach((ga) => b.guides.forEach((gb) => {
+                if (String(ga.guide_id) !== String(gb.guide_id)) return;
+                mark(a, String(ga.guide_id), mins);
+                mark(b, String(gb.guide_id), mins);
+            }));
+        });
+    });
+    return map;
+}
+
 app.get('/api/public/schedule', async (req, res) => {
     try {
         if (!await requirePublicToken(req, res)) return;
@@ -2520,7 +2538,7 @@ app.get('/api/public/schedule', async (req, res) => {
             business_name: (settingRows[0] || {}).value || 'Riding school',
             days: datesInRange(from, to).map((date) => ({
                 date,
-                rides: rides.filter((r) => r.date === date && !r.all_day)
+                rides: ((dayRides, clash) => dayRides
                     .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
                     .map((r) => ({
                         start_time: String(r.start_time).slice(0, 5),
@@ -2544,9 +2562,11 @@ app.get('/api/public/schedule', async (req, res) => {
                         })),
                         staff: r.guides.map((g) => ({
                             name: g.guide_name, assistant: g.is_assistant,
-                            color: g.guide_color, mode: g.mode, horse: g.horse_name
+                            color: g.guide_color, mode: g.mode, horse: g.horse_name,
+                            overlap_min: (clash[r.id] || {})[String(g.guide_id)] || 0
                         }))
-                    }))
+                    })))(rides.filter((r) => r.date === date && !r.all_day),
+                         staffOverlapMap(rides.filter((r) => r.date === date)))
             }))
         });
     } catch (err) {

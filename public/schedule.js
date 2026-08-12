@@ -57,6 +57,8 @@
                 <span class="staff-pill" style="background:${esc(s.color || '#4a4a46')}">
                     ${esc(s.name)}${s.assistant ? ' (ass)' : ''}${MODE[s.mode] || ''}
                 </span>
+                ${s.overlap_min ? `<span class="staff-overlap"
+                    title="Also on another ride at the same time — ${s.overlap_min} min overlap">⧉${s.overlap_min}′</span>` : ''}
                 ${s.mode === 'horse' && s.horse ? `<span class="rider-horse has">${esc(s.horse)}</span>` : ''}
             </span>`).join('');
 

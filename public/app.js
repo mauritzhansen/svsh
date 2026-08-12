@@ -353,10 +353,15 @@
             `<option value="${t.id}" ${String(selectedId) === String(t.id) ? 'selected' : ''}>${esc(t.name)} — ${money(t.price_cents)}</option>`).join('');
     }
 
-    function guideOptions(selectedId, busy) {
+    // An instructor may run two rides at once, so overlapping ones stay on the
+    // list — labelled with how long the clash is. `busy` only hides instructors
+    // already picked on another row of this same ride.
+    function guideOptions(selectedId, busy, overlaps) {
         return '<option value="">(no instructor)</option>' +
-            state.guides.filter((g) => g.active && keepOption(g.id, selectedId, busy)).map((g) =>
-                `<option value="${g.id}" ${String(selectedId) === String(g.id) ? 'selected' : ''}>${esc(g.name)}${g.is_assistant ? ' (ass)' : ''}</option>`).join('');
+            state.guides.filter((g) => g.active && keepOption(g.id, selectedId, busy)).map((g) => {
+                const mins = overlaps && overlaps[String(g.id)];
+                return `<option value="${g.id}" ${String(selectedId) === String(g.id) ? 'selected' : ''}>${esc(g.name)}${g.is_assistant ? ' (ass)' : ''}${mins ? ` (overlaps ${mins} min)` : ''}</option>`;
+            }).join('');
     }
 
     // Possible parents: contacts that are not riders themselves (and not the contact being edited)
@@ -568,6 +573,51 @@
         return { horses, contacts, guides };
     }
 
+    const overlapMin = (aS, aE, bS, bE) => Math.min(aE, bE) - Math.max(aS, bS);
+
+    // How long would each instructor's other rides clash with [time, +duration)?
+    // guideId -> minutes (the longest single clash).
+    function guideOverlaps(rides, time, durationMin, excludeRideId) {
+        const start = toMin(time), end = start + (durationMin || 60);
+        const out = {};
+        rides.forEach((r) => {
+            if (r.all_day || (excludeRideId && String(r.id) === String(excludeRideId))) return;
+            const s = toMin(hhmm(r.start_time));
+            const mins = overlapMin(start, end, s, s + (r.duration_min || 60));
+            if (mins <= 0) return;
+            r.guides.forEach((g) => {
+                const k = String(g.guide_id);
+                out[k] = Math.max(out[k] || 0, mins);
+            });
+        });
+        return out;
+    }
+
+    // Same clashes, but keyed for the grid: rideId -> guideId -> minutes, so the
+    // badge can be drawn on both rides involved.
+    function staffOverlapMap(rides) {
+        const map = {};
+        const timed = rides.filter((r) => !r.all_day && r.guides.length);
+        const mark = (r, gid, mins) => {
+            const byGuide = map[r.id] = map[r.id] || {};
+            byGuide[gid] = Math.max(byGuide[gid] || 0, mins);
+        };
+        timed.forEach((a, i) => {
+            const aS = toMin(hhmm(a.start_time)), aE = aS + (a.duration_min || 60);
+            timed.slice(i + 1).forEach((b) => {
+                const bS = toMin(hhmm(b.start_time)), bE = bS + (b.duration_min || 60);
+                const mins = overlapMin(aS, aE, bS, bE);
+                if (mins <= 0) return;
+                a.guides.forEach((ga) => b.guides.forEach((gb) => {
+                    if (String(ga.guide_id) !== String(gb.guide_id)) return;
+                    mark(a, String(ga.guide_id), mins);
+                    mark(b, String(gb.guide_id), mins);
+                }));
+            });
+        });
+        return map;
+    }
+
     // Rides + minutes per horse for a day (rider seats and instructor mounts;
     // blocks don't count as work)
     function horseDayLoad(rides) {
@@ -714,6 +764,9 @@
             return;
         }
 
+        // Instructors running two rides at once — flagged on both of them
+        const staffClash = staffOverlapMap(rides.filter((r) => !r.is_block));
+
         // Horses blocked for the whole day
         const dayBlocks = {};
         rides.forEach((r) => {
@@ -812,14 +865,19 @@
             const riders = r.participants.filter((p) => p.contact_id);
             const horsesOnly = r.participants.filter((p) => !p.contact_id && p.horse_name);
 
-            const staff = r.guides.map((g) => `
+            const clash = staffClash[r.id] || {};
+            const staff = r.guides.map((g) => {
+                const mins = clash[String(g.guide_id)];
+                return `
                 <span class="staff-item">
                     <span class="staff-pill" style="background:${esc(g.guide_color || '#4a4a46')}">
                         ${esc(shortName(g.guide_name))}${g.is_assistant ? ' (ass)' : ''}${MODE_ICON[g.mode] ? ' ' + MODE_ICON[g.mode] : ''}
                     </span>
+                    ${mins ? `<span class="staff-overlap" title="${esc(g.guide_name)} is on another ride at the same time — ${mins} min overlap">⧉${mins}′</span>` : ''}
                     ${g.mode === 'horse' && g.horse_name
                         ? `<span class="rider-horse has">${esc(g.horse_name)}</span>` : ''}
-                </span>`).join('');
+                </span>`;
+            }).join('');
 
             let riderRows;
             if (r.is_block) {
@@ -1610,6 +1668,7 @@
         function takenSets(exceptSel) {
             const busy = busyFor(timeVal());
             const horses = new Set(busy.horses), contacts = new Set(busy.contacts), guides = new Set(busy.guides);
+            const dialogGuides = new Set();   // same instructor twice on THIS ride
             // Rows marked as rescheduled are leaving the ride — theirs don't count
             $dialog.querySelectorAll('.pr-horse, .gr-horse').forEach((sel) => {
                 if (sel !== exceptSel && sel.value && !sel.classList.contains('hidden') &&
@@ -1619,9 +1678,9 @@
                 if (sel !== exceptSel && sel.value && !sel.closest('.rescheduled')) contacts.add(sel.value);
             });
             $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
-                if (sel !== exceptSel && sel.value) guides.add(sel.value);
+                if (sel !== exceptSel && sel.value) { guides.add(sel.value); dialogGuides.add(sel.value); }
             });
-            return { horses, contacts, guides };
+            return { horses, contacts, guides, dialogGuides };
         }
 
         function firstFreeHorse() {
@@ -1646,8 +1705,9 @@
             $dialog.querySelectorAll('.gr-horse').forEach((sel) => {
                 sel.innerHTML = horseOptions(sel.value, takenSets(sel).horses);
             });
+            const gOverlaps = guideOverlaps(dayRides, timeVal(), dur, isEdit ? ride.id : null);
             $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
-                sel.innerHTML = guideOptions(sel.value, takenSets(sel).guides);
+                sel.innerHTML = guideOptions(sel.value, takenSets(sel).dialogGuides, gOverlaps);
             });
             // Surface why a flagged pick is flagged
             const warnings = [];
@@ -1677,6 +1737,12 @@
                         warnings.push(`⚠ ${c.name} has a term pass, but this is an extra ride — it will be invoiced separately (monthly).`);
                     }
                 }
+            });
+            $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
+                const mins = sel.value && gOverlaps[String(sel.value)];
+                if (!mins) return;
+                const g = state.guides.find((x) => String(x.id) === String(sel.value));
+                warnings.push(`⧉ ${(g && g.name) || 'This instructor'} is also on another ride — ${mins} min overlap.`);
             });
             const wEl = document.getElementById('ride-warnings');
             if (wEl) wEl.innerHTML = warnings.map((w) => esc(w)).join('<br>');
@@ -1806,10 +1872,6 @@
             <div class="muted" id="repeat-note" style="margin-left:26px">${isEdit && ride.recurring_id
                 ? 'Set how often each rider comes above. Unticking stops the series from this day on.'
                 : 'Makes this a weekly fixed ride from this date. Each rider can then be every week or every 2nd week.'}</div>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
-                <input type="checkbox" id="ride-block" style="width:auto" ${isEdit && ride.is_block ? 'checked' : ''}>
-                Block these horses (unavailable, no ride)
-            </label>
             </fieldset>
             <div class="form-warning" id="ride-resched-info"></div>
             <div class="form-warning" id="ride-warnings"></div>
@@ -1869,7 +1931,7 @@
                 date: defaults.date,
                 start_time: document.getElementById('ride-time').value,
                 ride_type_id: document.getElementById('ride-type').value || null,
-                is_block: document.getElementById('ride-block').checked,
+                is_block: isEdit && !!ride.is_block,   // blocks are made with the 🚫 button, not here
                 level: document.getElementById('ride-level').value || null,
                 venue: document.getElementById('ride-venue').value,
                 duration_min: parseInt(document.getElementById('ride-duration').value, 10) || null,
