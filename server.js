@@ -324,6 +324,12 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                     (SELECT count(*)::int FROM ride_participants rp
                       JOIN rides r ON r.id = rp.ride_id
                       WHERE rp.contact_id = c.id AND r.status = 'active' AND NOT r.is_block) AS ride_count,
+                    -- "Parent" and "Rider" are derived, not stored: a contact can be
+                    -- both (a parent who also rides), and neither flag needs upkeep.
+                    (SELECT count(*)::int FROM contacts k
+                      WHERE k.parent_id = c.id AND NOT k.archived) AS child_count,
+                    (SELECT count(*)::int FROM recurring_participants xp
+                      WHERE xp.contact_id = c.id) AS fixed_count,
                     (SELECT COALESCE(json_agg(json_build_object(
                             'horse_id', hp.horse_id::text, 'kind', hp.kind, 'reason', hp.reason,
                             'horse_name', h.name) ORDER BY hp.kind DESC, h.name), '[]'::json)
@@ -1381,8 +1387,29 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         await client.query('DELETE FROM ride_participants WHERE ride_id = $1', [req.params.id]);
         await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
         await insertRideChildren(client, req.params.id, parsed.participants, parsed.guides);
+        // Typing one occurrence of a fixed ride types the whole series: the
+        // template (so future weeks inherit it) plus every other occurrence that
+        // has no type yet, past ones included. Occurrences with a type already
+        // set are deliberate one-offs and are left alone, and invoiced rides are
+        // never touched because their amounts are already on an invoice.
+        let typedSiblings = 0;
+        if (existing[0].recurring_id && parsed.ride_type_id) {
+            await client.query(
+                'UPDATE recurring_rides SET ride_type_id = $2 WHERE id = $1 AND ride_type_id IS NULL',
+                [existing[0].recurring_id, parsed.ride_type_id]);
+            const { rowCount } = await client.query(
+                `UPDATE rides r SET ride_type_id = $2
+                  WHERE r.recurring_id = $1 AND r.id <> $3
+                    AND r.ride_type_id IS NULL AND r.ride_type_name IS NULL
+                    AND r.status = 'active' AND NOT r.is_block
+                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
+                                     JOIN invoice_lines il ON il.participant_id = rp.id
+                                    WHERE rp.ride_id = r.id)`,
+                [existing[0].recurring_id, parsed.ride_type_id, req.params.id]);
+            typedSiblings = rowCount;
+        }
         await client.query('COMMIT');
-        res.json({ ok: true });
+        res.json({ ok: true, typed_siblings: typedSiblings });
     } catch (err) {
         await client.query('ROLLBACK');
         handleError(res, err, 'Updating ride');

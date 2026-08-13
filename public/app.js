@@ -387,6 +387,7 @@
         });
         if (!state.user) return renderLogin();
         document.body.classList.toggle('page-calendar', parts[0] === 'calendar' || !parts[0]);
+        document.body.classList.remove('nav-hidden');   // never leave the nav hidden on another page
         if (parts[0] === 'calendar') {
             if (/^\d{4}-\d{2}-\d{2}$/.test(parts[1] || '') && parts[1] !== state.calendarDate) {
                 state.calendarDate = parts[1];
@@ -758,6 +759,21 @@
         });
     }
 
+    // On a phone in landscape the nav bar costs a third of the usable height, so
+    // it slides away while you scroll down through the day and comes straight
+    // back on any upward scroll. CSS decides whether it applies (mobile only).
+    function wireNavAutoHide(scroller) {
+        if (!scroller || scroller.dataset.navAutoHide) return;
+        scroller.dataset.navAutoHide = '1';
+        let last = scroller.scrollTop;
+        scroller.addEventListener('scroll', () => {
+            const y = scroller.scrollTop;
+            if (Math.abs(y - last) < 6) return;      // ignore jitter
+            document.body.classList.toggle('nav-hidden', y > last && y > 40);
+            last = y;
+        }, { passive: true });
+    }
+
     // Grid = one row per ride (details in the first column) x one narrow
     // column per horse; a dot marks which horses that ride uses. Tap a horse
     // cell to assign/unassign that horse for the ride.
@@ -807,6 +823,8 @@
                 <button class="secondary" id="cal-date-btn" title="Pick a date">${esc(fmtDateShort(date))}</button>
                 <button class="secondary daynav" id="cal-next" title="Next day" aria-label="Next day">›</button>
                 <button class="secondary" id="cal-today" title="Jump to today">Today</button>
+                <button class="small mobile-only" id="cal-add-m" title="New ride" aria-label="New ride">＋</button>
+                <button class="secondary mobile-only" id="cal-fixed-m" title="Fixed rides" aria-label="Fixed rides">🔁</button>
             </div>
             <div class="cal-actions">
                 <button class="small" id="cal-add">＋ New ride</button>
@@ -974,6 +992,7 @@
                 requestAnimationFrame(() => { next.scrollLeft = keep.x; next.scrollTop = keep.y; });
             }
         }
+        wireNavAutoHide(grid.querySelector('.calendar-scroller'));
 
         grid.querySelectorAll('[data-unblock-ride]').forEach((td) => {
             td.addEventListener('click', async () => {
@@ -998,9 +1017,13 @@
                 dayRides: rides
             }));
         });
-        document.getElementById('cal-add').addEventListener('click', () =>
-            openRideDialog(null, { date, time: (state.settings.day_start || '09:00'), dayRides: rides }));
-        document.getElementById('tab-fixed').addEventListener('click', () => { location.hash = '#/fixed'; });
+        const newRide = () =>
+            openRideDialog(null, { date, time: (state.settings.day_start || '09:00'), dayRides: rides });
+        document.getElementById('cal-add').addEventListener('click', newRide);
+        document.getElementById('cal-add-m').addEventListener('click', newRide);
+        const goFixed = () => { location.hash = '#/fixed'; };
+        document.getElementById('tab-fixed').addEventListener('click', goFixed);
+        document.getElementById('cal-fixed-m').addEventListener('click', goFixed);
         document.getElementById('cal-prev').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, -1); });
         document.getElementById('cal-next').addEventListener('click', () => { location.hash = '#/calendar/' + shiftDate(date, 1); });
         document.getElementById('cal-today').addEventListener('click', () => { location.hash = '#/calendar/' + todayStr(); });
@@ -1963,8 +1986,10 @@
             };
             try {
                 let savedId = isEdit ? ride.id : null;
-                if (isEdit) await api('PUT', `/api/rides/${ride.id}`, body);
-                else savedId = (await api('POST', '/api/rides', body)).ride_id;
+                let typedSiblings = 0;
+                if (isEdit) {
+                    typedSiblings = (await api('PUT', `/api/rides/${ride.id}`, body)).typed_siblings || 0;
+                } else savedId = (await api('POST', '/api/rides', body)).ride_id;
                 for (const pc of credits) {
                     await api('POST', '/api/credits', {
                         contact_id: pc.contact_id,
@@ -1995,7 +2020,9 @@
                 closeDialog();
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
-                    : (defaults.addContactId ? 'Saved — reschedule credit used.' : 'Saved.'));
+                    : defaults.addContactId ? 'Saved — reschedule credit used.'
+                    : typedSiblings ? `Saved. The ride type was also set on ${typedSiblings} other ride${typedSiblings === 1 ? '' : 's'} in this weekly series that had none.`
+                    : 'Saved.');
                 afterSave();
             } catch (err) {
                 dialogError(err.message);
@@ -2595,6 +2622,21 @@
     }
 
     // ---------- Contacts ----------
+    // Rider / Parent are worked out from the data rather than stored, so a
+    // contact who does both gets both tags and nothing has to be kept in sync.
+    function isRider(c) {
+        return c.ride_count > 0 || c.fixed_count > 0 || !!c.experience;
+    }
+    const isParent = (c) => c.child_count > 0;
+
+    function roleTags(c) {
+        const tags = [];
+        if (isRider(c)) tags.push('<span class="role-tag rider">Rider</span>');
+        if (isParent(c)) tags.push(`<span class="role-tag parent">Parent${
+            c.child_count > 1 ? ' ×' + c.child_count : ''}</span>`);
+        return tags.join('');
+    }
+
     async function renderContacts() {
         if (state.contactsTab === 'directory') return renderDirectory();
         if (state.contactsTab === 'interested') return renderInterested();
@@ -2611,6 +2653,10 @@
                 <button id="contact-add">＋ New</button>
             </div>
             <div class="month-pills" style="margin-bottom:10px">
+                <button class="month-pill role-pill ${state.contactRoleFilter === 'rider' ? 'active' : ''}"
+                        data-role="rider">Riders</button>
+                <button class="month-pill role-pill ${state.contactRoleFilter === 'parent' ? 'active' : ''}"
+                        data-role="parent">Parents</button>
                 ${LEVELS.map((l) => `
                     <button class="month-pill level-pill ${state.contactLevelFilter.has(l) ? 'active' : ''}"
                             data-level="${l}"
@@ -2636,16 +2682,18 @@
         const draw = (filter) => {
             const q = (filter || '').toLowerCase();
             const levels = state.contactLevelFilter;
+            const role = state.contactRoleFilter;
             const items = state.contacts.filter((c) =>
                 !c.is_prospect &&
                 (!q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) &&
-                (!levels.size || levels.has(c.experience)));
+                (!levels.size || levels.has(c.experience)) &&
+                (!role || (role === 'rider' ? isRider(c) : isParent(c))));
             document.getElementById('contact-list').innerHTML = items.length ? items.map((c) => `
                 <div class="list-item" data-contact-id="${c.id}">
                     <div class="avatar">${esc(c.name.trim()[0] || '?').toUpperCase()}</div>
                     <div class="li-main">
-                        <div class="li-title">${esc(c.name)}</div>
-                        <div class="li-sub">${c.parent_name ? '🧒 rider · pays: ' + esc(c.parent_name) : esc(c.phone || c.email || '')}</div>
+                        <div class="li-title">${esc(c.name)}${roleTags(c)}</div>
+                        <div class="li-sub">${c.parent_name ? 'pays: ' + esc(c.parent_name) : esc(c.phone || c.email || '')}</div>
                     </div>
                     ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
                     <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
@@ -2657,16 +2705,26 @@
         draw('');
         document.getElementById('contact-search').addEventListener('input', (e) => draw(e.target.value));
         document.getElementById('contact-add').addEventListener('click', () => openNewRecord('rider'));
+        const redrawKeepingSearch = () => {
+            const search = document.getElementById('contact-search').value;
+            renderContacts().then(() => {
+                const input = document.getElementById('contact-search');
+                if (search) { input.value = search; input.dispatchEvent(new Event('input')); }
+            });
+        };
         document.querySelectorAll('.level-pill').forEach((btn) => {
             btn.addEventListener('click', () => {
                 const level = btn.getAttribute('data-level');
                 if (state.contactLevelFilter.has(level)) state.contactLevelFilter.delete(level);
                 else state.contactLevelFilter.add(level);
-                const search = document.getElementById('contact-search').value;
-                renderContacts().then(() => {
-                    const input = document.getElementById('contact-search');
-                    if (search) { input.value = search; input.dispatchEvent(new Event('input')); }
-                });
+                redrawKeepingSearch();
+            });
+        });
+        document.querySelectorAll('.role-pill').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const role = btn.getAttribute('data-role');
+                state.contactRoleFilter = state.contactRoleFilter === role ? null : role;
+                redrawKeepingSearch();
             });
         });
     }

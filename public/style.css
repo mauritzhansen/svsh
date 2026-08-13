@@ -17,6 +17,10 @@
     --danger: #b3402f;
     --radius: 10px;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.09);
+    /* Chrome heights, so the calendar's height maths stays in one place and
+       the mobile breakpoints can zero them out. */
+    --topbar-h: 44px;
+    --nav-h: 58px;
 }
 
 * { box-sizing: border-box; }
@@ -892,7 +896,8 @@ body.page-calendar { overflow: hidden; }
 body.page-calendar #view {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 44px - 58px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    height: calc(100vh - var(--topbar-h) - var(--nav-h)
+        - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     padding-bottom: 6px;
 }
 /* content-sized, capped to the viewport — no empty space on quiet days */
@@ -904,7 +909,7 @@ body.page-calendar #cal-grid {
 }
 body.page-calendar .calendar-scroller {
     flex: 0 1 auto;
-    max-height: calc(100vh - 44px - 58px - 24px
+    max-height: calc(100vh - var(--topbar-h) - var(--nav-h) - 24px
         - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
 }
 body.page-calendar .day-header,
@@ -1059,3 +1064,97 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .rep-ride-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .rep-box { width: 320px; max-width: 100%; margin: 0; }
 .rep-box .ride-top { cursor: pointer; width: 100%; }
+
+/* Rider / Parent designations on a contact row (a contact can be both) */
+.role-tag {
+    display: inline-block; margin-left: 6px; padding: 1px 7px;
+    border-radius: 999px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.02em; vertical-align: 1px; white-space: nowrap;
+}
+.role-tag.rider { background: var(--booked-bg); color: var(--booked); }
+.role-tag.parent { background: #f3ecdd; color: #7a5c1e; }
+
+/* ================= Mobile ================= */
+/* Two breakpoints: a narrow viewport is a phone in portrait, a short one is a
+   phone in landscape. Both drop the decorative top bar — it holds nothing but
+   the name, and on a phone that 44px is a whole extra ride. */
+.mobile-only { display: none; }
+
+@media (max-width: 700px), (max-height: 560px) {
+    #topbar { display: none; }
+    :root { --topbar-h: 0px; }
+    #view { padding-left: 8px; padding-right: 8px; }
+    /* the compact toolbar replaces the stacked tabs / date row / New ride */
+    .cal-nav .mobile-only { display: inline-flex; align-items: center; }
+    .cal-nav #cal-add-m { padding: 5px 11px; font-size: 17px; line-height: 1.2; }
+    .cal-nav #cal-fixed-m { padding: 5px 9px; font-size: 15px; }
+    body.page-calendar .page-tabs,
+    body.page-calendar .cal-actions { display: none; }
+    /* dragging columns is a desktop job; blocking stays one tap away */
+    .horse-grip { display: none; }
+    table.ridegrid th.horsecol .horsecol-stack { min-height: 64px; }
+    table.ridegrid th.horsecol .horse-block-btn { margin-top: 4px; }
+    table.ridegrid th.horsecol { padding-top: 5px; }
+    /* the rotated "2 rides · 2h30" sits beside the name and eats a third of a
+       46px column — the name matters more on a phone */
+    .horsecol-use { display: none; }
+}
+
+/* ---- Phone landscape: the nav bar slides away as you scroll down ---- */
+@media (max-height: 560px) {
+    #bottomnav { transition: transform 0.18s ease-out; }
+    body.nav-hidden #bottomnav { transform: translateY(100%); }
+    /* the grid keeps its full height and simply runs under the bar, so hiding
+       it reveals more rather than forcing a reflow */
+    :root { --nav-h: 0px; }
+    body.page-calendar #view { padding-bottom: 0; }
+    body.page-calendar .calendar-scroller { scroll-padding-bottom: 58px; }
+    body.page-calendar .calendar-scroller::after {
+        content: ''; display: block; height: 58px;   /* last ride clears the bar */
+    }
+    .cal-nav { flex-wrap: nowrap; }
+    table.ridegrid th.horsecol .horsecol-stack { min-height: 54px; }
+    .horsecol-name { font-size: 13px; }
+}
+
+/* ---- Phone portrait: give the horses their share of the width ---- */
+@media (max-width: 700px) and (orientation: portrait) {
+    /* was a fixed 330px — wider than an iPhone SE, which pushed every horse
+       column off screen. ~55% leaves roughly 3 columns visible. */
+    table.ridegrid th.ridecol, table.ridegrid td.ridecol {
+        min-width: 55vw;
+        width: 55vw;
+    }
+    table.ridegrid th.horsecol,
+    table.ridegrid td.horse-cell {
+        min-width: 46px;
+        width: 46px;
+        max-width: 46px;
+    }
+    /* instructors move under the riders instead of taking a third of the box */
+    .ride-cols { flex-direction: column; gap: 5px; }
+    .ride-riders-col { flex: 1 1 auto; }
+    .ride-staff-col {
+        flex: 1 1 auto;
+        border-left: none;
+        padding-left: 0;
+        border-top: 1px solid var(--border);
+        padding-top: 5px;
+    }
+    .ride-box { padding: 6px 8px; }
+    .ride-top { margin: -6px -8px 0; width: calc(100% + 16px); padding: 4px 8px; gap: 6px; }
+    .ride-dur { display: none; }          /* the end time already says this */
+    .ride-time { font-size: 12.5px; }
+    .ride-level { font-size: 11px; }
+    .rider-row { font-size: 12.5px; padding: 1px 0; gap: 4px; }
+    .rider-horse { font-size: 11.5px; padding: 1px 5px; }
+    .staff-pill { font-size: 11px; padding: 2px 7px; }
+    .rider-pickup { font-size: 10.5px; }
+}
+
+/* Settings: horses and instructors are short names — stack them in columns
+   instead of one full-width row each */
+.settings-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.settings-grid .list-item { padding: 8px 10px; gap: 8px; }
+.settings-grid .list-item .horse-dot { flex: 0 0 auto; }
+.settings-grid .list-item .li-title { font-size: 14.5px; }
