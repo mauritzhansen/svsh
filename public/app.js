@@ -2749,6 +2749,32 @@
 
     // Riders always state who pays, so an unlinked kid is obvious at a glance.
     // A rider who is also a parent pays their own way, so nothing is missing.
+    // Delete outright when the contact has no history; otherwise the server
+    // refuses and we offer archiving, which keeps rides and invoices intact.
+    async function deleteContact(c) {
+        const first = await askChoice(`Delete ${c.name}?`,
+            'This cannot be undone.', [{ key: 'del', label: 'Delete', hint: 'remove them completely' }]);
+        if (first !== 'del') return;
+        try {
+            await api('DELETE', `/api/contacts/${c.id}`);
+            state.contacts = (await api('GET', '/api/contacts')).contacts;
+            toast(`${c.name} deleted.`);
+            renderContacts();
+        } catch (err) {
+            const choice = await askChoice(`${c.name} cannot be deleted`, err.message,
+                [{ key: 'archive', label: 'Archive instead', hint: 'hidden from lists, history kept' }]);
+            if (choice !== 'archive') return;
+            try {
+                await api('PUT', `/api/contacts/${c.id}`, { archived: true });
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                toast(`${c.name} archived.`);
+                renderContacts();
+            } catch (e2) {
+                toast(e2.message, true);
+            }
+        }
+    }
+
     function contactSubLine(c) {
         const bits = [];
         if (isRider(c)) {
@@ -2830,6 +2856,8 @@
                     <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
                     <button class="row-edit" data-edit-contact="${c.id}"
                             title="Edit ${esc(c.name)}" aria-label="Edit ${esc(c.name)}">✏️</button>
+                    <button class="row-del" data-del-contact="${c.id}"
+                            title="Delete ${esc(c.name)}" aria-label="Delete ${esc(c.name)}">🗑</button>
                 </div>`).join('') : '<div class="card muted">No contacts found.</div>';
             document.querySelectorAll('[data-contact-id]').forEach((el) => {
                 el.addEventListener('click', () => { location.hash = '#/contacts/' + el.getAttribute('data-contact-id'); });
@@ -2840,6 +2868,13 @@
                     e.stopPropagation();
                     const c = contactById(btn.getAttribute('data-edit-contact'));
                     if (c) openContactDialog(c);
+                });
+            });
+            document.querySelectorAll('[data-del-contact]').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const c = contactById(btn.getAttribute('data-del-contact'));
+                    if (c) deleteContact(c);
                 });
             });
         };
@@ -3007,11 +3042,61 @@
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
         sync();
+        document.getElementById('ct-add-parent').addEventListener('click', () =>
+            openNewParentFor(contact, document.getElementById('ct-parent')));
         document.getElementById('ct-add-kid').addEventListener('click', async () => {
             // Save the parent first so the new rider has something to point at
             const saved = await saveContactForm(contact);
             if (saved) openNewRiderUnder(saved);
         });
+    }
+
+    // Create the payer without leaving the rider's form: a sub-dialog keeps the
+    // half-filled form underneath, and the new parent is selected on return.
+    function openNewParentFor(contact, select) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 4px">New parent</h3>
+            <p class="muted" style="margin:0 0 10px">They will pay this rider's invoices.</p>
+            <label>Name</label>
+            <input id="np-name" autocomplete="off">
+            <label>Phone (WhatsApp)</label>
+            ${phoneFieldHtml('np-phone', '')}
+            <label>Email</label>
+            <input id="np-email" type="email">
+            <label>Address (optional)</label>
+            <textarea id="np-address"></textarea>
+            <label class="role-check" style="margin-top:6px">
+                <input type="checkbox" id="np-also-rides"> They ride as well
+            </label>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                <button class="secondary" id="np-cancel">Cancel</button>
+                <button id="np-save">Add parent</button>
+            </div>`);
+        overlay.querySelector('#np-cancel').addEventListener('click', () => overlay.remove());
+        overlay.querySelector('#np-save').addEventListener('click', async () => {
+            const name = overlay.querySelector('#np-name').value.trim();
+            const err = overlay.querySelector('.form-error');
+            if (!name) { err.textContent = 'A name is required.'; return; }
+            try {
+                const res = await api('POST', '/api/contacts', {
+                    name,
+                    phone: readPhoneField('np-phone'),
+                    email: overlay.querySelector('#np-email').value,
+                    address: overlay.querySelector('#np-address').value,
+                    is_parent: true,
+                    is_rider: overlay.querySelector('#np-also-rides').checked
+                });
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                // rebuild the picker in place so the form underneath is untouched
+                select.innerHTML = parentOptions(res.contact.id, contact ? contact.id : null);
+                overlay.remove();
+                toast(`${name} added as the payer.`);
+            } catch (e2) {
+                err.textContent = e2.message;
+            }
+        });
+        overlay.querySelector('#np-name').focus();
     }
 
     // The rider's essentials only — the full contact form is a click away later
@@ -3163,7 +3248,11 @@
             </div>
             <div id="ct-parent-wrap">
                 <label>Parent / pays the invoices (leave empty if they pay their own)</label>
-                <select id="ct-parent">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
+                <div class="pick-row" style="gap:6px">
+                    <select id="ct-parent" style="flex:1 1 auto;min-width:0">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
+                    <button type="button" class="secondary small" id="ct-add-parent"
+                            style="flex:0 0 auto" title="Create a new parent">＋ New</button>
+                </div>
             </div>
             <div id="ct-kids-wrap">
                 <label>Riders under this parent</label>

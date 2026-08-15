@@ -534,6 +534,45 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
     }
 });
 
+// Deleting is only safe for a contact with no history. Their ride seats and
+// invoice lines would otherwise be silently blanked (both are ON DELETE SET
+// NULL), quietly rewriting what happened — so anything with a trace behind it
+// must be archived instead, which the caller is told to offer.
+app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `SELECT (SELECT count(*) FROM ride_participants WHERE contact_id = $1)::int AS rides,
+                    (SELECT count(*) FROM recurring_participants WHERE contact_id = $1)::int AS fixed,
+                    (SELECT count(*) FROM invoices
+                      WHERE contact_id = $1 OR rider_contact_id = $1)::int AS invoices,
+                    (SELECT count(*) FROM term_passes WHERE contact_id = $1)::int AS passes,
+                    (SELECT count(*) FROM reschedule_credits WHERE contact_id = $1)::int AS credits,
+                    (SELECT count(*) FROM horses WHERE owner_contact_id = $1)::int AS horses,
+                    (SELECT count(*) FROM contacts WHERE parent_id = $1)::int AS children`,
+            [req.params.id]);
+        const r = rows[0];
+        const blockers = [];
+        if (r.rides) blockers.push(`${r.rides} ride seat${r.rides === 1 ? '' : 's'}`);
+        if (r.fixed) blockers.push('a weekly fixed ride');
+        if (r.invoices) blockers.push(`${r.invoices} invoice${r.invoices === 1 ? '' : 's'}`);
+        if (r.passes) blockers.push('a term pass');
+        if (r.credits) blockers.push('reschedule credits');
+        if (r.horses) blockers.push('an owned horse');
+        if (r.children) blockers.push(`${r.children} rider${r.children === 1 ? '' : 's'} under them`);
+        if (blockers.length) {
+            return res.status(409).json({
+                error: `This contact has ${blockers.join(', ')}. Archive them instead so the history is kept.`,
+                can_archive: true
+            });
+        }
+        const { rowCount } = await pool.query('DELETE FROM contacts WHERE id = $1', [req.params.id]);
+        if (!rowCount) return res.status(404).json({ error: 'Contact not found.' });
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Deleting contact');
+    }
+});
+
 // ---------- Horses ----------
 app.get('/api/horses', requireAuth, async (req, res) => {
     try {
