@@ -388,6 +388,7 @@
         if (!state.user) return renderLogin();
         document.body.classList.toggle('page-calendar', parts[0] === 'calendar' || !parts[0]);
         document.body.classList.remove('nav-hidden');   // never leave the nav hidden on another page
+        document.body.classList.remove('cal-tab-rides', 'cal-tab-horses');
         if (parts[0] === 'calendar') {
             if (/^\d{4}-\d{2}-\d{2}$/.test(parts[1] || '') && parts[1] !== state.calendarDate) {
                 state.calendarDate = parts[1];
@@ -759,6 +760,46 @@
         });
     }
 
+    // Phones get two views of the day: big readable ride cards (no horse grid),
+    // or the grid with a compact ride column for assigning horses. Both are the
+    // same DOM — only CSS differs — so tablets and laptops are unaffected.
+    function applyCalTab() {
+        const horses = state.calTab === 'horses';
+        document.body.classList.toggle('cal-tab-horses', horses);
+        document.body.classList.toggle('cal-tab-rides', !horses);
+    }
+
+    const MOBILE_MQ = '(max-width: 700px), (max-height: 560px)';
+
+    // The date toolbar and the Rides/Horses tabs live in the grid's corner cell
+    // on a desktop, but that column is only ~42vw on a phone. Rather than
+    // duplicating them, move the same nodes above the grid when the viewport is
+    // small — one set of elements, one set of handlers.
+    function placeCalControls(grid) {
+        const bar = grid.querySelector('.cal-mobile-bar');
+        const corner = grid.querySelector('th.ridecol');
+        const nav = grid.querySelector('.cal-nav');
+        const tabs = grid.querySelector('.cal-mobile-tabs');
+        if (!bar || !corner || !nav || !tabs) return;
+        if (window.matchMedia(MOBILE_MQ).matches) {
+            bar.appendChild(nav);
+            bar.appendChild(tabs);
+        } else {
+            corner.insertBefore(nav, corner.querySelector('.cal-actions'));
+            corner.appendChild(tabs);
+        }
+    }
+
+    let calMqBound = false;
+    function bindCalMqListener() {
+        if (calMqBound) return;
+        calMqBound = true;
+        window.matchMedia(MOBILE_MQ).addEventListener('change', () => {
+            const grid = document.getElementById('cal-grid');
+            if (grid) placeCalControls(grid);
+        });
+    }
+
     // On a phone in landscape the nav bar costs a third of the usable height, so
     // it slides away while you scroll down through the day and comes straight
     // back on any upward scroll. CSS decides whether it applies (mobile only).
@@ -812,7 +853,9 @@
             .sort((a, b) => hhmm(a.start_time).localeCompare(hhmm(b.start_time)));
 
         const load = horseDayLoad(rides);
-        let html = '<div class="calendar-scroller"><table class="daygrid ridegrid">';
+        // On a phone the controls are lifted out of the table's corner cell (see
+        // placeCalControls) — a 42vw column cannot hold a date toolbar.
+        let html = '<div class="cal-mobile-bar"></div><div class="calendar-scroller"><table class="daygrid ridegrid">';
         html += `<tr><th class="ridecol">
             <div class="page-tabs">
                 <button class="page-tab active">🐴 Ride schedule</button>
@@ -825,6 +868,10 @@
                 <button class="secondary" id="cal-today" title="Jump to today">Today</button>
                 <button class="small mobile-only" id="cal-add-m" title="New ride" aria-label="New ride">＋</button>
                 <button class="secondary mobile-only" id="cal-fixed-m" title="Fixed rides" aria-label="Fixed rides">🔁</button>
+            </div>
+            <div class="cal-mobile-tabs">
+                <button class="mtab ${state.calTab !== 'horses' ? 'active' : ''}" data-mtab="rides">🐴 Rides</button>
+                <button class="mtab ${state.calTab === 'horses' ? 'active' : ''}" data-mtab="horses">🐎 Horses</button>
             </div>
             <div class="cal-actions">
                 <button class="small" id="cal-add">＋ New ride</button>
@@ -943,6 +990,10 @@
                     <button class="ride-top" data-ride-id="${r.id}">
                         <span class="ride-time">${esc(start)}–${esc(end)}</span>
                         <span class="ride-dur">${r.duration_min} min</span>
+                        <span class="ride-count">${r.is_block ? '🚫 blocked'
+                            : riders.length ? riders.length + (riders.length === 1 ? ' rider' : ' riders')
+                            : horsesOnly.length ? horsesOnly.length + ' horse' + (horsesOnly.length === 1 ? '' : 's')
+                            : 'empty'}</span>
                         ${VENUES[r.venue] ? `<span class="ride-venue" style="color:${VENUE_COLORS[r.venue]}">${VENUES[r.venue]}</span>` : ''}
                         <span class="ride-level${r.level ? '' : ' none'}"
                               style="${r.level ? `color:${color}` : ''}">${r.level ? LEVEL_LABELS[r.level] : 'no level assigned'}</span>
@@ -993,6 +1044,9 @@
             }
         }
         wireNavAutoHide(grid.querySelector('.calendar-scroller'));
+        applyCalTab();
+        placeCalControls(grid);
+        bindCalMqListener();
 
         grid.querySelectorAll('[data-unblock-ride]').forEach((td) => {
             td.addEventListener('click', async () => {
@@ -1021,6 +1075,12 @@
             openRideDialog(null, { date, time: (state.settings.day_start || '09:00'), dayRides: rides });
         document.getElementById('cal-add').addEventListener('click', newRide);
         document.getElementById('cal-add-m').addEventListener('click', newRide);
+        grid.querySelectorAll('[data-mtab]').forEach((b) => b.addEventListener('click', () => {
+            state.calTab = b.getAttribute('data-mtab');
+            applyCalTab();
+            grid.querySelectorAll('[data-mtab]').forEach((x) =>
+                x.classList.toggle('active', x.getAttribute('data-mtab') === state.calTab));
+        }));
         const goFixed = () => { location.hash = '#/fixed'; };
         document.getElementById('tab-fixed').addEventListener('click', goFixed);
         document.getElementById('cal-fixed-m').addEventListener('click', goFixed);

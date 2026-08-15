@@ -737,9 +737,10 @@ td.horse-cell.used:hover .horse-fill { box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35)
     text-align: left;
 }
 .ride-top:hover { background: #e5e5df; }
-.ride-time { font-size: 13.5px; font-weight: 800; }
-.ride-dur { font-size: 11.5px; font-weight: 500; color: var(--muted); }
-.ride-level { margin-left: auto; font-size: 12px; font-weight: 800; letter-spacing: 0.2px; }
+/* the time is the row's anchor — never let it shrink or break across lines */
+.ride-time { font-size: 13.5px; font-weight: 800; white-space: nowrap; flex: 0 0 auto; }
+.ride-dur { font-size: 11.5px; font-weight: 500; color: var(--muted); white-space: nowrap; flex: 0 0 auto; }
+.ride-level { margin-left: auto; font-size: 12px; font-weight: 800; letter-spacing: 0.2px; min-width: 0; }
 .ride-level.none { font-weight: 500; font-style: italic; color: var(--muted); }
 .ride-cols { display: flex; gap: 10px; margin-top: 7px; align-items: stretch; }
 .ride-riders-col { flex: 1 1 62%; min-width: 0; }
@@ -1158,3 +1159,102 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .settings-grid .list-item { padding: 8px 10px; gap: 8px; }
 .settings-grid .list-item .horse-dot { flex: 0 0 auto; }
 .settings-grid .list-item .li-title { font-size: 14.5px; }
+
+/* ---- Phone: Rides / Horses tabs over the same grid ----
+   Desktop and tablet never see these tabs and get the grid exactly as before;
+   everything below is scoped to the mobile breakpoints. */
+.cal-mobile-tabs { display: none; }
+.ride-count { display: none; }
+
+@media (max-width: 700px), (max-height: 560px) {
+    .cal-mobile-tabs {
+        display: flex;
+        gap: 6px;
+        margin-top: 7px;
+        background: #dfe8da;
+        border-radius: 999px;
+        padding: 3px;
+    }
+    .cal-mobile-tabs .mtab {
+        flex: 1;
+        padding: 8px 6px;
+        border: none;
+        border-radius: 999px;
+        background: none;
+        color: var(--green-dark);
+        font: inherit;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .cal-mobile-tabs .mtab.active {
+        background: var(--green);
+        color: #fff;
+        box-shadow: var(--shadow);
+    }
+
+    /* ---- Rides tab: horses out of the way, text sized for reading ---- */
+    body.cal-tab-rides table.ridegrid th.horsecol,
+    body.cal-tab-rides table.ridegrid td.horse-cell,
+    body.cal-tab-rides table.ridegrid td.blocked-col { display: none; }
+    body.cal-tab-rides table.ridegrid th.ridecol,
+    body.cal-tab-rides table.ridegrid td.ridecol {
+        min-width: 0;
+        width: auto;
+    }
+    /* nothing scrolls horizontally now, so the corner cell pins to the top
+       instead of the left and the toolbar + tabs stay reachable */
+    body.cal-tab-rides table.ridegrid th.ridecol { left: auto; top: 0; }
+    body.cal-tab-rides table.ridegrid td.ridecol { position: static; }
+    body.cal-tab-rides .ride-box { padding: 9px 11px; }
+    body.cal-tab-rides .ride-top { margin: -9px -11px 0; width: calc(100% + 22px); padding: 7px 11px; }
+    body.cal-tab-rides .ride-time { font-size: 17px; }
+    body.cal-tab-rides .ride-dur { display: inline; font-size: 13px; }
+    body.cal-tab-rides .ride-level { font-size: 14px; }
+    body.cal-tab-rides .ride-venue { font-size: 13px; }
+    body.cal-tab-rides .rider-row { font-size: 16px; padding: 4px 0; gap: 6px; }
+    body.cal-tab-rides .rider-horse { font-size: 15px; padding: 2px 8px; }
+    body.cal-tab-rides .staff-pill { font-size: 14px; padding: 3px 10px; }
+    body.cal-tab-rides .rider-pickup { font-size: 13px; }
+    body.cal-tab-rides .rider-off { font-size: 13px; }
+    body.cal-tab-rides .instructor-note { font-size: 14px; }
+    body.cal-tab-rides .hour-label { font-size: 15px; }
+
+    /* ---- Horses tab: ride column shrinks to a stub so horses get the width ---- */
+    body.cal-tab-horses table.ridegrid th.ridecol,
+    body.cal-tab-horses table.ridegrid td.ridecol {
+        min-width: 42vw;
+        width: 42vw;
+    }
+    body.cal-tab-horses .ride-cols { display: none; }
+    body.cal-tab-horses .ride-flags { display: none; }
+    body.cal-tab-horses .ride-box { padding: 0; border: none; box-shadow: none; background: none; }
+    body.cal-tab-horses .ride-top {
+        margin: 0;
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 7px 8px;
+        flex-wrap: wrap;
+        gap: 4px 7px;
+    }
+    body.cal-tab-horses .ride-time { font-size: 14px; }
+    body.cal-tab-horses .ride-dur { display: none; }
+    body.cal-tab-horses .ride-count { display: inline; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+    body.cal-tab-horses .ride-level { font-size: 12px; flex-basis: 100%; margin-left: 0; }
+}
+
+/* The lifted-out mobile control bar (see placeCalControls) */
+.cal-mobile-bar { display: none; }
+@media (max-width: 700px), (max-height: 560px) {
+    .cal-mobile-bar {
+        display: block;
+        background: var(--green-light);
+        border-radius: var(--radius) var(--radius) 0 0;
+        padding: 7px 8px 8px;
+    }
+    .cal-mobile-bar .cal-nav { justify-content: center; }
+    /* the corner cell is now empty — let the column collapse to the stub width */
+    body.cal-tab-horses table.ridegrid th.ridecol { padding: 0; }
+    body.cal-tab-rides table.ridegrid th.ridecol { padding: 0; border: none; }
+}
