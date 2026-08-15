@@ -3,8 +3,17 @@
 (() => {
     'use strict';
 
-    const token = new URLSearchParams(location.search).get('token') || '';
+    // The token normally arrives in the link, but a Home Screen install opens
+    // /schedule with no query string — so remember it on first visit.
+    const urlToken = new URLSearchParams(location.search).get('token') || '';
+    if (urlToken) { try { localStorage.setItem('svsh_token', urlToken); } catch (e) { /* private mode */ } }
+    let stored = '';
+    try { stored = localStorage.getItem('svsh_token') || ''; } catch (e) { /* private mode */ }
+    const token = urlToken || stored;
     const $out = document.getElementById('out');
+    const $status = document.getElementById('status');
+    let lastPayload = '';      // to tell a real change from an identical refetch
+    let cachedAt = null;
     const LEVEL_LABELS = {
         'beginner': 'Beginner', 'beginner-intermediate': 'Beg–Int', 'intermediate': 'Intermediate',
         'intermediate-advanced': 'Int–Adv', 'advanced': 'Advanced'
@@ -104,17 +113,40 @@
         </div>`;
     }
 
-    async function load() {
+    function showStatus(kind, text) {
+        if (!$status) return;
+        $status.className = `sched-status ${kind}`;
+        $status.textContent = text;
+        $status.classList.toggle('hidden', !text);
+    }
+
+    const clockOf = (iso) => {
+        const d = new Date(iso);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    };
+
+    async function load(quiet) {
         const from = week ? mondayOf(date) : date;
         const to = week ? shift(mondayOf(date), 6) : date;
         document.getElementById('mode-btn').textContent = week ? 'Day' : 'Week';
         try {
             const res = await fetch(`/api/public/schedule?token=${encodeURIComponent(token)}&from=${from}&to=${to}`);
+            if (res.status === 503) {          // service worker has nothing cached yet
+                showStatus('offline', 'No signal, and this day has not been saved to the phone yet.');
+                if (!quiet) $out.innerHTML = '<div class="card">Not available offline yet. Open this once with signal.</div>';
+                return;
+            }
             if (!res.ok) {
                 $out.innerHTML = '<div class="card">This link is not valid. Ask the office for the current one.</div>';
                 return;
             }
+            // The service worker stamps responses it served from its cache
+            cachedAt = res.headers.get('X-Cached-At');
             const data = await res.json();
+            const fingerprint = JSON.stringify(data.days);
+            if (quiet && fingerprint === lastPayload) { markFreshness(); return; }
+            const changed = quiet && lastPayload && fingerprint !== lastPayload;
+            lastPayload = fingerprint;
             document.getElementById('biz-name').textContent = data.business_name;
             document.title = `Schedule — ${data.business_name}`;
             $out.classList.remove('muted');
@@ -122,14 +154,123 @@
                 <h2 class="pub-day ${d.date === todayStr() ? 'is-today' : ''}">${esc(longDate(d.date))}</h2>
                 ${d.rides.length ? d.rides.map(rideHtml).join('')
                     : '<div class="card muted">Nothing scheduled.</div>'}`).join('');
+            markFreshness(changed);
         } catch (err) {
-            $out.innerHTML = `<div class="card">Could not load the schedule. ${esc(err.message)}</div>`;
+            showStatus('offline', 'No signal — showing the last schedule saved on this phone.');
+            if (!quiet && !$out.innerHTML.trim()) {
+                $out.innerHTML = `<div class="card">Could not load the schedule. ${esc(err.message)}</div>`;
+            }
         }
     }
 
-    document.getElementById('prev').addEventListener('click', () => { date = shift(date, week ? -7 : -1); load(); });
-    document.getElementById('next').addEventListener('click', () => { date = shift(date, week ? 7 : 1); load(); });
-    document.getElementById('today-btn').addEventListener('click', () => { date = todayStr(); load(); });
-    document.getElementById('mode-btn').addEventListener('click', () => { week = !week; load(); });
+    // A stale schedule shown as if it were live is worse than none, so always
+    // say where this copy came from.
+    function markFreshness(justChanged) {
+        if (!navigator.onLine) {
+            showStatus('offline', cachedAt
+                ? `No signal — showing the schedule as at ${clockOf(cachedAt)}.`
+                : 'No signal — showing the last schedule saved on this phone.');
+        } else if (justChanged) {
+            showStatus('changed', 'Schedule updated just now.');
+            setTimeout(() => { if (navigator.onLine) showStatus('', ''); }, 6000);
+        } else {
+            showStatus('', '');
+        }
+    }
+
+    const reset = () => { lastPayload = ''; };
+    document.getElementById('prev').addEventListener('click', () => { date = shift(date, week ? -7 : -1); reset(); load(); });
+    document.getElementById('next').addEventListener('click', () => { date = shift(date, week ? 7 : 1); reset(); load(); });
+    document.getElementById('today-btn').addEventListener('click', () => { date = todayStr(); reset(); load(); });
+    document.getElementById('mode-btn').addEventListener('click', () => { week = !week; reset(); load(); });
+
+    // ---- keep it current ----
+    // Polling rather than a live socket: on patchy rural signal a long-lived
+    // connection spends its time dropping and reconnecting, while a poll simply
+    // succeeds the next time it can. Paused when the page is not on screen.
+    const POLL_MS = 30000;
+    let timer = null;
+    const startPolling = () => {
+        stopPolling();
+        timer = setInterval(() => { if (!document.hidden) load(true); }, POLL_MS);
+    };
+    const stopPolling = () => { if (timer) clearInterval(timer); timer = null; };
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return stopPolling();
+        load(true);                    // catch up on whatever changed while away
+        startPolling();
+    });
+    window.addEventListener('online', () => { showStatus('', ''); load(true); });
+    window.addEventListener('offline', () => markFreshness());
+
+    // ---- offline + background updates ----
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').then(prefetchWeek).catch(() => { /* http, or blocked */ });
+        navigator.serviceWorker.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'schedule-changed') load(true);
+        });
+    }
+
+    // Warm the cache with the surrounding week so tomorrow also works offline
+    function prefetchWeek() {
+        const from = mondayOf(todayStr());
+        fetch(`/api/public/schedule?token=${encodeURIComponent(token)}&from=${from}&to=${shift(from, 13)}`)
+            .catch(() => { /* no signal now; it will warm on the next load */ });
+    }
+
+    // ---- notifications ----
+    const notifyBtn = document.getElementById('notify-btn');
+    function syncNotifyBtn() {
+        if (!notifyBtn) return;
+        const supported = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+        if (!supported) { notifyBtn.classList.add('hidden'); return; }
+        if (Notification.permission === 'granted') {
+            notifyBtn.textContent = '🔔 On';
+            notifyBtn.classList.add('on');
+        } else if (Notification.permission === 'denied') {
+            notifyBtn.textContent = '🔕 Blocked';
+        } else {
+            notifyBtn.textContent = '🔔 Notify me';
+        }
+    }
+    if (notifyBtn) {
+        syncNotifyBtn();
+        notifyBtn.addEventListener('click', async () => {
+            if (Notification.permission === 'denied') {
+                alert('Notifications are blocked for this page. Turn them back on in your phone settings.');
+                return;
+            }
+            try {
+                const perm = await Notification.requestPermission();
+                syncNotifyBtn();
+                if (perm !== 'granted') return;
+                const reg = await navigator.serviceWorker.ready;
+                const keyRes = await fetch(`/api/public/push-key?token=${encodeURIComponent(token)}`);
+                const { key } = await keyRes.json();
+                const sub = await reg.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(key)
+                });
+                await fetch(`/api/public/push-subscribe?token=${encodeURIComponent(token)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ endpoint: sub.endpoint, keys: sub.toJSON().keys })
+                });
+                showStatus('changed', "You'll be told when the schedule changes.");
+                setTimeout(() => showStatus('', ''), 5000);
+            } catch (err) {
+                alert('Could not switch notifications on: ' + err.message);
+            }
+        });
+    }
+
+    function urlBase64ToUint8Array(base64) {
+        const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4))
+            .replace(/-/g, '+').replace(/_/g, '/');
+        const raw = atob(padded);
+        return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+    }
+
     load();
+    startPolling();
 })();

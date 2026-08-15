@@ -276,3 +276,14 @@ INSERT INTO settings (key, value) VALUES
     ('invoice_footer', 'Thank you for riding with us!'),
     ('day_start', '09:00'),
     ('day_end', '19:00');
+
+-- Web Push subscriptions for the instructor schedule (see migration 015)
+CREATE TABLE push_subscriptions (
+    id BIGSERIAL PRIMARY KEY,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_ok TIMESTAMPTZ
+);

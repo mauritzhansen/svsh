@@ -1359,6 +1359,7 @@ app.post('/api/rides', requireAuth, async (req, res) => {
             [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes, parsed.instructor_notes]);
         await insertRideChildren(client, rows[0].id, parsed.participants, parsed.guides);
         await client.query('COMMIT');
+        notifyScheduleChanged(parsed.date);
         res.json({ ride_id: rows[0].id });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -1449,6 +1450,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
             typedSiblings = rowCount;
         }
         await client.query('COMMIT');
+        notifyScheduleChanged(parsed.date);
         res.json({ ok: true, typed_siblings: typedSiblings, series_rides: seriesRides });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -1661,6 +1663,7 @@ app.delete('/api/rides/:id', requireAuth, async (req, res) => {
             }
         }
         await client.query('COMMIT');
+        notifyScheduleChanged(ride.date);
         res.json({ ok: true });
     } catch (err) {
         await client.query('ROLLBACK');
@@ -2608,6 +2611,104 @@ async function requirePublicToken(req, res) {
     }
     return true;
 }
+
+// ---------- Web Push: tell instructors' phones the schedule moved ----------
+// Instructors are usually out of signal when a change is made, so we cannot
+// rely on them refreshing. A push wakes the service worker on each subscribed
+// phone, which re-fetches and replaces its offline copy. If the phone is
+// offline the push service holds the message and delivers it on reconnect.
+const webpush = require('web-push');
+let vapidReady = null;
+
+async function ensureVapid() {
+    if (vapidReady) return vapidReady;
+    vapidReady = (async () => {
+        const { rows } = await pool.query(
+            "SELECT key, value FROM settings WHERE key IN ('vapid_public', 'vapid_private')");
+        const found = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+        let pub = found.vapid_public, priv = found.vapid_private;
+        if (!pub || !priv) {
+            const keys = webpush.generateVAPIDKeys();
+            pub = keys.publicKey; priv = keys.privateKey;
+            await pool.query(
+                `INSERT INTO settings (key, value) VALUES ('vapid_public', $1), ('vapid_private', $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [pub, priv]);
+            console.log('generated a VAPID keypair for web push');
+        }
+        webpush.setVapidDetails('mailto:info@svsh.co.za', pub, priv);
+        return pub;
+    })();
+    return vapidReady;
+}
+
+// Fire-and-forget: a failed push must never break saving a ride.
+async function notifyScheduleChanged(date) {
+    try {
+        await ensureVapid();
+        const { rows } = await pool.query('SELECT * FROM push_subscriptions');
+        if (!rows.length) return;
+        const payload = JSON.stringify({
+            date: date || null,
+            body: date ? `The schedule for ${date} has changed.`
+                       : 'The riding schedule has changed.'
+        });
+        await Promise.all(rows.map(async (s) => {
+            try {
+                await webpush.sendNotification(
+                    { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload);
+                await pool.query('UPDATE push_subscriptions SET last_ok = now() WHERE id = $1', [s.id]);
+            } catch (err) {
+                // 404/410 mean the browser rotated or revoked this endpoint
+                if (err.statusCode === 404 || err.statusCode === 410) {
+                    await pool.query('DELETE FROM push_subscriptions WHERE id = $1', [s.id]);
+                } else {
+                    console.error('push failed', err.statusCode || err.message);
+                }
+            }
+        }));
+    } catch (err) {
+        console.error('notifyScheduleChanged', err.message);
+    }
+}
+
+// The page needs the server's public key to subscribe
+app.get('/api/public/push-key', async (req, res) => {
+    try {
+        if (!await requirePublicToken(req, res)) return;
+        res.json({ key: await ensureVapid() });
+    } catch (err) {
+        handleError(res, err, 'Loading push key');
+    }
+});
+
+app.post('/api/public/push-subscribe', async (req, res) => {
+    try {
+        if (!await requirePublicToken(req, res)) return;
+        const { endpoint, keys, label } = req.body || {};
+        if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+            return res.status(400).json({ error: 'A complete subscription is required.' });
+        }
+        await pool.query(
+            `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+            [endpoint, keys.p256dh, keys.auth, String(label || '').slice(0, 60)]);
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Subscribing to push');
+    }
+});
+
+app.post('/api/public/push-unsubscribe', async (req, res) => {
+    try {
+        if (!await requirePublicToken(req, res)) return;
+        await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1',
+            [(req.body || {}).endpoint || '']);
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Unsubscribing from push');
+    }
+});
 
 // One instructor can run two overlapping rides; both rides carry the clash so
 // the schedule can flag it on either side. rideId -> guideId -> minutes.

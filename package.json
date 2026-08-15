@@ -15,7 +15,8 @@
     "license": "UNLICENSED",
     "dependencies": {
         "express": "^4.21.2",
+        "pdfkit": "^0.15.2",
         "pg": "^8.13.1",
-        "pdfkit": "^0.15.2"
+        "web-push": "^3.6.7"
     }
 }
