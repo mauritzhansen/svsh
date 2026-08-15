@@ -461,19 +461,23 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
+        if (is_rider === false && is_parent === false) {
+            return res.status(400).json({ error: 'Tick rider, parent, or both.' });
+        }
         const parentError = await validateParent(parent_id, null);
         if (parentError) return res.status(400).json({ error: parentError });
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
                                    needs_collection, collection_teacher, collection_class,
-                                   is_prospect, birth_year, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+                                   is_prospect, birth_year, notes, is_rider, is_parent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
-             !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '']);
+             !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '',
+             is_rider !== false, !!is_parent]);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -486,7 +490,10 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes, archived,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent } = req.body || {};
+        if (is_rider === false && is_parent === false) {
+            return res.status(400).json({ error: 'Tick rider, parent, or both.' });
+        }
         if (parent_id !== undefined) {
             const parentError = await validateParent(parent_id, req.params.id);
             if (parentError) return res.status(400).json({ error: parentError });
@@ -505,7 +512,9 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 notes = COALESCE($13, notes),
                 archived = COALESCE($14, archived),
                 is_prospect = COALESCE($15, is_prospect),
-                birth_year = CASE WHEN $16 THEN $17::int ELSE birth_year END
+                birth_year = CASE WHEN $16 THEN $17::int ELSE birth_year END,
+                is_rider = COALESCE($18, is_rider),
+                is_parent = COALESCE($19, is_parent)
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
@@ -513,7 +522,9 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
              needs_collection, collection_teacher, collection_class,
              notes, archived,
              typeof is_prospect === 'boolean' ? is_prospect : null,
-             birth_year !== undefined, Number.isInteger(birth_year) ? birth_year : null]);
+             birth_year !== undefined, Number.isInteger(birth_year) ? birth_year : null,
+             typeof is_rider === 'boolean' ? is_rider : null,
+             typeof is_parent === 'boolean' ? is_parent : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
@@ -873,6 +884,8 @@ function parseRecurringBody(body) {
     const { weekday, start_time, duration_min, ride_type_id, level, start_date, end_date, notes } = body || {};
     if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return { error: 'A valid weekday is required.' };
     if (!TIME_RE.test(start_time || '')) return { error: 'A valid time is required.' };
+    // The template's type is what every occurrence it creates inherits.
+    if (!ride_type_id) return { error: 'A ride type is required.' };
     const participants = [];
     const contactsUsed = new Set();
     for (const p of (Array.isArray(body.participants) ? body.participants : [])) {
@@ -1085,6 +1098,8 @@ function parseRideBody(body) {
     const start_time = allDay ? '00:00' : (body || {}).start_time;
     if (!DATE_RE.test(date || '')) return { error: 'A valid date is required.' };
     if (!TIME_RE.test(start_time || '')) return { error: 'A valid time is required.' };
+    // Every real ride must be priced and countable; blocks are not rides.
+    if (!isBlock && !ride_type_id) return { error: 'A ride type is required.' };
     const horsesUsed = new Set();
     const contactsUsed = new Set();
     const participants = [];
@@ -1392,6 +1407,31 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // has no type yet, past ones included. Occurrences with a type already
         // set are deliberate one-offs and are left alone, and invoiced rides are
         // never touched because their amounts are already on an invoice.
+        // "Change the whole series": push this ride's setup onto the template so
+        // future weeks inherit it, and onto later occurrences that are not
+        // invoiced yet. Riders are not touched here — they are handled by
+        // /repeat-riders, which the dialog calls separately.
+        let seriesRides = 0;
+        if (existing[0].recurring_id && (req.body || {}).apply_scope === 'series') {
+            await client.query(
+                `UPDATE recurring_rides SET start_time = $2, duration_min = $3, ride_type_id = $4,
+                        level = $5, venue = $6, instructor_notes = $7
+                  WHERE id = $1`,
+                [existing[0].recurring_id, parsed.start_time, parsed.duration_min,
+                 parsed.ride_type_id, parsed.level, parsed.venue, parsed.instructor_notes]);
+            const { rowCount } = await client.query(
+                `UPDATE rides r SET start_time = $2, duration_min = $3, ride_type_id = $4,
+                        level = $5, venue = $6, instructor_notes = $7
+                  WHERE r.recurring_id = $1 AND r.id <> $8 AND r.date > $9
+                    AND r.status = 'active' AND NOT r.is_block
+                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
+                                     JOIN invoice_lines il ON il.participant_id = rp.id
+                                    WHERE rp.ride_id = r.id)`,
+                [existing[0].recurring_id, parsed.start_time, parsed.duration_min,
+                 parsed.ride_type_id, parsed.level, parsed.venue, parsed.instructor_notes,
+                 req.params.id, parsed.date]);
+            seriesRides = rowCount;
+        }
         let typedSiblings = 0;
         if (existing[0].recurring_id && parsed.ride_type_id) {
             await client.query(
@@ -1409,7 +1449,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
             typedSiblings = rowCount;
         }
         await client.query('COMMIT');
-        res.json({ ok: true, typed_siblings: typedSiblings });
+        res.json({ ok: true, typed_siblings: typedSiblings, series_rides: seriesRides });
     } catch (err) {
         await client.query('ROLLBACK');
         handleError(res, err, 'Updating ride');

@@ -105,6 +105,18 @@
         enhanceTimeInputs($dialog);
     }
 
+    // A second dialog layered over an open one, so the form underneath keeps
+    // its unsaved state (openDialog replaces the main dialog's contents).
+    function openSubDialog(html) {
+        const overlay = document.createElement('div');
+        overlay.className = 'timepick-backdrop';
+        overlay.innerHTML = `<div class="timepick subdialog">${html}</div>`;
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+        enhanceTimeInputs(overlay);
+        return overlay;
+    }
+
     // Small choice overlay that can sit above an open dialog
     function askChoice(title, message, options) {
         return new Promise((resolve) => {
@@ -297,25 +309,54 @@
 
     function phoneFieldHtml(id, value) {
         const { cc, rest } = splitPhone(value);
-        const known = COUNTRIES.some((c) => c[0] === cc);
-        const list = known ? COUNTRIES : [[cc, '']].concat(COUNTRIES);
-        let picked = false;
+        // The field shows the dial code only — country names live in the picker.
         // inline layout so it can't be broken by a stale stylesheet
         return `<div class="phone-field" style="display:flex;gap:6px;align-items:center">
-            <select id="${id}-cc" class="phone-cc" style="flex:0 0 112px;width:112px;padding-left:6px;padding-right:2px">
-                ${list.map(([c, name]) => {
-                    const sel = !picked && c === cc ? (picked = true, 'selected') : '';
-                    return `<option value="${c}" ${sel}>${c}${name ? ' ' + esc(name) : ''}</option>`;
-                }).join('')}
-            </select>
+            <button type="button" id="${id}-cc" class="secondary phone-cc" data-cc="${esc(cc)}"
+                    title="Change country" style="flex:0 0 74px;width:74px">${esc(cc)}</button>
             <input id="${id}" type="tel" inputmode="tel" style="flex:1 1 auto;min-width:0"
                    value="${esc(rest)}" placeholder="82 555 0101">
         </div>`;
     }
 
+    // Country picker: search by name or code, sets the button's dial code
+    function openCountryPicker(btn) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 8px">Country dialling code</h3>
+            <input id="cc-search" type="search" placeholder="Search country or code…" autocomplete="off">
+            <div id="cc-list" class="cc-list"></div>
+            <div class="form-actions"><button class="secondary" id="cc-cancel">Cancel</button></div>`);
+        const $list = overlay.querySelector('#cc-list');
+        const draw = (q) => {
+            const term = (q || '').trim().toLowerCase();
+            const hits = COUNTRIES.filter(([c, name]) =>
+                !term || c.includes(term) || (name || '').toLowerCase().includes(term));
+            $list.innerHTML = hits.length ? hits.map(([c, name]) => `
+                <button type="button" class="cc-row ${c === btn.dataset.cc ? 'on' : ''}" data-code="${esc(c)}">
+                    <span class="cc-code">${esc(c)}</span><span>${esc(name || '')}</span>
+                </button>`).join('') : '<div class="muted" style="padding:8px">No match.</div>';
+            $list.querySelectorAll('[data-code]').forEach((row) => row.addEventListener('click', () => {
+                btn.dataset.cc = row.getAttribute('data-code');
+                btn.textContent = row.getAttribute('data-code');
+                overlay.remove();
+            }));
+        };
+        draw('');
+        overlay.querySelector('#cc-search').addEventListener('input', (e) => draw(e.target.value));
+        overlay.querySelector('#cc-cancel').addEventListener('click', () => overlay.remove());
+        overlay.querySelector('#cc-search').focus();
+    }
+
+    // one delegated handler covers every dialog that renders a phone field
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest && e.target.closest('.phone-cc');
+        if (btn) { e.preventDefault(); openCountryPicker(btn); }
+    });
+
     function readPhoneField(id) {
         const rest = (document.getElementById(id).value || '').trim().replace(/^0+/, '');
-        const cc = (document.getElementById(id + '-cc') || {}).value || DEFAULT_CC;
+        const ccEl = document.getElementById(id + '-cc');
+        const cc = (ccEl && ccEl.dataset.cc) || DEFAULT_CC;
         return rest ? `${cc} ${rest}` : '';
     }
 
@@ -1917,7 +1958,7 @@
         }
         openDialog(`
             <h2>${isEdit ? (ride.is_block ? '🚫 Blocked horses' : '🐴 Ride') : 'New ride'} — ${esc(defaults.date)}</h2>
-            ${isEdit && ride.recurring_id ? '<p class="muted">🔁 This comes from a fixed weekly slot. Changes here only affect this day.</p>' : ''}
+            ${isEdit && ride.recurring_id ? '<p class="muted">🔁 This comes from a fixed weekly slot. When you save you can choose to change just this day or the whole series.</p>' : ''}
             ${locked ? '<p class="muted">🧾 This ride is on an invoice and can no longer be changed.</p>' : ''}
             <fieldset style="border:none;margin:0;padding:0" ${locked ? 'disabled' : ''}>
             <div class="form-row">
@@ -1926,7 +1967,7 @@
                     <input type="time" id="ride-time" value="${time}">
                 </div>
                 <div>
-                    <label>Ride type</label>
+                    <label>Ride type <span class="req">*</span></label>
                     <select id="ride-type">${rideTypeOptions(isEdit ? ride.ride_type_id : null)}</select>
                 </div>
             </div>
@@ -1961,8 +2002,8 @@
                 🔁 Repeats every week (fixed ride)
             </label>
             <div class="muted" id="repeat-note" style="margin-left:26px">${isEdit && ride.recurring_id
-                ? 'Set how often each rider comes above. Unticking stops the series from this day on.'
-                : 'Makes this a weekly fixed ride from this date. Each rider can then be every week or every 2nd week.'}</div>
+                ? 'This ride repeats on this weekday every week. The dropdown beside each rider sets whether they come every week or every second week. Untick to end the series — this day stays, later weeks stop being created.'
+                : 'Makes this a weekly fixed ride from this date on. Each rider can then be set to every week or every 2nd week.'}</div>
             </fieldset>
             <div class="form-warning" id="ride-resched-info"></div>
             <div class="form-warning" id="ride-warnings"></div>
@@ -2017,6 +2058,9 @@
         if (locked) return;
 
         document.getElementById('ride-save').addEventListener('click', async () => {
+            if (!document.getElementById('ride-type').value) {
+                return dialogError('Pick a ride type — it sets the price and drives the reports.');
+            }
             const credits = reschedRows();
             const body = {
                 date: defaults.date,
@@ -2044,11 +2088,23 @@
                     };
                 }).filter((g) => g.guide_id)
             };
+            if (isEdit && ride.recurring_id) {
+                const scope = await askChoice('Change the weekly ride',
+                    `This is one occurrence of a fixed ${WEEKDAYS[isoDow(defaults.date) - 1]} ride.`, [
+                        { key: 'one', label: 'Just this day', hint: `only ${defaults.date} changes` },
+                        { key: 'series', label: 'This day and the whole series',
+                          hint: 'updates the weekly slot and every later week that is not invoiced' }
+                    ]);
+                if (!scope) return;
+                body.apply_scope = scope;
+            }
             try {
                 let savedId = isEdit ? ride.id : null;
-                let typedSiblings = 0;
+                let typedSiblings = 0, seriesRides = 0;
                 if (isEdit) {
-                    typedSiblings = (await api('PUT', `/api/rides/${ride.id}`, body)).typed_siblings || 0;
+                    const res = await api('PUT', `/api/rides/${ride.id}`, body);
+                    typedSiblings = res.typed_siblings || 0;
+                    seriesRides = res.series_rides || 0;
                 } else savedId = (await api('POST', '/api/rides', body)).ride_id;
                 for (const pc of credits) {
                     await api('POST', '/api/credits', {
@@ -2081,6 +2137,7 @@
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
                     : defaults.addContactId ? 'Saved — reschedule credit used.'
+                    : seriesRides ? `Saved. The weekly slot and ${seriesRides} later ride${seriesRides === 1 ? '' : 's'} were updated too.`
                     : typedSiblings ? `Saved. The ride type was also set on ${typedSiblings} other ride${typedSiblings === 1 ? '' : 's'} in this weekly series that had none.`
                     : 'Saved.');
                 afterSave();
@@ -2248,7 +2305,7 @@
                     <select id="fx-level">${levelOptions(isEdit ? tpl.level : '')}</select>
                 </div>
                 <div>
-                    <label>Ride type (for pricing)</label>
+                    <label>Ride type (for pricing) <span class="req">*</span></label>
                     <select id="fx-ridetype">${rideTypeOptions(isEdit ? tpl.ride_type_id : null)}</select>
                 </div>
             </div>
@@ -2294,6 +2351,9 @@
         document.getElementById('fx-cancel').addEventListener('click', closeDialog);
 
         document.getElementById('fx-save').addEventListener('click', async () => {
+            if (!document.getElementById('fx-ridetype').value) {
+                return dialogError('Pick a ride type — every ride this slot creates inherits it.');
+            }
             const body = {
                 weekday: Number(document.getElementById('fx-weekday').value),
                 start_time: document.getElementById('fx-time').value,
@@ -2684,10 +2744,21 @@
     // ---------- Contacts ----------
     // Rider / Parent are worked out from the data rather than stored, so a
     // contact who does both gets both tags and nothing has to be kept in sync.
-    function isRider(c) {
-        return c.ride_count > 0 || c.fixed_count > 0 || !!c.experience;
+    const isRider = (c) => !!c.is_rider;
+    const isParent = (c) => !!c.is_parent;
+
+    // Riders always state who pays, so an unlinked kid is obvious at a glance.
+    // A rider who is also a parent pays their own way, so nothing is missing.
+    function contactSubLine(c) {
+        const bits = [];
+        if (isRider(c)) {
+            if (c.parent_name) bits.push(`👤 ${esc(c.parent_name)} pays`);
+            else if (isParent(c)) bits.push('pays own invoices');
+            else bits.push('<span class="no-parent">no parent assigned</span>');
+        }
+        if (c.phone || c.email) bits.push(esc(c.phone || c.email));
+        return bits.join(' · ');
     }
-    const isParent = (c) => c.child_count > 0;
 
     function roleTags(c) {
         const tags = [];
@@ -2753,7 +2824,7 @@
                     <div class="avatar">${esc(c.name.trim()[0] || '?').toUpperCase()}</div>
                     <div class="li-main">
                         <div class="li-title">${esc(c.name)}${roleTags(c)}</div>
-                        <div class="li-sub">${c.parent_name ? 'pays: ' + esc(c.parent_name) : esc(c.phone || c.email || '')}</div>
+                        <div class="li-sub">${contactSubLine(c)}</div>
                     </div>
                     ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
                     <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
@@ -2822,6 +2893,67 @@
         return html + '</div>';
     }
 
+    // Availability printed as plain hours per day, so the 7-column grid only has
+    // to appear when you actually want to change it.
+    const DAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    function availSummary(availability) {
+        const rows = (availability || []).slice()
+            .sort((a, b) => a.weekday - b.weekday || String(a.start_time).localeCompare(String(b.start_time)));
+        if (!rows.length) return '<span class="muted">Any time — no restriction set.</span>';
+        const byDay = {};
+        rows.forEach((a) => {
+            (byDay[a.weekday] = byDay[a.weekday] || [])
+                .push(`${hhmm(a.start_time)}–${hhmm(a.end_time)}`);
+        });
+        return Object.keys(byDay).sort((a, b) => a - b).map((w) =>
+            `<span class="avail-day"><b>${DAY_ABBR[w - 1]}</b> ${esc(byDay[w].join(', '))}</span>`).join('');
+    }
+
+    // Summary plus a button. The grid itself stays in the form but hidden, so
+    // the existing collectAvailability(form) still finds it on save; editing
+    // happens on a clone in a sub-dialog, which only writes back on Save.
+    function availFieldHtml(availability) {
+        return `<div class="avail-field">
+            <div class="avail-summary" id="av-summary">${availSummary(availability)}</div>
+            <button type="button" class="secondary small" id="av-edit">Edit availability</button>
+            <div id="av-store" class="hidden">${availGridHtml(availability)}</div>
+        </div>`;
+    }
+
+    function wireAvailField(root) {
+        const scope = root || $dialog;
+        const editBtn = scope.querySelector('#av-edit');
+        const store = scope.querySelector('#av-store');
+        if (!editBtn || !store) return;
+        editBtn.addEventListener('click', () => {
+            const overlay = openSubDialog(`
+                <h3 style="margin:0 0 4px">Availability</h3>
+                <p class="muted" style="margin:0 0 10px">Tap the hours they can ride.
+                   All empty means no restriction.</p>
+                <div id="av-edit-grid"></div>
+                <div class="form-actions">
+                    <button class="secondary" id="av-clear">Clear all</button>
+                    <span class="spacer"></span>
+                    <button class="secondary" id="av-cancel">Cancel</button>
+                    <button id="av-save">Save</button>
+                </div>`);
+            const holder = overlay.querySelector('#av-edit-grid');
+            holder.appendChild(store.firstElementChild.cloneNode(true));
+            holder.querySelectorAll('.avail-cell').forEach((cell) =>
+                cell.addEventListener('click', () => cell.classList.toggle('on')));
+            overlay.querySelector('#av-clear').addEventListener('click', () =>
+                holder.querySelectorAll('.avail-cell.on').forEach((c) => c.classList.remove('on')));
+            overlay.querySelector('#av-cancel').addEventListener('click', () => overlay.remove());
+            overlay.querySelector('#av-save').addEventListener('click', () => {
+                store.innerHTML = '';
+                store.appendChild(holder.firstElementChild);
+                scope.querySelector('#av-summary').innerHTML =
+                    availSummary(collectAvailability(store));
+                overlay.remove();
+            });
+        });
+    }
+
     function collectAvailability(root) {
         // Merge contiguous toggled hour cells into ranges per weekday
         const byDay = {};
@@ -2846,6 +2978,152 @@
         return out;
     }
 
+    // Rider ticked -> they may have a parent who pays. Parent ticked -> they can
+    // have riders hung underneath them. Both is fine (a parent who also rides).
+    function wireContactRoles(contact) {
+        const rider = document.getElementById('ct-is-rider');
+        const parent = document.getElementById('ct-is-parent');
+        const parentWrap = document.getElementById('ct-parent-wrap');
+        const kidsWrap = document.getElementById('ct-kids-wrap');
+        const kids = (state.contacts || []).filter((c) =>
+            contact && String(c.parent_id) === String(contact.id));
+        document.getElementById('ct-kids').innerHTML = kids.length
+            ? kids.map((k) => `<span class="kid-chip">${esc(k.name)}</span>`).join('')
+            : 'None yet.';
+        const sync = () => {
+            parentWrap.classList.toggle('hidden', !rider.checked);
+            kidsWrap.classList.toggle('hidden', !parent.checked);
+        };
+        rider.addEventListener('change', sync);
+        parent.addEventListener('change', sync);
+        sync();
+        document.getElementById('ct-add-kid').addEventListener('click', async () => {
+            // Save the parent first so the new rider has something to point at
+            const saved = await saveContactForm(contact);
+            if (saved) openNewRiderUnder(saved);
+        });
+    }
+
+    // The rider's essentials only — the full contact form is a click away later
+    function openNewRiderUnder(parent) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 4px">New rider under ${esc(parent.name)}</h3>
+            <p class="muted" style="margin:0 0 10px">${esc(parent.name)} pays their invoices.</p>
+            <label>Name</label>
+            <input id="kid-name" autocomplete="off">
+            <div class="form-row">
+                <div>
+                    <label>Experience level</label>
+                    <select id="kid-exp">
+                        <option value="">(not set)</option>
+                        ${LEVELS.map((l) => `<option value="${l}">${LEVEL_LABELS[l]}</option>`).join('')}
+                    </select>
+                </div>
+                <div>
+                    <label>Age (approx.)</label>
+                    <input id="kid-age" type="number" inputmode="numeric">
+                </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
+                <input type="checkbox" id="kid-prospect" style="width:auto"> 🌱 Interested — not placed in a lesson yet
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:500">
+                <input type="checkbox" id="kid-collect" style="width:auto"> Needs to be picked up (from school)
+            </label>
+            <div class="form-row hidden" id="kid-collect-details">
+                <div><label>Teacher</label><input id="kid-teacher"></div>
+                <div><label>Class</label><input id="kid-class"></div>
+            </div>
+            <label>Preferred horse</label>
+            <select id="kid-horse">
+                <option value="">(none)</option>
+                ${[...activeHorses()].sort((a, b) => a.name.localeCompare(b.name))
+                    .map((h) => `<option value="${h.id}">${esc(h.name)}</option>`).join('')}
+            </select>
+            <label>Availability</label>
+            ${availFieldHtml([])}
+            <div class="form-error"></div>
+            <div class="form-actions">
+                <button class="secondary" id="kid-cancel">Cancel</button>
+                <button id="kid-save">Add rider</button>
+            </div>`);
+        wireAvailField(overlay);
+        overlay.querySelector('#kid-collect').addEventListener('change', (e) =>
+            overlay.querySelector('#kid-collect-details').classList.toggle('hidden', !e.target.checked));
+        overlay.querySelector('#kid-cancel').addEventListener('click', () => overlay.remove());
+        overlay.querySelector('#kid-save').addEventListener('click', async () => {
+            const name = overlay.querySelector('#kid-name').value.trim();
+            const err = overlay.querySelector('.form-error');
+            if (!name) { err.textContent = 'A name is required.'; return; }
+            const age = parseInt(overlay.querySelector('#kid-age').value, 10);
+            const horseId = overlay.querySelector('#kid-horse').value;
+            try {
+                await api('POST', '/api/contacts', {
+                    name,
+                    parent_id: parent.id,
+                    is_rider: true,
+                    is_parent: false,
+                    experience: overlay.querySelector('#kid-exp').value || null,
+                    birth_year: age ? new Date().getFullYear() - age : null,
+                    is_prospect: overlay.querySelector('#kid-prospect').checked,
+                    needs_collection: overlay.querySelector('#kid-collect').checked,
+                    collection_teacher: overlay.querySelector('#kid-teacher').value,
+                    collection_class: overlay.querySelector('#kid-class').value,
+                    horse_prefs: horseId ? [{ kind: 'preferred', horse_id: horseId, reason: '' }] : [],
+                    availability: collectAvailability(overlay)
+                });
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                overlay.remove();
+                toast(`${name} added under ${parent.name}.`);
+                openContactDialog(contactById(parent.id));   // reopen with the new child listed
+            } catch (e2) {
+                err.textContent = e2.message;
+            }
+        });
+        overlay.querySelector('#kid-name').focus();
+    }
+
+    // Shared by Save and by "add a rider" — returns the saved contact or null
+    async function saveContactForm(contact) {
+        const body = {
+            name: document.getElementById('ct-name').value,
+            phone: readPhoneField('ct-phone'),
+            email: document.getElementById('ct-email').value,
+            address: document.getElementById('ct-address').value,
+            parent_id: document.getElementById('ct-parent').value || null,
+            experience: document.getElementById('ct-exp').value || null,
+            birth_year: parseInt(document.getElementById('ct-age').value, 10)
+                ? new Date().getFullYear() - parseInt(document.getElementById('ct-age').value, 10) : null,
+            is_prospect: document.getElementById('ct-prospect').checked,
+            is_rider: document.getElementById('ct-is-rider').checked,
+            is_parent: document.getElementById('ct-is-parent').checked,
+            needs_collection: document.getElementById('ct-collect').checked,
+            collection_teacher: document.getElementById('ct-teacher').value,
+            collection_class: document.getElementById('ct-class').value,
+            notes: document.getElementById('ct-notes').value,
+            horse_prefs: [...$dialog.querySelectorAll('[data-kind="ctpref"]')].map((row) => ({
+                kind: row.querySelector('.cp-kind').value,
+                horse_id: row.querySelector('.cp-horse').value || null,
+                reason: row.querySelector('.cp-reason').value
+            })).filter((p) => p.horse_id),
+            availability: collectAvailability($dialog)
+        };
+        if (!body.is_rider && !body.is_parent) {
+            dialogError('Tick rider, parent, or both.');
+            return null;
+        }
+        try {
+            const res = contact
+                ? await api('PUT', `/api/contacts/${contact.id}`, body)
+                : await api('POST', '/api/contacts', body);
+            state.contacts = (await api('GET', '/api/contacts')).contacts;
+            return res.contact;
+        } catch (err) {
+            dialogError(err.message);
+            return null;
+        }
+    }
+
     function openContactDialog(contact, withTabs) {
         openDialog(`
             ${withTabs ? newTypeTabsHtml('rider') : ''}
@@ -2858,8 +3136,30 @@
             <input id="ct-email" type="email" value="${esc(contact ? contact.email : '')}">
             <label>Address (optional)</label>
             <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
-            <label>Parent / pays the invoices (for kid riders)</label>
-            <select id="ct-parent">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
+                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
+                🌱 Interested — not placed in a lesson yet
+            </label>
+            <label>This contact is a…</label>
+            <div class="role-checks">
+                <label class="role-check">
+                    <input type="checkbox" id="ct-is-rider" ${!contact || contact.is_rider ? 'checked' : ''}>
+                    Rider
+                </label>
+                <label class="role-check">
+                    <input type="checkbox" id="ct-is-parent" ${contact && contact.is_parent ? 'checked' : ''}>
+                    Parent
+                </label>
+            </div>
+            <div id="ct-parent-wrap">
+                <label>Parent / pays the invoices (leave empty if they pay their own)</label>
+                <select id="ct-parent">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
+            </div>
+            <div id="ct-kids-wrap">
+                <label>Riders under this parent</label>
+                <div id="ct-kids" class="muted"></div>
+                <button type="button" class="secondary small" id="ct-add-kid">＋ Add a rider under this contact</button>
+            </div>
             <div class="form-row">
                 <div>
                     <label>Experience level</label>
@@ -2874,10 +3174,6 @@
                            value="${contact && contact.birth_year ? new Date().getFullYear() - contact.birth_year : ''}">
                 </div>
             </div>
-            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
-                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
-                🌱 Interested — not placed in a lesson yet
-            </label>
             <label style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:500">
                 <input type="checkbox" id="ct-collect" style="width:auto" ${contact && contact.needs_collection ? 'checked' : ''}>
                 Needs to be picked up (from school)
@@ -2895,8 +3191,8 @@
             <label>Horse preferences</label>
             <div id="ct-prefs"></div>
             <button type="button" class="secondary small" id="ct-pref-add">＋ Add horse preference</button>
-            <label>Availability — tap the hours they can ride (all empty = no restriction)</label>
-            ${availGridHtml(contact ? contact.availability : [])}
+            <label>Availability</label>
+            ${availFieldHtml(contact ? contact.availability : [])}
             <label>Notes</label>
             <textarea id="ct-notes">${esc(contact ? contact.notes : '')}</textarea>
             <div class="form-error"></div>
@@ -2915,49 +3211,20 @@
             const row = document.getElementById('ct-prefs').lastElementChild;
             row.querySelector('.row-x').addEventListener('click', () => row.remove());
         });
-        $dialog.querySelectorAll('.avail-cell').forEach((cell) =>
-            cell.addEventListener('click', () => cell.classList.toggle('on')));
+        wireAvailField($dialog);
+        wireContactRoles(contact);
         document.getElementById('ct-collect').addEventListener('change', (e) => {
             document.getElementById('ct-collect-details').style.display = e.target.checked ? 'flex' : 'none';
         });
         wireNewTypeTabs();
         document.getElementById('ct-cancel').addEventListener('click', closeDialog);
         document.getElementById('ct-save').addEventListener('click', async () => {
-            const body = {
-                name: document.getElementById('ct-name').value,
-                phone: readPhoneField('ct-phone'),
-                email: document.getElementById('ct-email').value,
-                address: document.getElementById('ct-address').value,
-                parent_id: document.getElementById('ct-parent').value || null,
-                experience: document.getElementById('ct-exp').value || null,
-                birth_year: parseInt(document.getElementById('ct-age').value, 10)
-                    ? new Date().getFullYear() - parseInt(document.getElementById('ct-age').value, 10) : null,
-                is_prospect: document.getElementById('ct-prospect').checked,
-                needs_collection: document.getElementById('ct-collect').checked,
-                collection_teacher: document.getElementById('ct-teacher').value,
-                collection_class: document.getElementById('ct-class').value,
-                notes: document.getElementById('ct-notes').value,
-                horse_prefs: [...$dialog.querySelectorAll('[data-kind="ctpref"]')].map((row) => ({
-                    kind: row.querySelector('.cp-kind').value,
-                    horse_id: row.querySelector('.cp-horse').value || null,
-                    reason: row.querySelector('.cp-reason').value
-                })).filter((p) => p.horse_id),
-                availability: collectAvailability()
-            };
-            try {
-                if (contact) {
-                    await api('PUT', `/api/contacts/${contact.id}`, body);
-                } else {
-                    await api('POST', '/api/contacts', body);
-                }
-                state.contacts = (await api('GET', '/api/contacts')).contacts;
-                closeDialog();
-                toast('Saved.');
-                if (contact) renderContactDetail(contact.id);
-                else renderContacts();
-            } catch (err) {
-                dialogError(err.message);
-            }
+            const saved = await saveContactForm(contact);
+            if (!saved) return;
+            closeDialog();
+            toast('Saved.');
+            if (contact) renderContactDetail(contact.id);
+            else renderContacts();
         });
         const archiveBtn = document.getElementById('ct-archive');
         if (archiveBtn) archiveBtn.addEventListener('click', async () => {

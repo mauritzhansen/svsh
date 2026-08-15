@@ -33,6 +33,9 @@ CREATE TABLE contacts (
     parent_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL,
     -- Interested rider not yet placed in a lesson (intake/waiting list)
     is_prospect BOOLEAN NOT NULL DEFAULT false,
+    -- ticked, not inferred: a contact can be a rider, a parent, or both
+    is_rider BOOLEAN NOT NULL DEFAULT true,
+    is_parent BOOLEAN NOT NULL DEFAULT false,
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
