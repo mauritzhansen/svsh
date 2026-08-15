@@ -1292,3 +1292,17 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 
 /* A rider with no payer linked yet — needs to stand out in the list */
 .no-parent { color: #a8541c; font-weight: 700; }
+
+/* Edit straight from a list row, without opening the contact first */
+.row-edit {
+    flex: 0 0 auto;
+    margin-left: 10px;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+}
+.row-edit:hover { background: var(--green-light); border-color: var(--green); }

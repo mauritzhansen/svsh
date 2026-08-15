@@ -2828,9 +2828,19 @@
                     </div>
                     ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
                     <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
+                    <button class="row-edit" data-edit-contact="${c.id}"
+                            title="Edit ${esc(c.name)}" aria-label="Edit ${esc(c.name)}">✏️</button>
                 </div>`).join('') : '<div class="card muted">No contacts found.</div>';
             document.querySelectorAll('[data-contact-id]').forEach((el) => {
                 el.addEventListener('click', () => { location.hash = '#/contacts/' + el.getAttribute('data-contact-id'); });
+            });
+            // edit in place — don't let the click fall through to the row
+            document.querySelectorAll('[data-edit-contact]').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const c = contactById(btn.getAttribute('data-edit-contact'));
+                    if (c) openContactDialog(c);
+                });
             });
         };
         draw('');
@@ -3223,7 +3233,7 @@
             if (!saved) return;
             closeDialog();
             toast('Saved.');
-            if (contact) renderContactDetail(contact.id);
+            if (contact && location.hash.startsWith('#/contacts/')) renderContactDetail(contact.id);
             else renderContacts();
         });
         const archiveBtn = document.getElementById('ct-archive');
