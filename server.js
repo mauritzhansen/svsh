@@ -330,6 +330,14 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                       WHERE k.parent_id = c.id AND NOT k.archived) AS child_count,
                     (SELECT count(*)::int FROM recurring_participants xp
                       WHERE xp.contact_id = c.id) AS fixed_count,
+                    -- the weekly slots this rider holds, for the contact list
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'weekday', rr.weekday, 'start_time', rr.start_time::text,
+                            'frequency', xp.frequency) ORDER BY rr.weekday, rr.start_time), '[]'::json)
+                       FROM recurring_participants xp
+                       JOIN recurring_rides rr ON rr.id = xp.recurring_id
+                      WHERE xp.contact_id = c.id AND rr.active
+                        AND (rr.end_date IS NULL OR rr.end_date >= CURRENT_DATE)) AS fixed_rides,
                     (SELECT COALESCE(json_agg(json_build_object(
                             'horse_id', hp.horse_id::text, 'kind', hp.kind, 'reason', hp.reason,
                             'horse_name', h.name) ORDER BY hp.kind DESC, h.name), '[]'::json)

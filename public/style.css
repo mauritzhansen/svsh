@@ -1330,3 +1330,14 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
     cursor: pointer;
 }
 .row-del:hover { background: #fbeae7; border-color: var(--danger); }
+
+/* A rider's weekly slots on the contact list — desktop only, no room on a phone */
+.fixed-slots { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 300px; }
+.fixed-slot {
+    padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+    background: #eef1fa; color: #3a4a7a; font-size: 12px; font-weight: 600;
+}
+.fixed-slot i { font-style: normal; opacity: 0.7; font-weight: 500; }
+@media (max-width: 700px), (max-height: 560px) {
+    .fixed-slots { display: none; }
+}

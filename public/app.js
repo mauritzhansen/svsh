@@ -2775,6 +2775,15 @@
         }
     }
 
+    // The weekly slots a rider holds — shown on the list where there is room
+    // for them (hidden by CSS on a phone).
+    function fixedSlotsHtml(c) {
+        const slots = c.fixed_rides || [];
+        if (!slots.length) return '';
+        return slots.map((s) => `<span class="fixed-slot">${DAY_ABBR[s.weekday - 1]} ${
+            esc(hhmm(s.start_time))}${s.frequency === 'biweekly' ? ' <i>2nd wk</i>' : ''}</span>`).join('');
+    }
+
     function contactSubLine(c) {
         const bits = [];
         if (isRider(c)) {
@@ -2852,6 +2861,7 @@
                         <div class="li-title">${esc(c.name)}${roleTags(c)}</div>
                         <div class="li-sub">${contactSubLine(c)}</div>
                     </div>
+                    <div class="fixed-slots">${fixedSlotsHtml(c)}</div>
                     ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
                     <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
                     <button class="row-edit" data-edit-contact="${c.id}"
@@ -3035,9 +3045,20 @@
         document.getElementById('ct-kids').innerHTML = kids.length
             ? kids.map((k) => `<span class="kid-chip">${esc(k.name)}</span>`).join('')
             : 'None yet.';
+        // Someone with riders under them IS a parent, and the chain is one level
+        // deep — so they cannot also be given a parent. Say so here rather than
+        // letting the form be filled in and rejected on save.
+        const hasKids = kids.length > 0;
+        if (hasKids) {
+            parent.checked = true;
+            parent.disabled = true;
+            parent.title = 'Riders are linked to this contact, so they are a parent.';
+        }
         const sync = () => {
-            parentWrap.classList.toggle('hidden', !rider.checked);
+            parentWrap.classList.toggle('hidden', !rider.checked || hasKids);
             kidsWrap.classList.toggle('hidden', !parent.checked);
+            const note = document.getElementById('ct-parent-note');
+            if (note) note.classList.toggle('hidden', !(rider.checked && hasKids));
         };
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
@@ -3236,7 +3257,9 @@
             phone: readPhoneField('ct-phone'),
             email: document.getElementById('ct-email').value,
             address: document.getElementById('ct-address').value,
-            parent_id: document.getElementById('ct-parent').value || null,
+            // hidden picker means the field does not apply — don't send a stale value
+            parent_id: document.getElementById('ct-parent-wrap').classList.contains('hidden')
+                ? null : (document.getElementById('ct-parent').value || null),
             experience: document.getElementById('ct-exp').value || null,
             birth_year: parseInt(document.getElementById('ct-age').value, 10)
                 ? new Date().getFullYear() - parseInt(document.getElementById('ct-age').value, 10) : null,
@@ -3304,6 +3327,10 @@
                     <button type="button" class="secondary small" id="ct-add-parent"
                             style="flex:0 0 auto" title="Create a new parent">＋ New</button>
                 </div>
+            </div>
+            <div id="ct-parent-note" class="muted hidden" style="margin-bottom:10px">
+                Riders are linked to this contact, so they pay their own invoices —
+                a payer can't have a payer of their own.
             </div>
             <div id="ct-kids-wrap">
                 <label>Riders under this parent</label>
