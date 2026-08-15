@@ -559,23 +559,51 @@ app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
                     (SELECT count(*) FROM contacts WHERE parent_id = $1)::int AS children`,
             [req.params.id]);
         const r = rows[0];
-        const blockers = [];
-        if (r.rides) blockers.push(`${r.rides} ride seat${r.rides === 1 ? '' : 's'}`);
-        if (r.fixed) blockers.push('a weekly fixed ride');
-        if (r.invoices) blockers.push(`${r.invoices} invoice${r.invoices === 1 ? '' : 's'}`);
-        if (r.passes) blockers.push('a term pass');
-        if (r.credits) blockers.push('reschedule credits');
-        if (r.horses) blockers.push('an owned horse');
-        if (r.children) blockers.push(`${r.children} rider${r.children === 1 ? '' : 's'} under them`);
-        if (blockers.length) {
+        // Money and relationships are hard blockers — nothing may quietly rewrite
+        // an invoice or orphan a rider. Schedule entries are softer: a rider who
+        // was never billed can simply be taken off the schedule and removed.
+        const hard = [];
+        if (r.invoices) hard.push(`${r.invoices} invoice${r.invoices === 1 ? '' : 's'}`);
+        if (r.passes) hard.push('a term pass');
+        if (r.credits) hard.push('reschedule credits');
+        if (r.horses) hard.push('an owned horse');
+        if (r.children) hard.push(`${r.children} rider${r.children === 1 ? '' : 's'} under them`);
+        const soft = [];
+        if (r.rides) soft.push(`${r.rides} booked ride${r.rides === 1 ? '' : 's'}`);
+        if (r.fixed) soft.push(`${r.fixed} weekly fixed ride${r.fixed === 1 ? '' : 's'}`);
+
+        if (hard.length) {
             return res.status(409).json({
-                error: `This contact has ${blockers.join(', ')}. Archive them instead so the history is kept.`,
+                error: `This contact has ${hard.concat(soft).join(', ')}. Archive them instead so the history is kept.`,
                 can_archive: true
             });
         }
-        const { rowCount } = await pool.query('DELETE FROM contacts WHERE id = $1', [req.params.id]);
-        if (!rowCount) return res.status(404).json({ error: 'Contact not found.' });
-        res.json({ ok: true });
+        if (soft.length && req.query.detach !== '1') {
+            return res.status(409).json({
+                error: `This contact is on ${soft.join(' and ')}, but has never been invoiced.`,
+                can_archive: true,
+                can_detach: true,
+                detail: soft.join(' and ')
+            });
+        }
+
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            if (soft.length) {
+                await client.query('DELETE FROM recurring_participants WHERE contact_id = $1', [req.params.id]);
+                await client.query('DELETE FROM ride_participants WHERE contact_id = $1', [req.params.id]);
+            }
+            const { rowCount } = await client.query('DELETE FROM contacts WHERE id = $1', [req.params.id]);
+            await client.query('COMMIT');
+            if (!rowCount) return res.status(404).json({ error: 'Contact not found.' });
+            res.json({ ok: true, removed_from_schedule: soft.length > 0 });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
     } catch (err) {
         handleError(res, err, 'Deleting contact');
     }

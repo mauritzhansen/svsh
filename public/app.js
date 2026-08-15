@@ -88,7 +88,12 @@
             renderLogin();
             throw new Error('Session expired, please log in again.');
         }
-        if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+        if (!res.ok) {
+            // carry the rest of the body (flags like can_detach) onto the error
+            const err = new Error((data && data.error) || `Request failed (${res.status})`);
+            Object.assign(err, data || {});
+            throw err;
+        }
         return data;
     }
 
@@ -314,8 +319,9 @@
         return `<div class="phone-field" style="display:flex;gap:6px;align-items:center">
             <button type="button" id="${id}-cc" class="secondary phone-cc" data-cc="${esc(cc)}"
                     title="Change country" style="flex:0 0 74px;width:74px">${esc(cc)}</button>
-            <input id="${id}" type="tel" inputmode="tel" style="flex:1 1 auto;min-width:0"
-                   value="${esc(rest)}" placeholder="82 555 0101">
+            <input id="${id}" type="text" inputmode="tel" name="ct-line-${id}"
+                   autocomplete="off" autocorrect="off" spellcheck="false" data-lpignore="true"
+                   style="flex:1 1 auto;min-width:0" value="${esc(rest)}">
         </div>`;
     }
 
@@ -412,10 +418,16 @@
     }
 
     // Possible parents: contacts that are not riders themselves (and not the contact being edited)
+    // Only contacts ticked as Parent can pay — plus whoever is already selected,
+    // so an existing link never silently disappears from the picker.
     function parentOptions(selectedId, excludeId) {
         return '<option value="">(none — pays own invoices)</option>' +
-            state.contacts.filter((c) => !c.parent_id && String(c.id) !== String(excludeId)).map((c) =>
-                `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+            state.contacts
+                .filter((c) => String(c.id) !== String(excludeId) && !c.parent_id &&
+                    (c.is_parent || String(c.id) === String(selectedId)))
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((c) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`)
+                .join('');
     }
 
     // ---------- Router ----------
@@ -2429,6 +2441,13 @@
             document.getElementById('dir-list').textContent = err.message;
             return;
         }
+        // The contact list is a plain page scroll; rebuilding it after an edit
+        // would otherwise jump you back to the top of 76 rows.
+        if (state.contactScroll) {
+            const y = state.contactScroll;
+            state.contactScroll = null;
+            requestAnimationFrame(() => window.scrollTo(0, y));
+        }
         const draw = (filter) => {
             const q = (filter || '').toLowerCase();
             const match = (s) => !q || String(s || '').toLowerCase().includes(q);
@@ -2759,15 +2778,27 @@
             await api('DELETE', `/api/contacts/${c.id}`);
             state.contacts = (await api('GET', '/api/contacts')).contacts;
             toast(`${c.name} deleted.`);
+            state.contactScroll = window.scrollY;
             renderContacts();
         } catch (err) {
-            const choice = await askChoice(`${c.name} cannot be deleted`, err.message,
-                [{ key: 'archive', label: 'Archive instead', hint: 'hidden from lists, history kept' }]);
-            if (choice !== 'archive') return;
+            const options = [];
+            if (err.can_detach) {
+                options.push({ key: 'detach', label: 'Take off the schedule and delete',
+                    hint: `removes ${err.detail || 'their rides'}, then deletes them` });
+            }
+            options.push({ key: 'archive', label: 'Archive instead',
+                hint: 'hidden from lists, everything kept' });
+            const choice = await askChoice(`${c.name} cannot simply be deleted`, err.message, options);
+            if (!choice) return;
             try {
-                await api('PUT', `/api/contacts/${c.id}`, { archived: true });
+                if (choice === 'detach') {
+                    await api('DELETE', `/api/contacts/${c.id}?detach=1`);
+                } else {
+                    await api('PUT', `/api/contacts/${c.id}`, { archived: true });
+                }
                 state.contacts = (await api('GET', '/api/contacts')).contacts;
-                toast(`${c.name} archived.`);
+                toast(choice === 'detach' ? `${c.name} deleted.` : `${c.name} archived.`);
+                state.contactScroll = window.scrollY;
                 renderContacts();
             } catch (e2) {
                 toast(e2.message, true);
@@ -2844,6 +2875,13 @@
             state.contacts = data.contacts;
         } catch (err) {
             toast(err.message, true);
+        }
+        // The contact list is a plain page scroll; rebuilding it after an edit
+        // would otherwise jump you back to the top of 76 rows.
+        if (state.contactScroll) {
+            const y = state.contactScroll;
+            state.contactScroll = null;
+            requestAnimationFrame(() => window.scrollTo(0, y));
         }
         const draw = (filter) => {
             const q = (filter || '').toLowerCase();
@@ -3125,6 +3163,7 @@
     function linkableContacts(parent) {
         return state.contacts.filter((c) =>
             String(c.id) !== String(parent.id) &&      // not themselves
+            c.is_rider &&                              // only riders can be linked as one
             !c.parent_id &&                            // not already linked
             !c.is_parent &&                            // parents cannot have parents
             !state.contacts.some((k) => String(k.parent_id) === String(c.id)))
@@ -3401,7 +3440,10 @@
             closeDialog();
             toast('Saved.');
             if (contact && location.hash.startsWith('#/contacts/')) renderContactDetail(contact.id);
-            else renderContacts();
+            else {
+                state.contactScroll = window.scrollY;
+                renderContacts();
+            }
         });
         const archiveBtn = document.getElementById('ct-archive');
         if (archiveBtn) archiveBtn.addEventListener('click', async () => {
