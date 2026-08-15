@@ -3099,11 +3099,37 @@
         overlay.querySelector('#np-name').focus();
     }
 
+    // Riders can be brand new, or someone already in the book who simply had no
+    // payer recorded — which is the common case while parents are being added.
+    function linkableContacts(parent) {
+        return state.contacts.filter((c) =>
+            String(c.id) !== String(parent.id) &&      // not themselves
+            !c.parent_id &&                            // not already linked
+            !c.is_parent &&                            // parents cannot have parents
+            !state.contacts.some((k) => String(k.parent_id) === String(c.id)))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     // The rider's essentials only — the full contact form is a click away later
     function openNewRiderUnder(parent) {
+        const existing = linkableContacts(parent);
         const overlay = openSubDialog(`
-            <h3 style="margin:0 0 4px">New rider under ${esc(parent.name)}</h3>
+            <h3 style="margin:0 0 4px">Add a rider under ${esc(parent.name)}</h3>
             <p class="muted" style="margin:0 0 10px">${esc(parent.name)} pays their invoices.</p>
+            <div class="page-tabs" style="margin-bottom:12px">
+                <button type="button" class="page-tab active" data-kid-mode="new">New rider</button>
+                <button type="button" class="page-tab" data-kid-mode="existing">Existing contact</button>
+            </div>
+            <div id="kid-existing" class="hidden">
+                <label>Which contact?</label>
+                <select id="kid-pick">
+                    <option value="">(choose a contact)</option>
+                    ${existing.map((c) => `<option value="${c.id}">${esc(c.name)}${
+                        c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}</option>`).join('')}
+                </select>
+                ${existing.length ? '' : '<p class="muted">Every other contact already has a payer or is a parent.</p>'}
+            </div>
+            <div id="kid-new">
             <label>Name</label>
             <input id="kid-name" autocomplete="off">
             <div class="form-row">
@@ -3137,18 +3163,43 @@
             </select>
             <label>Availability</label>
             ${availFieldHtml([])}
+            </div>
             <div class="form-error"></div>
             <div class="form-actions">
                 <button class="secondary" id="kid-cancel">Cancel</button>
                 <button id="kid-save">Add rider</button>
             </div>`);
+        let mode = 'new';
+        overlay.querySelectorAll('[data-kid-mode]').forEach((tab) => tab.addEventListener('click', () => {
+            mode = tab.getAttribute('data-kid-mode');
+            overlay.querySelectorAll('[data-kid-mode]').forEach((t) =>
+                t.classList.toggle('active', t === tab));
+            overlay.querySelector('#kid-new').classList.toggle('hidden', mode !== 'new');
+            overlay.querySelector('#kid-existing').classList.toggle('hidden', mode !== 'existing');
+            overlay.querySelector('#kid-save').textContent = mode === 'new' ? 'Add rider' : 'Link rider';
+        }));
         wireAvailField(overlay);
         overlay.querySelector('#kid-collect').addEventListener('change', (e) =>
             overlay.querySelector('#kid-collect-details').classList.toggle('hidden', !e.target.checked));
         overlay.querySelector('#kid-cancel').addEventListener('click', () => overlay.remove());
         overlay.querySelector('#kid-save').addEventListener('click', async () => {
-            const name = overlay.querySelector('#kid-name').value.trim();
             const err = overlay.querySelector('.form-error');
+            if (mode === 'existing') {
+                const pick = overlay.querySelector('#kid-pick').value;
+                if (!pick) { err.textContent = 'Choose a contact to link.'; return; }
+                try {
+                    await api('PUT', `/api/contacts/${pick}`, { parent_id: parent.id, is_rider: true });
+                    state.contacts = (await api('GET', '/api/contacts')).contacts;
+                    const linked = contactById(pick);
+                    overlay.remove();
+                    toast(`${(linked && linked.name) || 'Rider'} now linked to ${parent.name}.`);
+                    openContactDialog(contactById(parent.id));
+                } catch (e3) {
+                    err.textContent = e3.message;
+                }
+                return;
+            }
+            const name = overlay.querySelector('#kid-name').value.trim();
             if (!name) { err.textContent = 'A name is required.'; return; }
             const age = parseInt(overlay.querySelector('#kid-age').value, 10);
             const horseId = overlay.querySelector('#kid-horse').value;
