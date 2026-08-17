@@ -467,7 +467,7 @@ async function saveContactExtras(contactId, body) {
 }
 
 const EXPERIENCE_LEVELS = LEVELS;
-const PAYMENT_TERMS = ['advance_monthly', 'advance_term', 'arrears'];
+const PAYMENT_TERMS = ['advance_monthly', 'advance_term', 'arrears', 'cash_after'];
 
 // Anyone who pays must say how. Only checked when the caller states the role,
 // so partial updates (archiving, linking a parent) are unaffected.
@@ -574,7 +574,14 @@ app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
     try {
         const { rows } = await pool.query(
             `SELECT (SELECT count(*) FROM ride_participants WHERE contact_id = $1)::int AS rides,
-                    (SELECT count(*) FROM recurring_participants WHERE contact_id = $1)::int AS fixed,
+                    -- only LIVE slots count: a link to a template that has ended
+                    -- or been switched off is not a schedule entry, and the
+                    -- contact list already ignores those (so blocking the delete
+                    -- on one contradicted what the row showed)
+                    (SELECT count(*) FROM recurring_participants xp
+                      JOIN recurring_rides rr ON rr.id = xp.recurring_id
+                     WHERE xp.contact_id = $1 AND rr.active
+                       AND (rr.end_date IS NULL OR rr.end_date >= CURRENT_DATE))::int AS fixed,
                     (SELECT count(*) FROM invoices
                       WHERE contact_id = $1 OR rider_contact_id = $1)::int AS invoices,
                     (SELECT count(*) FROM term_passes WHERE contact_id = $1)::int AS passes,
@@ -2063,9 +2070,15 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
         // One row per RIDER (invoices are per rider); the payer is shown for context
         const { rows } = await pool.query(
             `SELECT rider.id AS contact_id, rider.name,
-                    payer.name AS payer_name,
+                    payer.name AS payer_name, payer.id AS payer_id,
+                    payer.payment_terms,
                     count(*)::int AS ride_count,
-                    SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents
+                    SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents,
+                    -- cash is handed over after the lesson, so only rides that
+                    -- have actually happened can be billed
+                    count(*) FILTER (WHERE r.date <= CURRENT_DATE)::int AS past_rides,
+                    COALESCE(SUM(COALESCE(rp.price_cents, rt.price_cents, 0))
+                             FILTER (WHERE r.date <= CURRENT_DATE), 0)::int AS past_cents
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                JOIN contacts rider ON rider.id = rp.contact_id
@@ -2074,7 +2087,7 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
               WHERE r.date BETWEEN $1 AND $2
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
-              GROUP BY rider.id, rider.name, payer.name
+              GROUP BY rider.id, rider.name, payer.name, payer.id, payer.payment_terms
               ORDER BY rider.name`,
             [from, to]);
         res.json({ overview: rows, from, to });
@@ -2092,7 +2105,7 @@ app.get('/api/invoices', requireRole('helper'), async (req, res) => {
             where = 'WHERE i.contact_id = $1';
         }
         const { rows } = await pool.query(
-            `SELECT i.*, c.name AS contact_name, rc.name AS rider_name,
+            `SELECT i.*, c.name AS contact_name, c.phone AS contact_phone, rc.name AS rider_name,
                     (SELECT count(*)::int FROM invoice_lines il WHERE il.invoice_id = i.id) AS line_count
                FROM invoices i JOIN contacts c ON c.id = i.contact_id
                LEFT JOIN contacts rc ON rc.id = i.rider_contact_id

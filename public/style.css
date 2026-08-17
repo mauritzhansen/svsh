@@ -1351,3 +1351,10 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
     .fixed-slots { display: none; }
 }
 .role-check input[type="radio"] { width: auto; margin: 0; }
+
+/* Payment arrangement on the invoicing overview */
+.terms-chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.terms-advance_monthly { background: #e5eefb; color: #1858a8; }
+.terms-advance_term    { background: #efe6f7; color: #6a3d9a; }
+.terms-arrears         { background: #eaf0e6; color: var(--green-dark); }
+.terms-cash_after      { background: #fdf0d8; color: #8a5a00; }

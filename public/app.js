@@ -254,7 +254,8 @@
     const PAYMENT_TERMS = {
         advance_monthly: 'In advance, per month',
         advance_term: 'In advance, per term',
-        arrears: 'In arrears'
+        arrears: 'In arrears',
+        cash_after: 'Cash after lesson'
     };
 
     const DEFAULT_CC = '+27';
@@ -785,10 +786,29 @@
             ]);
             dayRides = ridesData.rides;
             drawDayGrid(dayRides, date);
-
+            drawCreditBar(creditsData.credits || [], date, dayRides);
         } catch (err) {
             document.getElementById('cal-grid').textContent = err.message;
         }
+    }
+
+    // Riders who missed a lesson hold a credit until they are put on another
+    // ride. They sit above the day so they cannot be quietly forgotten.
+    function drawCreditBar(credits, date, dayRides) {
+        const bar = document.getElementById('credit-bar');
+        if (!bar) return;
+        if (!credits.length) { bar.className = ''; bar.innerHTML = ''; return; }
+        const total = credits.reduce((n, c) => n + c.count, 0);
+        bar.className = 'credit-bar';
+        bar.innerHTML = `<span>⟳ <b>${total} ride${total === 1 ? '' : 's'}</b> to be rescheduled —
+            tap a name to put them on a ride today:</span>` +
+            credits.map((c) => `<button type="button" class="chip credit-chip" data-credit="${c.contact_id}">
+                ${esc(c.name)}${c.count > 1 ? ` <span class="chip-level">×${c.count}</span>` : ''}
+            </button>`).join('');
+        bar.querySelectorAll('[data-credit]').forEach((btn) => btn.addEventListener('click', () => {
+            const credit = credits.find((c) => String(c.contact_id) === btn.getAttribute('data-credit'));
+            if (credit) openReschedulePicker(credit, date, dayRides);
+        }));
     }
 
     // Pick one of the day's rides to put a rescheduled rider on
@@ -3608,7 +3628,74 @@
         }
     }
 
+    // The same table used by the advance run and the needs-attention list
+    function renderOverviewTable($el, rows, emptyText, range) {
+        if (!$el) return;
+        if (!rows.length) { $el.className = 'muted'; $el.innerHTML = esc(emptyText); return; }
+        $el.className = '';
+        $el.innerHTML = `<div class="table-wrap"><table class="plain">
+            <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
+            ${rows.map((row) => `
+                <tr>
+                    <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>${
+                        row.payer_name && row.payer_name !== row.name ? ` <span class="muted">→ ${esc(row.payer_name)}</span>` : ''}</td>
+                    <td>${row.payment_terms
+                        ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
+                        : '<span class="no-parent">not set</span>'}</td>
+                    <td class="num">${row.ride_count}</td>
+                    <td class="num">${money(row.total_cents)}</td>
+                    <td class="num">${row.payment_terms
+                        ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button>`
+                        : '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'}</td>
+                </tr>`).join('')}
+        </table></div>`;
+        wireCreateInvoiceButtons($el, range);
+    }
+
+    // Shared by every uninvoiced-rides table on the page
+    function wireCreateInvoiceButtons($el, range) {
+        $el.querySelectorAll('[data-inv-contact]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                if (!confirm(`Create an invoice for ${btn.getAttribute('data-inv-name')} for ${range.label}?`)) return;
+                btn.disabled = true;
+                try {
+                    const res = await api('POST', '/api/invoices',
+                        { contact_id: btn.getAttribute('data-inv-contact'), from: range.from, to: range.to });
+                    toast(`Invoice ${res.invoice.number} created (${res.line_count} rides).`);
+                    renderInvoices();
+                } catch (err) {
+                    btn.disabled = false;
+                    toast(err.message, true);
+                }
+            });
+        });
+    }
+
     // ---------- Invoices ----------
+    // WhatsApp cannot be handed a file by a link — only text. So do the tedious
+    // half automatically: fetch the PDF so it lands in Downloads, then open the
+    // chat with the message already written. The user attaches and sends.
+    function sendInvoiceOnWhatsApp(inv) {
+        const num = waNumber(inv.contact_phone);
+        if (!num) return toast('That contact has no phone number.', true);
+        const who = inv.rider_name && inv.rider_name !== inv.contact_name
+            ? `${inv.rider_name}'s` : 'your';
+        const period = inv.period_start
+            ? ` for ${shortDate(inv.period_start)} – ${shortDate(inv.period_end)}` : '';
+        const text = `Hi ${inv.contact_name.split(' ')[0]}, here is ${who} invoice ${inv.number}` +
+            `${period}: ${money(inv.total_cents)}. Thank you! — ${state.settings.business_name || 'SVSH'}`;
+        // the download and the chat must both come from this one click, or the
+        // browser blocks the popup
+        const a = document.createElement('a');
+        a.href = `/api/invoices/${inv.id}/pdf`;
+        a.download = `${inv.number}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.open(`https://wa.me/${num}?text=${encodeURIComponent(text)}`, '_blank');
+        toast('PDF downloaded — attach it in the WhatsApp chat that opened.');
+    }
+
     function currentMonth() { return todayStr().slice(0, 7); }
 
     function quarterBounds(offset) {
@@ -3796,8 +3883,29 @@
             const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             monthPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
         }
+        // the advance run bills a month that has not happened yet
+        const adv = state.invoiceAdvMonth || (() => {
+            const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        })();
+        const advPills = [];
+        for (let i = 2; i >= -1; i--) {
+            const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+            const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            advPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
+        }
         $view.innerHTML = `
             <h1>🧾 Invoices</h1>
+            <h2>In advance — per month</h2>
+            <p class="muted">Riders whose payer is set to <b>In advance, per month</b>.
+               Their fixed lessons for the month ahead are billed before it starts.</p>
+            <div class="card">
+                <div class="month-pills">
+                    ${advPills.map((m) => `
+                        <button class="month-pill adv-pill ${m.value === adv ? 'active' : ''}" data-adv="${m.value}">${esc(m.label)}</button>`).join('')}
+                </div>
+                <div id="inv-advance" class="muted" style="margin-top:14px">Loading…</div>
+            </div>
             <h2>In advance — term passes</h2>
             <div class="card">
                 <p class="muted" style="margin-top:0">A term pass covers a rider's <b>fixed lessons</b> for a period,
@@ -3810,8 +3918,8 @@
                     <a class="btn secondary small" href="/api/invoices/batch-pdf?kind=advance&status=draft" target="_blank">⬇ All draft PDFs (one file)</a>
                 </div>
             </div>
-            <h2>After the fact — monthly</h2>
-            <p class="muted">Monthly invoices are created automatically once a month has ended.
+            <h2>In arrears — monthly</h2>
+            <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
                Reconcile them with the bank statement and set the status to <b>paid</b>.</p>
             <div class="card">
                 <div class="month-pills">
@@ -3821,19 +3929,38 @@
                 <h2 style="margin-top:14px">Uninvoiced rides</h2>
                 <div id="inv-overview" class="muted">Loading…</div>
             </div>
+            <h2>Cash after lesson</h2>
+            <p class="muted">Billed once the lesson has happened, so the rider can pay on the day.
+               Rides still to come this month are not listed yet.</p>
+            <div class="card">
+                <div id="inv-cash" class="muted">Loading…</div>
+            </div>
+            <div class="card hidden" id="inv-unset-card">
+                <h2 style="margin-top:0">⚠ Payment terms not set</h2>
+                <p class="muted">These riders have uninvoiced rides but nobody has said how they pay,
+                   so they appear in neither run above.</p>
+                <div id="inv-unset"></div>
+            </div>
             <h2>Created invoices</h2>
             <div id="inv-list" class="muted">Loading…</div>`;
         document.getElementById('pass-add').addEventListener('click', openTermPassDialog);
         document.getElementById('pass-bulk').addEventListener('click', openBulkPassDialog);
-        document.querySelectorAll('.month-pill').forEach((btn) => {
+        document.querySelectorAll('.month-pill[data-month]').forEach((btn) => {
             btn.addEventListener('click', () => {
                 state.invoiceMonth = btn.getAttribute('data-month');
                 renderInvoices();
             });
         });
+        document.querySelectorAll('.adv-pill').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                state.invoiceAdvMonth = btn.getAttribute('data-adv');
+                renderInvoices();
+            });
+        });
         try {
-            const [ov, invs, passesData] = await Promise.all([
+            const [ov, advOv, invs, passesData] = await Promise.all([
                 api('GET', `/api/invoices/overview?month=${month}`),
+                api('GET', `/api/invoices/overview?month=${adv}`),
                 api('GET', '/api/invoices'),
                 api('GET', '/api/term-passes')
             ]);
@@ -3895,36 +4022,44 @@
                     });
                 });
             }
+            // Everyone lands in exactly one bucket, decided by their payer's terms
+            const advRange = { from: advOv.from, to: advOv.to, label: adv };
+            const arrRange = { from: ov.from, to: ov.to, label: month };
+            renderOverviewTable(document.getElementById('inv-advance'),
+                advOv.overview.filter((r) => r.payment_terms === 'advance_monthly'),
+                'Nobody is set to pay in advance per month yet.', advRange);
+            const arrears = ov.overview.filter((r) => r.payment_terms === 'arrears');
+            const unset = ov.overview.filter((r) => !r.payment_terms);
+            renderOverviewTable(document.getElementById('inv-unset'), unset, '', arrRange);
+            document.getElementById('inv-unset-card').classList.toggle('hidden', !unset.length);
+            // Only lessons already ridden can be settled in cash; bill up to today
+            const cash = ov.overview
+                .filter((r) => r.payment_terms === 'cash_after' && r.past_rides > 0)
+                .map((r) => ({ ...r, ride_count: r.past_rides, total_cents: r.past_cents }));
+            const cashCutoff = todayStr();
+            renderOverviewTable(document.getElementById('inv-cash'), cash,
+                'No lessons to settle in cash yet.',
+                { from: ov.from, to: ov.to < cashCutoff ? ov.to : cashCutoff, label: month });
+
             const $ov = document.getElementById('inv-overview');
-            if (!ov.overview.length) {
+            if (!arrears.length) {
                 $ov.innerHTML = 'No uninvoiced rides in this month.';
             } else {
                 $ov.classList.remove('muted');
                 $ov.innerHTML = `<div class="table-wrap"><table class="plain">
-                    <tr><th>Contact</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
-                    ${ov.overview.map((row) => `
+                    <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
+                    ${arrears.map((row) => `
                         <tr>
                             <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>${row.payer_name && row.payer_name !== row.name ? ` <span class="muted">→ ${esc(row.payer_name)}</span>` : ''}</td>
+                            <td>${row.payment_terms
+                                ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
+                                : '<span class="no-parent">not set</span>'}</td>
                             <td class="num">${row.ride_count}</td>
                             <td class="num">${money(row.total_cents)}</td>
                             <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
                         </tr>`).join('')}
                 </table></div>`;
-                $ov.querySelectorAll('[data-inv-contact]').forEach((btn) => {
-                    btn.addEventListener('click', async () => {
-                        if (!confirm(`Create an invoice for ${btn.getAttribute('data-inv-name')} for ${month}?`)) return;
-                        btn.disabled = true;
-                        try {
-                            const res = await api('POST', '/api/invoices',
-                                { contact_id: btn.getAttribute('data-inv-contact'), from: ov.from, to: ov.to });
-                            toast(`Invoice ${res.invoice.number} created (${res.line_count} rides).`);
-                            renderInvoices();
-                        } catch (err) {
-                            btn.disabled = false;
-                            toast(err.message, true);
-                        }
-                    });
-                });
+                wireCreateInvoiceButtons($ov, arrRange);
             }
             const $list = document.getElementById('inv-list');
             if (!invs.invoices.length) {
@@ -3942,8 +4077,17 @@
                             ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
                         </select>
                         <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf" target="_blank">PDF</a>
+                        ${waNumber(inv.contact_phone)
+                            ? `<button class="secondary small" data-inv-wa="${inv.id}" title="Download the PDF and open WhatsApp to ${esc(inv.contact_name)}">💬 Send</button>`
+                            : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
                         <button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}">✕</button>
                     </div>`).join('');
+                $list.querySelectorAll('[data-inv-wa]').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                        const inv = invs.invoices.find((i) => String(i.id) === btn.getAttribute('data-inv-wa'));
+                        if (inv) sendInvoiceOnWhatsApp(inv);
+                    });
+                });
                 $list.querySelectorAll('.inv-status').forEach((sel) => {
                     sel.addEventListener('change', async () => {
                         try {
