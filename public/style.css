@@ -899,6 +899,11 @@ body.page-calendar #view {
     flex-direction: column;
     height: calc(100vh - var(--topbar-h) - var(--nav-h)
         - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    /* dvh follows the mobile browser's shrinking/growing toolbars; 100vh is the
+       LARGE viewport there, so the box ran taller than the visible area and the
+       last ride sat under the nav bar with nothing left to scroll. */
+    height: calc(100dvh - var(--topbar-h) - var(--nav-h)
+        - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     padding-bottom: 6px;
 }
 /* content-sized, capped to the viewport — no empty space on quiet days */
@@ -911,6 +916,8 @@ body.page-calendar #cal-grid {
 body.page-calendar .calendar-scroller {
     flex: 0 1 auto;
     max-height: calc(100vh - var(--topbar-h) - var(--nav-h) - 24px
+        - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - var(--topbar-h) - var(--nav-h) - 24px
         - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
 }
 body.page-calendar .day-header,
@@ -1109,13 +1116,21 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
        it reveals more rather than forcing a reflow */
     :root { --nav-h: 0px; }
     body.page-calendar #view { padding-bottom: 0; }
-    body.page-calendar .calendar-scroller { scroll-padding-bottom: 58px; }
-    body.page-calendar .calendar-scroller::after {
-        content: ''; display: block; height: 58px;   /* last ride clears the bar */
-    }
     .cal-nav { flex-wrap: nowrap; }
     table.ridegrid th.horsecol .horsecol-stack { min-height: 54px; }
     .horsecol-name { font-size: 13px; }
+}
+
+/* Whatever the orientation, leave room under the last ride so it can be
+   scrolled clear of the nav bar and the home indicator instead of resting
+   under them. */
+@media (max-width: 700px), (max-height: 560px) {
+    body.page-calendar .calendar-scroller { scroll-padding-bottom: 72px; }
+    body.page-calendar .calendar-scroller::after {
+        content: '';
+        display: block;
+        height: calc(72px + env(safe-area-inset-bottom, 0px));
+    }
 }
 
 /* ---- Phone portrait: give the horses their share of the width ---- */
@@ -1358,3 +1373,17 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .terms-advance_term    { background: #efe6f7; color: #6a3d9a; }
 .terms-arrears         { background: #eaf0e6; color: var(--green-dark); }
 .terms-cash_after      { background: #fdf0d8; color: #8a5a00; }
+.pill-badge {
+    display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px;
+    border-radius: 999px; background: var(--danger); color: #fff;
+    font-size: 11px; font-weight: 700; line-height: 17px; text-align: center;
+}
+.month-pill.active .pill-badge { background: #fff; color: var(--green-dark); }
+
+/* Untyped rides price at zero — say so before an invoice goes out */
+.warn-bar {
+    background: #fdeecf; border: 1px solid #edd39a; color: #7a5200;
+    border-radius: var(--radius); padding: 11px 13px; margin-bottom: 14px;
+    font-size: 14px; line-height: 1.45;
+}
+.untyped-flag { color: #a8541c; font-weight: 700; font-size: 12px; cursor: help; }

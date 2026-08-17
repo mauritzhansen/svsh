@@ -3642,7 +3642,8 @@
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count}</td>
+                    <td class="num">${row.ride_count}${row.untyped_rides
+                        ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
                     <td class="num">${money(row.total_cents)}</td>
                     <td class="num">${row.payment_terms
                         ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button>`
@@ -3806,7 +3807,8 @@
         const [qs, qe] = quarterBounds(0);
         openDialog(`
             <h2>⚡ Term passes for all fixed riders</h2>
-            <p class="muted">Creates one pass + advance invoice per rider on the fixed schedule.
+            <p class="muted">Creates one pass + advance invoice per rider on the fixed schedule
+               <b>whose payer is set to "In advance, per term"</b>.
                Each rider is charged their <b>planned fixed lessons in the period × price per lesson</b>
                (riders with two lessons a week pay double; every-2nd-week riders half).
                Riders who already have a pass for the period are skipped.</p>
@@ -3883,27 +3885,42 @@
             const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             monthPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
         }
-        // the advance run bills a month that has not happened yet
-        const adv = state.invoiceAdvMonth || (() => {
-            const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-        })();
-        const advPills = [];
-        for (let i = 2; i >= -1; i--) {
-            const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-            const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-            advPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
-        }
+        // Advance months are shown oldest first and flagged when still uninvoiced,
+        // so a month already under way (August, mid-August) is not missed just
+        // because the run defaults to "next month".
+        let advStatus = [];
+        try {
+            advStatus = (await api('GET', '/api/invoices/advance-outstanding')).months;
+        } catch (err) { /* the section still works, just without the flags */ }
+        const outstanding = advStatus.filter((m) => m.riders > 0);
+        const adv = state.invoiceAdvMonth ||
+            (outstanding.length ? outstanding[0].month : (() => {
+                const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            })());
+        const advPills = advStatus.map((m) => {
+            const d = new Date(Number(m.month.slice(0, 4)), Number(m.month.slice(5, 7)) - 1, 1);
+            return {
+                value: m.month,
+                label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }),
+                riders: m.riders
+            };
+        });
         $view.innerHTML = `
             <h1>🧾 Invoices</h1>
+            <div id="inv-untyped-warn" class="warn-bar hidden"></div>
             <h2>In advance — per month</h2>
             <p class="muted">Riders whose payer is set to <b>In advance, per month</b>.
                Their fixed lessons for the month ahead are billed before it starts.</p>
             <div class="card">
                 <div class="month-pills">
                     ${advPills.map((m) => `
-                        <button class="month-pill adv-pill ${m.value === adv ? 'active' : ''}" data-adv="${m.value}">${esc(m.label)}</button>`).join('')}
+                        <button class="month-pill adv-pill ${m.value === adv ? 'active' : ''}" data-adv="${m.value}">${esc(m.label)}${
+                            m.riders ? ` <span class="pill-badge">${m.riders}</span>` : ' ✓'}</button>`).join('')}
                 </div>
+                ${outstanding.length > 1 ? `<p class="muted" style="margin:10px 0 0">
+                    <b>${outstanding.length} months</b> still have advance invoices to create:
+                    ${outstanding.map((m) => esc(m.month)).join(', ')}.</p>` : ''}
                 <div id="inv-advance" class="muted" style="margin-top:14px">Loading…</div>
             </div>
             <h2>In advance — term passes</h2>
@@ -4023,6 +4040,20 @@
                 });
             }
             // Everyone lands in exactly one bucket, decided by their payer's terms
+            // A ride with no type prices at zero, which would be invoiced silently
+            const untyped = [...ov.overview, ...advOv.overview]
+                .reduce((n, r) => n + (r.untyped_rides || 0), 0);
+            const $warn = document.getElementById('inv-untyped-warn');
+            $warn.classList.toggle('hidden', !untyped);
+            if (untyped) {
+                const who = new Set([...ov.overview, ...advOv.overview]
+                    .filter((r) => r.untyped_rides).map((r) => r.name));
+                $warn.innerHTML = `⚠ <b>${untyped} ride${untyped === 1 ? '' : 's'}</b> in these periods
+                    have no ride type, so they carry no price and would be invoiced at
+                    ${money(0)}. Affects ${who.size} rider${who.size === 1 ? '' : 's'}.
+                    Set the type on the ride (choose <b>“this day and the whole series”</b> for a
+                    weekly slot) before creating these invoices.`;
+            }
             const advRange = { from: advOv.from, to: advOv.to, label: adv };
             const arrRange = { from: ov.from, to: ov.to, label: month };
             renderOverviewTable(document.getElementById('inv-advance'),
@@ -4054,7 +4085,8 @@
                             <td>${row.payment_terms
                                 ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                                 : '<span class="no-parent">not set</span>'}</td>
-                            <td class="num">${row.ride_count}</td>
+                            <td class="num">${row.ride_count}${row.untyped_rides
+                                ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
                             <td class="num">${money(row.total_cents)}</td>
                             <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
                         </tr>`).join('')}
@@ -4734,6 +4766,9 @@
                     <div class="li-main">
                         <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}${g.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
                         ${g.phone ? `<div class="li-sub">${esc(g.phone)}</div>` : ''}
+                        <div class="li-sub">${g.rate_cents != null
+                            ? money(g.rate_cents) + ' per lesson'
+                            : '<span class="no-parent">pay per lesson not set</span>'}</div>
                     </div>
                 </div>`).join('') || '<div class="card muted">No instructors yet.</div>';
             document.querySelectorAll('[data-guide-id]').forEach((el) => {
@@ -4857,6 +4892,39 @@
         });
     }
 
+    // First and last day of a YYYY-MM
+    function monthBoundsOf(month) {
+        const y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7));
+        const last = new Date(y, m, 0).getDate();
+        return [`${month}-01`, `${month}-${String(last).padStart(2, '0')}`];
+    }
+
+    // Same pattern as an invoice: download the statement, open the chat
+    function sendStatementOnWhatsApp(guide, from, to, count, totalCents) {
+        const num = waNumber(guide.phone);
+        if (!num) return toast('That instructor has no phone number.', true);
+        const text = `Hi ${guide.name.split(' ')[0]}, here are your ${count} lesson` +
+            `${count === 1 ? '' : 's'} for ${shortDate(from)} – ${shortDate(to)}: ${money(totalCents)}. ` +
+            `— ${state.settings.business_name || 'SVSH'}`;
+        const a = document.createElement('a');
+        a.href = `/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}`;
+        a.download = `lessons-${guide.name.replace(/[^a-zA-Z0-9]+/g, '-')}-${from}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.open(`https://wa.me/${num}?text=${encodeURIComponent(text)}`, '_blank');
+        toast('PDF downloaded — attach it in the WhatsApp chat that opened.');
+    }
+
+    // "650" or "650.50" -> whole cents; blank -> null (not set)
+    function parseMoneyCents(value) {
+        const s = String(value == null ? '' : value).trim();
+        if (!s) return null;
+        const n = Number(s);
+        if (!Number.isFinite(n) || n < 0) return null;
+        return Math.round(n * 100);
+    }
+
     function openGuideDialog(guide, onSaved, withTabs) {
         openDialog(`
             ${withTabs ? newTypeTabsHtml('instructor') : ''}
@@ -4869,18 +4937,78 @@
             </label>
             <label>Phone (WhatsApp)</label>
             ${phoneFieldHtml('g-phone', guide ? guide.phone || '' : '')}
+            <label>Pay per lesson (${esc(state.settings.currency || 'R')})</label>
+            <input id="g-rate" type="number" inputmode="decimal" step="0.01" min="0"
+                   placeholder="not set"
+                   value="${guide && guide.rate_cents != null ? (guide.rate_cents / 100).toFixed(2) : ''}">
             <label>Notes</label>
             <input id="g-notes" value="${esc(guide ? guide.notes || '' : '')}">
             <label>Colour (dot on the calendar)</label>
             <input type="color" id="g-color" value="${esc(guide ? guide.color || '#6a6a66' : '#6a6a66')}" style="height:44px;padding:4px">
             ${guide ? `<label>Active</label>
             <select id="g-active"><option value="true" ${guide.active ? 'selected' : ''}>Yes</option><option value="false" ${guide.active ? '' : 'selected'}>No</option></select>` : ''}
+            ${guide ? `
+            <label style="margin-top:14px">Lessons and pay</label>
+            <div class="month-pills" id="g-months">
+                ${[0, -1, -2].map((off) => {
+                    const d = new Date(new Date().getFullYear(), new Date().getMonth() + off, 1);
+                    const v = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                    return `<button type="button" class="month-pill ${off === 0 ? 'active' : ''}" data-gm="${v}">${
+                        d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}</button>`;
+                }).join('')}
+            </div>
+            <div id="g-lessons" class="muted" style="margin-top:8px">Loading…</div>` : ''}
             <div class="form-error"></div>
             <div class="form-actions">
                 <button class="secondary" id="g-cancel">Cancel</button>
                 <button id="g-save">Save</button>
             </div>`);
         wireNewTypeTabs();
+        if (guide) {
+            const loadLessons = async (month) => {
+                const $l = document.getElementById('g-lessons');
+                const [from, to] = monthBoundsOf(month);
+                $l.className = 'muted';
+                $l.textContent = 'Loading…';
+                try {
+                    const { rides } = await api('GET', `/api/guides/${guide.id}/rides?from=${from}&to=${to}`);
+                    // read the rate from the form, so an unsaved change previews too
+                    const rate = parseMoneyCents(document.getElementById('g-rate').value) || 0;
+                    $l.className = '';
+                    $l.innerHTML = rides.length ? `<div class="table-wrap"><table class="plain">
+                        <tr><th>Date</th><th>Lesson</th><th class="num">Pay</th></tr>
+                        ${rides.map((r) => `<tr>
+                            <td>${esc(shortDate(r.date))} <span class="muted">${esc(r.start_time.slice(0, 5))}</span></td>
+                            <td>${esc(r.ride_type_name || 'Lesson')}
+                                <span class="muted">${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}${
+                                    r.riders ? ' · ' + esc(r.riders) : ''}</span></td>
+                            <td class="num">${money(rate)}</td></tr>`).join('')}
+                        <tr><td><b>Total</b></td>
+                            <td><b>${rides.length} lesson${rides.length === 1 ? '' : 's'}</b></td>
+                            <td class="num"><b>${money(rides.length * rate)}</b></td></tr>
+                    </table></div>
+                    ${rate ? '' : '<p class="no-parent">No pay per lesson set, so the total is zero.</p>'}
+                    <div class="form-actions" style="justify-content:flex-start">
+                        <a class="btn secondary small" href="/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}" target="_blank">⬇ PDF</a>
+                        ${waNumber(guide.phone) ? `<button type="button" class="secondary small" id="g-wa">💬 Send</button>` : ''}
+                    </div>` : 'No lessons in this month.';
+                    const wa = document.getElementById('g-wa');
+                    if (wa) wa.addEventListener('click', () =>
+                        sendStatementOnWhatsApp(guide, from, to, rides.length, rides.length * rate));
+                } catch (err) {
+                    $l.textContent = err.message;
+                }
+            };
+            $dialog.querySelectorAll('[data-gm]').forEach((btn) => btn.addEventListener('click', () => {
+                $dialog.querySelectorAll('[data-gm]').forEach((b) => b.classList.toggle('active', b === btn));
+                loadLessons(btn.getAttribute('data-gm'));
+            }));
+            document.getElementById('g-rate').addEventListener('change', () => {
+                const active = $dialog.querySelector('[data-gm].active');
+                if (active) loadLessons(active.getAttribute('data-gm'));
+            });
+            loadLessons(currentMonth());
+        }
         document.getElementById('g-cancel').addEventListener('click', closeDialog);
         document.getElementById('g-save').addEventListener('click', async () => {
             const body = {
@@ -4888,7 +5016,8 @@
                 phone: readPhoneField('g-phone'),
                 is_assistant: document.getElementById('g-assistant').checked,
                 notes: document.getElementById('g-notes').value,
-                color: document.getElementById('g-color').value
+                color: document.getElementById('g-color').value,
+                rate_cents: parseMoneyCents(document.getElementById('g-rate').value)
             };
             if (guide) body.active = document.getElementById('g-active').value === 'true';
             try {

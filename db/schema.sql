@@ -58,6 +58,8 @@ CREATE TABLE guides (
     phone TEXT,
     color TEXT NOT NULL DEFAULT '#6a6a66', -- dot colour on the calendar
     is_assistant BOOLEAN NOT NULL DEFAULT false,
+    -- pay for taking one lesson, in cents; NULL = not set
+    rate_cents INT CHECK (rate_cents IS NULL OR rate_cents >= 0),
     notes TEXT,
     active BOOLEAN NOT NULL DEFAULT true
 );

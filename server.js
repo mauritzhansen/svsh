@@ -810,14 +810,60 @@ app.get('/api/guides', requireAuth, async (req, res) => {
     }
 });
 
+// Every lesson an instructor leads in a period, past or planned. Used on the
+// instructor's dialog to check their work and what they are owed.
+app.get('/api/guides/:id/rides', requireAuth, async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+            return res.status(400).json({ error: 'Valid from/to dates are required.' });
+        }
+        if (datesInRange(from, to).length > 366) {
+            return res.status(400).json({ error: 'Period too large (max 1 year).' });
+        }
+        // planned weeks only exist once materialized, so make sure they do
+        await materializeRecurring(from, to);
+        const { rows } = await pool.query(
+            `SELECT r.id, r.date::text AS date, r.start_time::text AS start_time,
+                    COALESCE(r.duration_min, rt.duration_min, 60) AS duration_min,
+                    r.level, r.venue, rg.mode,
+                    COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
+                    (SELECT count(*)::int FROM ride_participants rp
+                      WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL) AS rider_count,
+                    (SELECT string_agg(c.name, ', ' ORDER BY c.name)
+                       FROM ride_participants rp JOIN contacts c ON c.id = rp.contact_id
+                      WHERE rp.ride_id = r.id) AS riders
+               FROM ride_guides rg
+               JOIN rides r ON r.id = rg.ride_id
+               LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+              WHERE rg.guide_id = $1 AND r.date BETWEEN $2 AND $3
+                AND r.status = 'active' AND NOT r.is_block
+              ORDER BY r.date, r.start_time`,
+            [req.params.id, from, to]);
+        res.json({ rides: rows, from, to });
+    } catch (err) {
+        handleError(res, err, 'Loading instructor lessons');
+    }
+});
+
+// Pay per lesson: optional, but if given it must be a sane whole number of cents
+function guideRateError(rate) {
+    if (rate === undefined || rate === null) return null;
+    if (!Number.isInteger(rate) || rate < 0) return 'The pay per lesson must be a positive amount.';
+    return null;
+}
+
 app.post('/api/guides', requireRole('helper'), async (req, res) => {
     try {
-        const { name, phone, notes, is_assistant, color } = req.body || {};
+        const { name, phone, notes, is_assistant, color, rate_cents } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
+        const rateError = guideRateError(rate_cents);
+        if (rateError) return res.status(400).json({ error: rateError });
         const { rows } = await pool.query(
-            `INSERT INTO guides (name, phone, is_assistant, notes, color)
-             VALUES ($1, $2, $3, $4, COALESCE($5, '#6a6a66')) RETURNING *`,
-            [String(name).trim(), phone || '', !!is_assistant, notes || '', color]);
+            `INSERT INTO guides (name, phone, is_assistant, notes, color, rate_cents)
+             VALUES ($1, $2, $3, $4, COALESCE($5, '#6a6a66'), $6) RETURNING *`,
+            [String(name).trim(), phone || '', !!is_assistant, notes || '', color,
+             Number.isInteger(rate_cents) ? rate_cents : null]);
         res.json({ guide: rows[0] });
     } catch (err) {
         handleError(res, err, 'Creating guide');
@@ -826,7 +872,9 @@ app.post('/api/guides', requireRole('helper'), async (req, res) => {
 
 app.put('/api/guides/:id', requireRole('helper'), async (req, res) => {
     try {
-        const { name, phone, notes, active, is_assistant, color } = req.body || {};
+        const { name, phone, notes, active, is_assistant, color, rate_cents } = req.body || {};
+        const rateError = guideRateError(rate_cents);
+        if (rateError) return res.status(400).json({ error: rateError });
         const { rows } = await pool.query(
             `UPDATE guides SET
                 name = COALESCE($2, name),
@@ -834,9 +882,11 @@ app.put('/api/guides/:id', requireRole('helper'), async (req, res) => {
                 notes = COALESCE($4, notes),
                 active = COALESCE($5, active),
                 is_assistant = COALESCE($6, is_assistant),
-                color = COALESCE($7, color)
+                color = COALESCE($7, color),
+                rate_cents = CASE WHEN $8 THEN $9::int ELSE rate_cents END
              WHERE id = $1 RETURNING *`,
-            [req.params.id, name, phone, notes, active, is_assistant, color]);
+            [req.params.id, name, phone, notes, active, is_assistant, color,
+             rate_cents !== undefined, Number.isInteger(rate_cents) ? rate_cents : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Guide not found.' });
         res.json({ guide: rows[0] });
     } catch (err) {
@@ -2061,6 +2111,44 @@ const NOT_PASS_COVERED_SQL = `NOT (
                      WHERE rc.used_ride_id = r.id AND rc.contact_id = rp.contact_id)))`;
 
 // Per-contact summary of booked, not-yet-invoiced rides in a month
+// Which advance months still owe invoices? An advance run is only "done" when
+// every rider on that arrangement has been invoiced for the period, so the page
+// can surface August even though we are already halfway through it.
+app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, res) => {
+    try {
+        const terms = req.query.terms === 'advance_term' ? 'advance_term' : 'advance_monthly';
+        const base = new Date();
+        const months = [];
+        for (let i = -1; i <= 2; i++) {
+            const d = new Date(base.getFullYear(), base.getMonth() + i, 1);
+            months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+        }
+        const out = [];
+        for (const month of months) {
+            const [from, to] = monthRange(month);
+            await materializeRecurring(from, to);
+            const { rows } = await pool.query(
+                `SELECT count(DISTINCT rider.id)::int AS riders,
+                        COALESCE(SUM(COALESCE(rp.price_cents, rt.price_cents, 0)), 0)::int AS total_cents
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id
+                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE r.date BETWEEN $1 AND $2
+                    AND payer.payment_terms = $3
+                    AND NOT rider.archived
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                    AND ${NOT_PASS_COVERED_SQL}`,
+                [from, to, terms]);
+            out.push({ month, riders: rows[0].riders, total_cents: rows[0].total_cents });
+        }
+        res.json({ months: out });
+    } catch (err) {
+        handleError(res, err, 'Loading advance status');
+    }
+});
+
 app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
     try {
         const month = String(req.query.month || '');
@@ -2076,6 +2164,9 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
                     SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents,
                     -- cash is handed over after the lesson, so only rides that
                     -- have actually happened can be billed
+                    -- rides with no type have no price, so they silently bill as zero
+                    count(*) FILTER (WHERE r.ride_type_id IS NULL
+                                       AND r.ride_type_name IS NULL)::int AS untyped_rides,
                     count(*) FILTER (WHERE r.date <= CURRENT_DATE)::int AS past_rides,
                     COALESCE(SUM(COALESCE(rp.price_cents, rt.price_cents, 0))
                              FILTER (WHERE r.date <= CURRENT_DATE), 0)::int AS past_cents
@@ -2354,7 +2445,11 @@ app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
                     rp.start_date, c.name, c.parent_id
                FROM recurring_participants rp
                JOIN contacts c ON c.id = rp.contact_id
-              WHERE rp.contact_id IS NOT NULL AND rp.recurring_id = ANY($1::bigint[])`,
+               -- only riders whose payer actually pays per term; the monthly and
+               -- in-arrears riders are billed by their own runs
+               JOIN contacts payer ON payer.id = COALESCE(c.parent_id, c.id)
+              WHERE rp.contact_id IS NOT NULL AND rp.recurring_id = ANY($1::bigint[])
+                AND NOT c.archived AND payer.payment_terms = 'advance_term'`,
             [templates.map((t) => t.id)]) : { rows: [] };
         const tplById = {};
         templates.forEach((t) => { tplById[t.id] = t; });
@@ -2557,6 +2652,99 @@ function drawInvoicePage(doc, inv, lines, settings) {
             .text(settings.invoice_footer, left, doc.y, { width: right - left });
     }
 }
+
+// An instructor's own statement: every lesson they led in a period, what each
+// one pays, and the total. Same shape as an invoice, but running the other way
+// — from the instructor to the school.
+function drawGuideStatement(doc, guide, rides, from, to, settings) {
+    const cur = settings.currency || 'R';
+    const money = (cents) => `${cur} ${(cents / 100).toFixed(2)}`;
+    const rate = guide.rate_cents || 0;
+
+    doc.fillColor('#000000').fontSize(20).font('Helvetica-Bold')
+        .text(settings.business_name || 'Riding school', 50, 50);
+    if (settings.business_address) {
+        doc.fontSize(9).font('Helvetica').fillColor('#555555').text(settings.business_address);
+    }
+    doc.moveDown(1.5);
+    doc.fillColor('#000000').fontSize(14).font('Helvetica-Bold').text('Lessons and pay');
+    doc.fontSize(10).font('Helvetica').moveDown(0.3);
+    doc.text(`Period: ${from} to ${to}`);
+    doc.moveDown(0.8);
+    doc.font('Helvetica-Bold').text('Instructor:');
+    doc.font('Helvetica').text(guide.name + (guide.is_assistant ? ' (assistant)' : ''));
+    if (guide.phone) doc.text(guide.phone);
+    doc.text(rate ? `${money(rate)} per lesson` : 'Pay per lesson not set');
+    doc.moveDown(1.2);
+
+    const left = 50, dateW = 80, amountW = 90;
+    const right = doc.page.width - 50;
+    const descX = left + dateW;
+    const amountX = right - amountW;
+    const drawRow = (dateTxt, desc, amount, bold) => {
+        const y = doc.y;
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
+        doc.text(dateTxt, left, y, { width: dateW - 10 });
+        doc.text(desc, descX, y, { width: amountX - descX - 10 });
+        doc.text(amount, amountX, y, { width: amountW, align: 'right' });
+        doc.moveDown(0.4);
+    };
+    drawRow('Date', 'Lesson', 'Pay', true);
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
+    doc.moveDown(0.4);
+    for (const r of rides) {
+        if (doc.y > doc.page.height - 120) doc.addPage();
+        const what = [r.start_time.slice(0, 5), r.ride_type_name || 'Lesson',
+            r.rider_count ? `${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}` : 'no riders']
+            .filter(Boolean).join(' · ');
+        drawRow(r.date, what, money(rate), false);
+    }
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
+    doc.moveDown(0.4);
+    drawRow('', `Total — ${rides.length} lesson${rides.length === 1 ? '' : 's'}`,
+        money(rides.length * rate), true);
+    if (!rate) {
+        doc.moveDown(1);
+        doc.fontSize(9).font('Helvetica').fillColor('#a8541c')
+            .text('No pay per lesson is set for this instructor, so the total reads zero.',
+                left, doc.y, { width: right - left });
+    }
+}
+
+app.get('/api/guides/:id/statement.pdf', requireRole('helper'), async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+            return res.status(400).json({ error: 'Valid from/to dates are required.' });
+        }
+        const { rows: gs } = await pool.query('SELECT * FROM guides WHERE id = $1', [req.params.id]);
+        const guide = gs[0];
+        if (!guide) return res.status(404).json({ error: 'Instructor not found.' });
+        await materializeRecurring(from, to);
+        const { rows: rides } = await pool.query(
+            `SELECT r.date::text AS date, r.start_time::text AS start_time,
+                    COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
+                    (SELECT count(*)::int FROM ride_participants rp
+                      WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL) AS rider_count
+               FROM ride_guides rg
+               JOIN rides r ON r.id = rg.ride_id
+               LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+              WHERE rg.guide_id = $1 AND r.date BETWEEN $2 AND $3
+                AND r.status = 'active' AND NOT r.is_block
+              ORDER BY r.date, r.start_time`,
+            [req.params.id, from, to]);
+        const settings = await loadSettings();
+        const safe = guide.name.replace(/[^a-zA-Z0-9]+/g, '-');
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="lessons-${safe}-${from}.pdf"`);
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        doc.pipe(res);
+        drawGuideStatement(doc, guide, rides, from, to, settings);
+        doc.end();
+    } catch (err) {
+        handleError(res, err, 'Generating instructor statement');
+    }
+});
 
 const INVOICE_WITH_CONTACT_SQL = `
     SELECT i.*, c.name AS contact_name, c.email AS contact_email,
