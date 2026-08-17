@@ -127,6 +127,14 @@
         return overlay;
     }
 
+    // Yes/no in the app's own overlay instead of the browser's, which shows the
+    // hostname and cannot be styled. Returns true only on the confirm button.
+    async function askConfirm(title, message, label, hint) {
+        const choice = await askChoice(title, message || '',
+            [{ key: 'yes', label: label || 'Confirm', hint: hint || '' }]);
+        return choice === 'yes';
+    }
+
     // Small choice overlay that can sit above an open dialog
     function askChoice(title, message, options) {
         return new Promise((resolve) => {
@@ -1314,7 +1322,8 @@
                     dialogError(`${hName} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
                     return;
                 }
-                if (!confirm(`${hName} is on ${rideLabel(clash)}.\n\nTake it off that ride and use it here instead?`)) return;
+                if (!await askConfirm(`${hName} is already booked`, `${hName} is on ${rideLabel(clash)}.`,
+                    'Move it to this ride', 'it comes off the other ride')) return;
                 try {
                     await api('PUT', `/api/rides/${clash.id}`, {
                         date: clash.date,
@@ -1451,7 +1460,8 @@
                     dialogError(`${horse.name} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
                     return;
                 }
-                if (!confirm(`${horse.name} is on ${rideLabel(clash)}.\n\nTake ${horse.name} off that ride and use it here instead?`)) return;
+                if (!await askConfirm(`${horse.name} is already booked`, `${horse.name} is on ${rideLabel(clash)}.`,
+                    'Move to this ride', 'it comes off the other ride')) return;
                 const otherParts = clash.participants.map((p) => ({
                     horse_id: String(p.horse_id) === String(horse.id) ? null : p.horse_id,
                     contact_id: p.contact_id
@@ -2190,9 +2200,9 @@
             }
         });
         const deleteBtn = document.getElementById('ride-delete');
-        if (deleteBtn) deleteBtn.addEventListener('click', () => {
+        if (deleteBtn) deleteBtn.addEventListener('click', async () => {
             if (!ride.recurring_id) {
-                if (!confirm('Delete this ride?')) return;
+                if (!await askConfirm('Delete this ride?', 'This cannot be undone.', 'Delete')) return;
                 doDelete('one');
                 return;
             }
@@ -2238,12 +2248,12 @@
             <div class="form-actions"><button class="secondary" id="ds-cancel">Cancel</button></div>`);
         document.getElementById('ds-cancel').addEventListener('click', closeDialog);
         $dialog.querySelectorAll('[data-scope]').forEach((btn) => {
-            btn.addEventListener('click', () => {
+            btn.addEventListener('click', async () => {
                 const scope = btn.getAttribute('data-scope');
                 const msg = scope === 'all' ? 'Delete every ride in this series (except invoiced ones)?'
                     : scope === 'future' ? 'Delete this ride and all later ones in the series?'
                     : 'Delete just this day?';
-                if (!confirm(msg)) return;
+                if (!await askConfirm('Are you sure?', msg, 'Continue')) return;
                 doDelete(scope);
             });
         });
@@ -2428,7 +2438,9 @@
         });
         const deleteBtn = document.getElementById('fx-delete');
         if (deleteBtn) deleteBtn.addEventListener('click', async () => {
-            if (!confirm('Delete this fixed ride? Future occurrences that are not invoiced yet will be removed from the calendar.')) return;
+            if (!await askConfirm('Delete this fixed ride?',
+                'Future occurrences that are not invoiced yet are removed from the calendar.',
+                'Delete the fixed ride')) return;
             try {
                 await api('DELETE', `/api/recurring/${tpl.id}`);
                 closeDialog();
@@ -2602,7 +2614,7 @@
         });
         const delBtn = document.getElementById('dc-delete');
         if (delBtn) delBtn.addEventListener('click', async () => {
-            if (!confirm(`Delete "${entry.name}" from the directory?`)) return;
+            if (!await askConfirm(`Delete ${entry.name}?`, 'Removed from the directory.', 'Delete')) return;
             try {
                 await api('DELETE', `/api/service-contacts/${entry.id}`);
                 closeDialog();
@@ -3546,7 +3558,8 @@
         });
         const archiveBtn = document.getElementById('ct-archive');
         if (archiveBtn) archiveBtn.addEventListener('click', async () => {
-            if (!confirm('Archive this contact? They will disappear from lists but their history is kept.')) return;
+            if (!await askConfirm('Archive this contact?',
+                'They disappear from lists, but their rides and invoices are kept.', 'Archive')) return;
             try {
                 await api('PUT', `/api/contacts/${contact.id}`, { archived: true });
                 closeDialog();
@@ -3657,7 +3670,8 @@
     function wireCreateInvoiceButtons($el, range) {
         $el.querySelectorAll('[data-inv-contact]').forEach((btn) => {
             btn.addEventListener('click', async () => {
-                if (!confirm(`Create an invoice for ${btn.getAttribute('data-inv-name')} for ${range.label}?`)) return;
+                if (!await askConfirm(`Invoice ${btn.getAttribute('data-inv-name')}?`,
+                    `For ${range.label}.`, 'Create the invoice')) return;
                 btn.disabled = true;
                 try {
                     const res = await api('POST', '/api/invoices',
@@ -3858,7 +3872,8 @@
             }
         });
         document.getElementById('bp-create').addEventListener('click', async () => {
-            if (!confirm('Create these term passes and advance invoices?')) return;
+            if (!await askConfirm('Create these term passes?',
+                'One pass and one advance invoice per rider listed above.', 'Create them')) return;
             try {
                 const res = await api('POST', '/api/term-passes/bulk', payload());
                 closeDialog();
@@ -4039,7 +4054,9 @@
                 });
                 $passes.querySelectorAll('[data-pass-del]').forEach((btn) => {
                     btn.addEventListener('click', async () => {
-                        if (!confirm(`Delete ${btn.getAttribute('data-pass-name')}'s term pass? Their fixed lessons become billable per month again (the invoice stays).`)) return;
+                        if (!await askConfirm(`Delete ${btn.getAttribute('data-pass-name')}'s term pass?`,
+                            'Their fixed lessons become billable per month again. The invoice itself stays.',
+                            'Delete the pass')) return;
                         try {
                             await api('DELETE', `/api/term-passes/${btn.getAttribute('data-pass-del')}`);
                             toast('Term pass deleted.');
@@ -4123,7 +4140,11 @@
                         ${waNumber(inv.contact_phone)
                             ? `<button class="secondary small" data-inv-wa="${inv.id}" title="Download the PDF and open WhatsApp to ${esc(inv.contact_name)}">💬 Send</button>`
                             : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
-                        <button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}">✕</button>
+                        ${inv.status === 'draft'
+                            ? `<button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}"
+                                       title="Delete this draft — its rides can then be invoiced again">✕</button>`
+                            : `<button class="danger small" disabled
+                                       title="Only drafts can be deleted; this one is marked ${esc(inv.status)}">✕</button>`}
                     </div>`).join('');
                 $list.querySelectorAll('[data-inv-wa]').forEach((btn) => {
                     btn.addEventListener('click', () => {
@@ -4143,7 +4164,9 @@
                 });
                 $list.querySelectorAll('[data-inv-del]').forEach((btn) => {
                     btn.addEventListener('click', async () => {
-                        if (!confirm(`Delete invoice ${btn.getAttribute('data-inv-num')}? Its rides can then be invoiced again.`)) return;
+                        if (!await askConfirm(`Delete invoice ${btn.getAttribute('data-inv-num')}?`,
+                            'Its rides go back to the to-invoice list and can be invoiced again.',
+                            'Delete the draft')) return;
                         try {
                             await api('DELETE', `/api/invoices/${btn.getAttribute('data-inv-del')}`);
                             toast('Invoice deleted.');
@@ -4209,7 +4232,7 @@
         });
         const delBtn = document.getElementById('td-delete');
         if (delBtn) delBtn.addEventListener('click', async () => {
-            if (!confirm('Delete this to-do?')) return;
+            if (!await askConfirm('Delete this to-do?', '', 'Delete')) return;
             try {
                 await api('DELETE', `/api/todos/${todo.id}`);
                 closeDialog();
@@ -4307,7 +4330,8 @@
         });
         const icalRotate = document.getElementById('ical-rotate');
         if (icalRotate) icalRotate.addEventListener('click', async () => {
-            if (!confirm('Make a new calendar link? Any device already subscribed stops updating.')) return;
+            if (!await askConfirm('Make a new calendar link?',
+                'Any device already subscribed stops updating.', 'Make a new link')) return;
             try {
                 const res = await api('POST', '/api/settings/rotate-ical-token');
                 state.settings.ical_token = res.token;
@@ -4807,7 +4831,9 @@
         });
         const rotateBtn = document.getElementById('pub-rotate');
         if (rotateBtn) rotateBtn.addEventListener('click', async () => {
-            if (!confirm('Make a new link? The old one stops working immediately and everyone needs the new one.')) return;
+            if (!await askConfirm('Make a new schedule link?',
+                'The old one stops working immediately and every instructor needs the new one.',
+                'Make a new link')) return;
             try {
                 const res = await api('POST', '/api/settings/rotate-schedule-token');
                 state.settings.public_schedule_token = res.token;
@@ -5080,7 +5106,8 @@
         document.getElementById('rt-cancel').addEventListener('click', closeDialog);
         const deleteBtn = document.getElementById('rt-delete');
         if (deleteBtn) deleteBtn.addEventListener('click', async () => {
-            if (!confirm(`Delete ride type "${rt.name}"? Existing rides are kept and keep their price and label.`)) return;
+            if (!await askConfirm(`Delete ride type "${rt.name}"?`,
+                'Existing rides are kept and keep their price and label.', 'Delete the type')) return;
             try {
                 await api('DELETE', `/api/ride-types/${rt.id}`);
                 state.rideTypes = (await api('GET', '/api/ride-types')).ride_types;

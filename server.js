@@ -2606,9 +2606,22 @@ app.put('/api/invoices/:id', requireRole('helper'), async (req, res) => {
 });
 
 // Deleting an invoice frees its rides to be invoiced again
+// Only drafts may be deleted. Numbering is highest-plus-one, so removing an
+// invoice that has already gone out would let the next one reuse its number and
+// leave two different documents sharing it.
 app.delete('/api/invoices/:id', requireRole('helper'), async (req, res) => {
     try {
-        const { rowCount } = await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.id]);
+        const { rows } = await pool.query(
+            'SELECT number, status FROM invoices WHERE id = $1', [req.params.id]);
+        if (!rows[0]) return res.status(404).json({ error: 'Invoice not found.' });
+        if (rows[0].status !== 'draft') {
+            return res.status(400).json({
+                error: `${rows[0].number} is marked as ${rows[0].status} and cannot be deleted. ` +
+                       'Set it back to draft first if it really was not sent.'
+            });
+        }
+        const { rowCount } = await pool.query(
+            "DELETE FROM invoices WHERE id = $1 AND status = 'draft'", [req.params.id]);
         if (!rowCount) return res.status(404).json({ error: 'Invoice not found.' });
         res.json({ ok: true });
     } catch (err) {
@@ -2686,7 +2699,7 @@ function drawInvoicePage(doc, inv, lines, settings) {
     }
     if (settings.invoice_footer) {
         doc.moveDown(1.5);
-        doc.fontSize(9).font('Helvetica').fillColor('#555555')
+        doc.fontSize(12).font('Helvetica').fillColor('#333333')
             .text(settings.invoice_footer, left, doc.y, { width: right - left });
     }
 }
