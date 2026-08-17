@@ -3900,6 +3900,12 @@
             const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             monthPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
         }
+        // The term is just a date range; default to the current calendar quarter
+        // until the user sets the real term dates.
+        const [defFrom, defTo] = quarterBounds(0);
+        const termFrom = state.termFrom || defFrom;
+        const termTo = state.termTo || defTo;
+
         // Advance months are shown oldest first and flagged when still uninvoiced,
         // so a month already under way (August, mid-August) is not missed just
         // because the run defaults to "next month".
@@ -3938,18 +3944,24 @@
                     ${outstanding.map((m) => esc(m.month)).join(', ')}.</p>` : ''}
                 <div id="inv-advance" class="muted" style="margin-top:14px">Loading…</div>
             </div>
-            <h2>In advance — term passes</h2>
+            <h2>In advance — per term</h2>
+            <p class="muted">Riders whose payer is set to <b>In advance, per term</b>.
+               Set the term's dates and invoice their lessons for the whole term up front.</p>
             <div class="card">
-                <p class="muted" style="margin-top:0">A term pass covers a rider's <b>fixed lessons</b> for a period,
-                   invoiced up front. Extra rides outside the fixed lessons stay billable per month.
-                   Renewal is manual — expired passes stop covering automatically.</p>
-                <div id="pass-missing" class="warn-bar hidden"></div>
-                <div id="pass-list" class="muted">Loading…</div>
-                <div class="form-actions" style="justify-content:flex-start">
-                    <button class="small" id="pass-add">＋ New term pass (invoice in advance)</button>
-                    <button class="secondary small" id="pass-bulk">⚡ Passes for all fixed riders</button>
-                    <a class="btn secondary small" href="/api/invoices/batch-pdf?kind=advance&status=draft" target="_blank">⬇ All draft PDFs (one file)</a>
+                <div class="form-row">
+                    <div><label>Term from</label><input type="date" id="term-from" value="${esc(termFrom)}"></div>
+                    <div><label>Term to</label><input type="date" id="term-to" value="${esc(termTo)}"></div>
                 </div>
+                <div class="form-actions" style="justify-content:flex-start">
+                    <button class="secondary small" id="term-go">Show</button>
+                    <a class="btn secondary small" href="/api/invoices/batch-pdf?status=draft" target="_blank">⬇ All draft PDFs (one file)</a>
+                </div>
+                <div id="inv-term" class="muted" style="margin-top:14px">Loading…</div>
+            </div>
+            <div class="card ${'' /* only shown when old-style passes exist */}" id="pass-card" style="display:none">
+                <h2 style="margin-top:0">Term passes</h2>
+                <p class="muted">Created under the older term-pass scheme. They still cover their riders' fixed lessons.</p>
+                <div id="pass-list" class="muted">Loading…</div>
             </div>
             <h2>In arrears — monthly</h2>
             <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
@@ -3976,8 +3988,11 @@
             </div>
             <h2>Created invoices</h2>
             <div id="inv-list" class="muted">Loading…</div>`;
-        document.getElementById('pass-add').addEventListener('click', openTermPassDialog);
-        document.getElementById('pass-bulk').addEventListener('click', openBulkPassDialog);
+        document.getElementById('term-go').addEventListener('click', () => {
+            state.termFrom = document.getElementById('term-from').value || defFrom;
+            state.termTo = document.getElementById('term-to').value || defTo;
+            renderInvoices();
+        });
         document.querySelectorAll('.month-pill[data-month]').forEach((btn) => {
             btn.addEventListener('click', () => {
                 state.invoiceMonth = btn.getAttribute('data-month');
@@ -3991,26 +4006,24 @@
             });
         });
         try {
-            const [ov, advOv, invs, passesData, passMissing] = await Promise.all([
+            const [ov, advOv, termOv, invs, passesData] = await Promise.all([
                 api('GET', `/api/invoices/overview?month=${month}`),
                 api('GET', `/api/invoices/overview?month=${adv}`),
+                api('GET', `/api/invoices/overview?from=${termFrom}&to=${termTo}`),
                 api('GET', '/api/invoices'),
-                api('GET', '/api/term-passes'),
-                api('GET', '/api/term-passes/outstanding')
+                api('GET', '/api/term-passes')
             ]);
-            // Same idea as the monthly runs: say who still needs invoicing
-            const $missing = document.getElementById('pass-missing');
-            const miss = passMissing.riders || [];
-            $missing.classList.toggle('hidden', !miss.length);
-            if (miss.length) {
-                $missing.innerHTML = `⚠ <b>${miss.length} rider${miss.length === 1 ? '' : 's'}</b>
-                    on per-term billing have no term pass covering today, so they have not been
-                    invoiced for this term: ${miss.map((r) => esc(r.name)).join(', ')}.`;
-            }
+            // The term run works exactly like the monthly one, over a date range
+            renderOverviewTable(document.getElementById('inv-term'),
+                termOv.overview.filter((r) => r.payment_terms === 'advance_term'),
+                'Nobody on per-term billing has uninvoiced lessons in these dates.',
+                { from: termOv.from, to: termOv.to, label: `${termFrom} to ${termTo}` });
             const $passes = document.getElementById('pass-list');
             const today = todayStr();
+            document.getElementById('pass-card').style.display =
+                passesData.passes.length ? '' : 'none';
             if (!passesData.passes.length) {
-                $passes.innerHTML = 'No term passes yet.';
+                $passes.innerHTML = '';
             } else {
                 $passes.classList.remove('muted');
                 $passes.innerHTML = passesData.passes.map((tp) => {

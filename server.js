@@ -2152,9 +2152,24 @@ app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, 
 
 app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
     try {
+        // Either a whole month, or any explicit range — a term is just a range
         const month = String(req.query.month || '');
-        if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'A valid month (YYYY-MM) is required.' });
-        const [from, to] = monthRange(month);
+        let from, to;
+        if (month) {
+            if (!/^\d{4}-\d{2}$/.test(month)) {
+                return res.status(400).json({ error: 'A valid month (YYYY-MM) is required.' });
+            }
+            [from, to] = monthRange(month);
+        } else {
+            from = String(req.query.from || '');
+            to = String(req.query.to || '');
+            if (!DATE_RE.test(from) || !DATE_RE.test(to) || from > to) {
+                return res.status(400).json({ error: 'A valid month, or a from/to range, is required.' });
+            }
+            if (datesInRange(from, to).length > 366) {
+                return res.status(400).json({ error: 'Period too large (max 1 year).' });
+            }
+        }
         await materializeRecurring(from, to);
         // One row per RIDER (invoices are per rider); the payer is shown for context
         const { rows } = await pool.query(
