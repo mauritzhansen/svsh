@@ -328,6 +328,9 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                     -- both (a parent who also rides), and neither flag needs upkeep.
                     (SELECT count(*)::int FROM contacts k
                       WHERE k.parent_id = c.id AND NOT k.archived) AS child_count,
+                    (SELECT COALESCE(json_agg(json_build_object('id', k.id::text, 'name', k.name)
+                            ORDER BY k.name), '[]'::json)
+                       FROM contacts k WHERE k.parent_id = c.id AND NOT k.archived) AS children,
                     (SELECT count(*)::int FROM recurring_participants xp
                       WHERE xp.contact_id = c.id) AS fixed_count,
                     -- the weekly slots this rider holds, for the contact list
@@ -464,28 +467,45 @@ async function saveContactExtras(contactId, body) {
 }
 
 const EXPERIENCE_LEVELS = LEVELS;
+const PAYMENT_TERMS = ['advance_monthly', 'advance_term', 'arrears'];
+
+// Anyone who pays must say how. Only checked when the caller states the role,
+// so partial updates (archiving, linking a parent) are unaffected.
+function paymentTermsError(body) {
+    const { is_parent, payment_terms } = body || {};
+    if (payment_terms !== undefined && payment_terms !== null &&
+        !PAYMENT_TERMS.includes(payment_terms)) {
+        return 'That payment arrangement is not recognised.';
+    }
+    if (is_parent === true && !payment_terms) {
+        return 'Choose how this parent pays before saving.';
+    }
+    return null;
+}
 
 app.post('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year, is_rider, is_parent } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent, payment_terms } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
+        const termsError = paymentTermsError(req.body);
+        if (termsError) return res.status(400).json({ error: termsError });
         const parentError = await validateParent(parent_id, null);
         if (parentError) return res.status(400).json({ error: parentError });
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
                                    needs_collection, collection_teacher, collection_class,
-                                   is_prospect, birth_year, notes, is_rider, is_parent)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+                                   is_prospect, birth_year, notes, is_rider, is_parent, payment_terms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
              !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '',
-             is_rider !== false, !!is_parent]);
+             is_rider !== false, !!is_parent, payment_terms || null]);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -498,10 +518,12 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes, archived,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year, is_rider, is_parent } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent, payment_terms } = req.body || {};
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
+        const termsError = paymentTermsError(req.body);
+        if (termsError) return res.status(400).json({ error: termsError });
         if (parent_id !== undefined) {
             const parentError = await validateParent(parent_id, req.params.id);
             if (parentError) return res.status(400).json({ error: parentError });
@@ -522,7 +544,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 is_prospect = COALESCE($15, is_prospect),
                 birth_year = CASE WHEN $16 THEN $17::int ELSE birth_year END,
                 is_rider = COALESCE($18, is_rider),
-                is_parent = COALESCE($19, is_parent)
+                is_parent = COALESCE($19, is_parent),
+                payment_terms = CASE WHEN $20 THEN $21 ELSE payment_terms END
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
@@ -532,7 +555,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
              typeof is_prospect === 'boolean' ? is_prospect : null,
              birth_year !== undefined, Number.isInteger(birth_year) ? birth_year : null,
              typeof is_rider === 'boolean' ? is_rider : null,
-             typeof is_parent === 'boolean' ? is_parent : null]);
+             typeof is_parent === 'boolean' ? is_parent : null,
+             payment_terms !== undefined, payment_terms || null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });

@@ -112,11 +112,16 @@
 
     // A second dialog layered over an open one, so the form underneath keeps
     // its unsaved state (openDialog replaces the main dialog's contents).
-    function openSubDialog(html) {
+    function openSubDialog(html, opts) {
         const overlay = document.createElement('div');
         overlay.className = 'timepick-backdrop';
         overlay.innerHTML = `<div class="timepick subdialog">${html}</div>`;
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        // These hold unsaved edits, so a stray tap on the backdrop must not throw
+        // them away — the buttons are the only way out. Pass dismissable for
+        // read-only pickers where tapping away is harmless.
+        if (opts && opts.dismissable) {
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        }
         document.body.appendChild(overlay);
         enhanceTimeInputs(overlay);
         return overlay;
@@ -246,6 +251,12 @@
     }
 
     // ---------- Phone numbers (WhatsApp-first, +27 by default) ----------
+    const PAYMENT_TERMS = {
+        advance_monthly: 'In advance, per month',
+        advance_term: 'In advance, per term',
+        arrears: 'In arrears'
+    };
+
     const DEFAULT_CC = '+27';
     // Full dialing-code list, shown as "+27 South Africa". South Africa first,
     // then alphabetical by country.
@@ -331,7 +342,8 @@
             <h3 style="margin:0 0 8px">Country dialling code</h3>
             <input id="cc-search" type="search" placeholder="Search country or code…" autocomplete="off">
             <div id="cc-list" class="cc-list"></div>
-            <div class="form-actions"><button class="secondary" id="cc-cancel">Cancel</button></div>`);
+            <div class="form-actions"><button class="secondary" id="cc-cancel">Cancel</button></div>`,
+            { dismissable: true });
         const $list = overlay.querySelector('#cc-list');
         const draw = (q) => {
             const term = (q || '').trim().toLowerCase();
@@ -421,7 +433,7 @@
     // Only contacts ticked as Parent can pay — plus whoever is already selected,
     // so an existing link never silently disappears from the picker.
     function parentOptions(selectedId, excludeId) {
-        return '<option value="">(none — pays own invoices)</option>' +
+        return '<option value="">(choose the parent)</option>' +
             state.contacts
                 .filter((c) => String(c.id) !== String(excludeId) && !c.parent_id &&
                     (c.is_parent || String(c.id) === String(selectedId)))
@@ -2822,6 +2834,17 @@
             else if (isParent(c)) bits.push('pays own invoices');
             else bits.push('<span class="no-parent">no parent assigned</span>');
         }
+        if (isParent(c)) {
+            const kids = c.children || [];
+            bits.push(kids.length
+                ? `👥 ${kids.map((k) => esc(k.name)).join(', ')}`
+                : '<span class="no-parent">no riders linked</span>');
+        }
+        if ((isParent(c) || (isRider(c) && !c.parent_id)) && !c.payment_terms) {
+            bits.push('<span class="no-parent">payment terms not set</span>');
+        } else if (c.payment_terms && isParent(c)) {
+            bits.push(`💳 ${PAYMENT_TERMS[c.payment_terms]}`);
+        }
         if (c.phone || c.email) bits.push(esc(c.phone || c.email));
         return bits.join(' · ');
     }
@@ -2829,8 +2852,7 @@
     function roleTags(c) {
         const tags = [];
         if (isRider(c)) tags.push('<span class="role-tag rider">Rider</span>');
-        if (isParent(c)) tags.push(`<span class="role-tag parent">Parent${
-            c.child_count > 1 ? ' ×' + c.child_count : ''}</span>`);
+        if (isParent(c)) tags.push('<span class="role-tag parent">Parent</span>');
         return tags.join('');
     }
 
@@ -3022,13 +3044,14 @@
             const overlay = openSubDialog(`
                 <h3 style="margin:0 0 4px">Availability</h3>
                 <p class="muted" style="margin:0 0 10px">Tap the hours they can ride.
-                   All empty means no restriction.</p>
+                   All empty means no restriction.
+                   <b>Nothing changes until you press Done.</b></p>
                 <div id="av-edit-grid"></div>
                 <div class="form-actions">
                     <button class="secondary" id="av-clear">Clear all</button>
                     <span class="spacer"></span>
-                    <button class="secondary" id="av-cancel">Cancel</button>
-                    <button id="av-save">Save</button>
+                    <button class="secondary" id="av-cancel">Discard</button>
+                    <button id="av-save">Done</button>
                 </div>`);
             const holder = overlay.querySelector('#av-edit-grid');
             holder.appendChild(store.firstElementChild.cloneNode(true));
@@ -3092,12 +3115,25 @@
             parent.disabled = true;
             parent.title = 'Riders are linked to this contact, so they are a parent.';
         }
+        const termsWrap = document.getElementById('ct-terms-wrap');
+        const paysWrap = document.getElementById('ct-pays-wrap');
+        const paysParent = document.getElementById('ct-pays-parent');
+        const paysOwn = document.getElementById('ct-pays-own');
         const sync = () => {
-            parentWrap.classList.toggle('hidden', !rider.checked || hasKids);
+            // Only a rider gets invoiced by someone else, and someone who already
+            // has riders under them is the top of the chain.
+            const canHaveParent = rider.checked && !hasKids;
+            paysWrap.classList.toggle('hidden', !canHaveParent);
+            parentWrap.classList.toggle('hidden', !(canHaveParent && paysParent.checked));
             kidsWrap.classList.toggle('hidden', !parent.checked);
             const note = document.getElementById('ct-parent-note');
             if (note) note.classList.toggle('hidden', !(rider.checked && hasKids));
+            // Terms are for whoever the invoice actually lands on
+            const selfPays = !canHaveParent || paysOwn.checked;
+            termsWrap.classList.toggle('hidden', !(parent.checked || hasKids || selfPays));
         };
+        paysParent.addEventListener('change', sync);
+        paysOwn.addEventListener('change', sync);
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
         sync();
@@ -3124,6 +3160,12 @@
             <input id="np-email" type="email">
             <label>Address (optional)</label>
             <textarea id="np-address"></textarea>
+            <label>How they pay <span class="req">*</span></label>
+            <select id="np-terms">
+                <option value="">(not assigned)</option>
+                ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
+                    `<option value="${k}">${label}</option>`).join('')}
+            </select>
             <label class="role-check" style="margin-top:6px">
                 <input type="checkbox" id="np-also-rides"> They ride as well
             </label>
@@ -3137,9 +3179,12 @@
             const name = overlay.querySelector('#np-name').value.trim();
             const err = overlay.querySelector('.form-error');
             if (!name) { err.textContent = 'A name is required.'; return; }
+            const terms = overlay.querySelector('#np-terms').value;
+            if (!terms) { err.textContent = 'Choose how this parent pays.'; return; }
             try {
                 const res = await api('POST', '/api/contacts', {
                     name,
+                    payment_terms: terms,
                     phone: readPhoneField('np-phone'),
                     email: overlay.querySelector('#np-email').value,
                     address: overlay.querySelector('#np-address').value,
@@ -3296,15 +3341,17 @@
             phone: readPhoneField('ct-phone'),
             email: document.getElementById('ct-email').value,
             address: document.getElementById('ct-address').value,
-            // hidden picker means the field does not apply — don't send a stale value
-            parent_id: document.getElementById('ct-parent-wrap').classList.contains('hidden')
-                ? null : (document.getElementById('ct-parent').value || null),
+            // "Pays own invoices" means no payer above them, whatever the picker holds
+            parent_id: document.getElementById('ct-pays-parent').checked &&
+                !document.getElementById('ct-parent-wrap').classList.contains('hidden')
+                ? (document.getElementById('ct-parent').value || null) : null,
             experience: document.getElementById('ct-exp').value || null,
             birth_year: parseInt(document.getElementById('ct-age').value, 10)
                 ? new Date().getFullYear() - parseInt(document.getElementById('ct-age').value, 10) : null,
             is_prospect: document.getElementById('ct-prospect').checked,
             is_rider: document.getElementById('ct-is-rider').checked,
             is_parent: document.getElementById('ct-is-parent').checked,
+            payment_terms: document.getElementById('ct-terms').value || null,
             needs_collection: document.getElementById('ct-collect').checked,
             collection_teacher: document.getElementById('ct-teacher').value,
             collection_class: document.getElementById('ct-class').value,
@@ -3318,6 +3365,17 @@
         };
         if (!body.is_rider && !body.is_parent) {
             dialogError('Tick rider, parent, or both.');
+            return null;
+        }
+        if (body.is_parent && !body.payment_terms) {
+            dialogError('Choose how this parent pays before saving.');
+            return null;
+        }
+        // "Parent pays" with nobody picked would leave the invoice with no payer
+        const paysParentEl = document.getElementById('ct-pays-parent');
+        if (paysParentEl && paysParentEl.checked && !body.parent_id &&
+            !document.getElementById('ct-parent-wrap').classList.contains('hidden')) {
+            dialogError('Pick the parent who pays, or switch to "Pays own invoices".');
             return null;
         }
         try {
@@ -3359,13 +3417,34 @@
                     Parent
                 </label>
             </div>
+            <div id="ct-pays-wrap">
+                <label>Invoicing</label>
+                <div class="role-checks">
+                    <label class="role-check">
+                        <input type="radio" name="ct-pays" id="ct-pays-parent"
+                               ${contact && contact.parent_id ? 'checked' : ''}> Parent pays
+                    </label>
+                    <label class="role-check">
+                        <input type="radio" name="ct-pays" id="ct-pays-own"
+                               ${contact && contact.parent_id ? '' : 'checked'}> Pays own invoices
+                    </label>
+                </div>
+            </div>
             <div id="ct-parent-wrap">
-                <label>Parent / pays the invoices (leave empty if they pay their own)</label>
+                <label>Which parent pays</label>
                 <div class="pick-row" style="gap:6px">
                     <select id="ct-parent" style="flex:1 1 auto;min-width:0">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
                     <button type="button" class="secondary small" id="ct-add-parent"
                             style="flex:0 0 auto" title="Create a new parent">＋ New</button>
                 </div>
+            </div>
+            <div id="ct-terms-wrap">
+                <label>How they pay <span class="req">*</span></label>
+                <select id="ct-terms">
+                    <option value="">(not assigned)</option>
+                    ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
+                        `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
+                </select>
             </div>
             <div id="ct-parent-note" class="muted hidden" style="margin-bottom:10px">
                 Riders are linked to this contact, so they pay their own invoices —

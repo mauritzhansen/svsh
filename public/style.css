@@ -1279,7 +1279,16 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .avail-day b { color: var(--green-dark); }
 
 /* Country picker */
-.subdialog { max-width: 560px; text-align: left; }
+.subdialog {
+    max-width: 560px;
+    text-align: left;
+    /* reads as a layer above the form rather than part of it */
+    box-shadow: 0 14px 44px rgba(0, 0, 0, 0.30);
+    border: 1px solid var(--border);
+}
+.subdialog h3 { margin-top: 0; }
+/* the primary action must be the obvious way out */
+.subdialog .form-actions { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
 .cc-list { max-height: 46vh; overflow-y: auto; margin: 8px 0; }
 .cc-row {
     display: flex; gap: 10px; align-items: baseline; width: 100%;
@@ -1341,3 +1350,4 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 @media (max-width: 700px), (max-height: 560px) {
     .fixed-slots { display: none; }
 }
+.role-check input[type="radio"] { width: auto; margin: 0; }

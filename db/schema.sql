@@ -36,6 +36,8 @@ CREATE TABLE contacts (
     -- ticked, not inferred: a contact can be a rider, a parent, or both
     is_rider BOOLEAN NOT NULL DEFAULT true,
     is_parent BOOLEAN NOT NULL DEFAULT false,
+    -- how a payer settles up; NULL = not assigned yet (see migration 016)
+    payment_terms TEXT CHECK (payment_terms IN ('advance_monthly', 'advance_term', 'arrears')),
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
