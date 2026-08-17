@@ -3928,6 +3928,7 @@
                 <p class="muted" style="margin-top:0">A term pass covers a rider's <b>fixed lessons</b> for a period,
                    invoiced up front. Extra rides outside the fixed lessons stay billable per month.
                    Renewal is manual — expired passes stop covering automatically.</p>
+                <div id="pass-missing" class="warn-bar hidden"></div>
                 <div id="pass-list" class="muted">Loading…</div>
                 <div class="form-actions" style="justify-content:flex-start">
                     <button class="small" id="pass-add">＋ New term pass (invoice in advance)</button>
@@ -3975,12 +3976,22 @@
             });
         });
         try {
-            const [ov, advOv, invs, passesData] = await Promise.all([
+            const [ov, advOv, invs, passesData, passMissing] = await Promise.all([
                 api('GET', `/api/invoices/overview?month=${month}`),
                 api('GET', `/api/invoices/overview?month=${adv}`),
                 api('GET', '/api/invoices'),
-                api('GET', '/api/term-passes')
+                api('GET', '/api/term-passes'),
+                api('GET', '/api/term-passes/outstanding')
             ]);
+            // Same idea as the monthly runs: say who still needs invoicing
+            const $missing = document.getElementById('pass-missing');
+            const miss = passMissing.riders || [];
+            $missing.classList.toggle('hidden', !miss.length);
+            if (miss.length) {
+                $missing.innerHTML = `⚠ <b>${miss.length} rider${miss.length === 1 ? '' : 's'}</b>
+                    on per-term billing have no term pass covering today, so they have not been
+                    invoiced for this term: ${miss.map((r) => esc(r.name)).join(', ')}.`;
+            }
             const $passes = document.getElementById('pass-list');
             const today = todayStr();
             if (!passesData.passes.length) {
@@ -4699,6 +4710,9 @@
                         <input type="time" id="biz-dayend" value="${esc(state.settings.day_end || '17:00')}">
                     </div>
                 </div>
+                <label>Banking details (shown on every invoice, under the rides)</label>
+                <textarea id="biz-bank" rows="5"
+                    placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
                 <label>Invoice footer text</label>
                 <input id="biz-footer" value="${esc(state.settings.invoice_footer || '')}">
                 <div class="form-actions"><button id="biz-save">Save</button></div>
@@ -4832,6 +4846,7 @@
                         business_address: document.getElementById('biz-address').value,
                         currency: document.getElementById('biz-currency').value,
                         invoice_footer: document.getElementById('biz-footer').value,
+                        bank_details: document.getElementById('biz-bank').value,
                         day_start: document.getElementById('biz-daystart').value,
                         day_end: document.getElementById('biz-dayend').value
                     };

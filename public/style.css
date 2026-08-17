@@ -1387,3 +1387,25 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
     font-size: 14px; line-height: 1.45;
 }
 .untyped-flag { color: #a8541c; font-weight: 700; font-size: 12px; cursor: help; }
+
+/* ---- Phone: use the whole width, and don't drift sideways ---- */
+@media (max-width: 700px), (max-height: 560px) {
+    /* the grid is the page here, so give it the screen edge to edge */
+    body.page-calendar #view { padding-left: 0; padding-right: 0; }
+    body.page-calendar .calendar-scroller { border-left: none; border-right: none; border-radius: 0; }
+    body.page-calendar .cal-mobile-bar { border-radius: 0; }
+
+    /* On the Rides tab there are no horse columns, so there is nothing to
+       scroll to sideways — locking the axis stops a vertical swipe from
+       dragging the rides left and right under your finger. */
+    body.cal-tab-rides .calendar-scroller {
+        overflow-x: hidden;
+        overscroll-behavior-x: none;
+        touch-action: pan-y;
+    }
+    body.cal-tab-rides table.ridegrid { width: 100%; table-layout: fixed; }
+    body.cal-tab-rides table.ridegrid td.ridecol,
+    body.cal-tab-rides table.ridegrid th.ridecol { padding: 3px; }
+    /* nothing sits to the right of the single column, so its divider is noise */
+    body.cal-tab-rides table.ridegrid td.ridecol { border-right: none; }
+}

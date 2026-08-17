@@ -289,7 +289,8 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 
 app.put('/api/settings', requireRole('admin'), async (req, res) => {
     try {
-        const allowed = ['business_name', 'business_address', 'currency', 'invoice_footer', 'day_start', 'day_end'];
+        const allowed = ['business_name', 'business_address', 'currency', 'invoice_footer',
+                         'bank_details', 'day_start', 'day_end'];
         for (const key of allowed) {
             if (typeof (req.body || {})[key] === 'string') {
                 await pool.query(
@@ -2256,7 +2257,8 @@ async function createInvoiceForContact(contactId, from, to) {
                 `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
                  VALUES ($1, $2, $3, $4, $5)`,
                 [invRows[0].id, r.id,
-                 `${r.ride_type_name}${r.horse_name ? ' on ' + r.horse_name : ''} at ${String(r.start_time).slice(0, 5)}`,
+                 // the horse is a stable-side detail; the payer only needs the lesson
+                 `${r.ride_type_name} at ${String(r.start_time).slice(0, 5)}`,
                  r.date, r.amount_cents]);
         }
         await client.query('COMMIT');
@@ -2423,6 +2425,33 @@ app.put('/api/term-passes/:id', requireRole('helper'), async (req, res) => {
 // period, priced per planned lesson (so 2×/week riders pay double and
 // biweekly riders half). dry_run returns the preview without creating.
 // Riders who already have a pass overlapping the period are skipped.
+// Who is on per-term billing but has no pass covering the period? The term-pass
+// card cannot infer a term the way the monthly runs infer a month, so without
+// this it just says "no term passes yet" and never tells you who is missing one.
+app.get('/api/term-passes/outstanding', requireRole('helper'), async (req, res) => {
+    try {
+        const on = DATE_RE.test(req.query.on || '') ? req.query.on : null;
+        const { rows } = await pool.query(
+            `SELECT DISTINCT rider.id::text AS contact_id, rider.name, payer.name AS payer_name
+               FROM recurring_participants xp
+               JOIN recurring_rides rr ON rr.id = xp.recurring_id
+               JOIN contacts rider ON rider.id = xp.contact_id
+               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+              WHERE NOT rider.archived AND rr.active
+                AND (rr.end_date IS NULL OR rr.end_date >= COALESCE($1::date, CURRENT_DATE))
+                AND payer.payment_terms = 'advance_term'
+                AND NOT EXISTS (
+                    SELECT 1 FROM term_passes tp
+                     WHERE tp.contact_id = rider.id
+                       AND COALESCE($1::date, CURRENT_DATE) BETWEEN tp.period_start AND tp.period_end)
+              ORDER BY rider.name`,
+            [on]);
+        res.json({ riders: rows, on: on || null });
+    } catch (err) {
+        handleError(res, err, 'Loading outstanding term passes');
+    }
+});
+
 app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
     const client = await pool.connect();
     try {
@@ -2646,8 +2675,17 @@ function drawInvoicePage(doc, inv, lines, settings) {
     doc.moveDown(0.4);
     drawRow('', 'Total', money(inv.total_cents), true);
 
+    if (settings.bank_details) {
+        doc.moveDown(1.5);
+        if (doc.y > doc.page.height - 140) doc.addPage();
+        doc.fillColor('#000000').fontSize(10).font('Helvetica-Bold')
+            .text('Banking details', left, doc.y);
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica')
+            .text(settings.bank_details, left, doc.y, { width: right - left });
+    }
     if (settings.invoice_footer) {
-        doc.moveDown(2);
+        doc.moveDown(1.5);
         doc.fontSize(9).font('Helvetica').fillColor('#555555')
             .text(settings.invoice_footer, left, doc.y, { width: right - left });
     }
