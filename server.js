@@ -351,7 +351,7 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                     (SELECT COALESCE(json_agg(json_build_object(
                             'weekday', av.weekday, 'start_time', av.start_time::text,
                             'end_time', av.end_time::text) ORDER BY av.weekday, av.start_time), '[]'::json)
-                       FROM contact_availability av WHERE av.contact_id = c.id) AS availability,
+                       FROM contact_availability av WHERE av.contact_id = c.id) AS availability
                FROM contacts c
                LEFT JOIN contacts p ON p.id = c.parent_id
                LEFT JOIN schools sc ON sc.id = c.school_id
