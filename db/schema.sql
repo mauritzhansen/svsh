@@ -38,6 +38,7 @@ CREATE TABLE contacts (
     is_parent BOOLEAN NOT NULL DEFAULT false,
     -- how a payer settles up; NULL = not assigned yet (see migration 016)
     payment_terms TEXT CHECK (payment_terms IN ('advance_monthly', 'advance_term', 'arrears', 'cash_after')),
+    school_id BIGINT REFERENCES schools(id) ON DELETE SET NULL, -- term dates come from the school
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
@@ -236,19 +237,6 @@ CREATE TABLE reschedule_credits (
     used_ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL
 );
 
--- Prepaid coverage of a rider's FIXED lessons for a date range, invoiced in
--- advance. Extra ad-hoc rides in the period stay billable after the fact.
-CREATE TABLE term_passes (
-    id BIGSERIAL PRIMARY KEY,
-    contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE, -- the rider covered
-    period_start DATE NOT NULL,
-    period_end DATE NOT NULL,
-    invoice_id BIGINT REFERENCES invoices(id) ON DELETE SET NULL,
-    notes TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (period_start <= period_end)
-);
-
 -- Simple to-dos; dated (and optionally timed) ones double as the day's
 -- activities in the calendar's first column. Done items go to the archive.
 CREATE TABLE todos (
@@ -290,4 +278,24 @@ CREATE TABLE push_subscriptions (
     label TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_ok TIMESTAMPTZ
+);
+
+-- Schools and their term dates (see migration 019). Per-term invoicing bills a
+-- rider for their own school's term, and the schools do not share dates.
+CREATE TABLE schools (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    active BOOLEAN NOT NULL DEFAULT true,
+    sort_order INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE school_terms (
+    id BIGSERIAL PRIMARY KEY,
+    school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    year INT NOT NULL CHECK (year BETWEEN 2000 AND 2100),
+    term_no INT NOT NULL CHECK (term_no BETWEEN 1 AND 4),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    UNIQUE (school_id, year, term_no),
+    CHECK (period_start <= period_end)
 );

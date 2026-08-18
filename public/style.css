@@ -1409,3 +1409,13 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
     /* nothing sits to the right of the single column, so its divider is noise */
     body.cal-tab-rides table.ridegrid td.ridecol { border-right: none; }
 }
+
+/* A per-term rider with no school cannot be invoiced — make it unmissable */
+.needs-school select { border-color: var(--danger); background: #fdf1ef; }
+.needs-school label { color: var(--danger); }
+.school-missing { color: var(--danger); font-weight: 700; }
+
+/* The two-step WhatsApp send */
+.wa-steps { margin: 0 0 4px; padding-left: 20px; }
+.wa-steps li { margin-bottom: 12px; line-height: 1.5; }
+.wa-steps li > div { margin-top: 6px; }

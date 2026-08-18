@@ -10,6 +10,7 @@
         contacts: [],
         users: [],
         guides: [],
+        schools: [],
         settings: {},
         calendarDate: todayStr()
     };
@@ -233,13 +234,14 @@
 
     // ---------- Reference data ----------
     async function loadRefData() {
-        const [horses, rideTypes, contacts, users, guides, settings] = await Promise.all([
+        const [horses, rideTypes, contacts, users, guides, settings, schools] = await Promise.all([
             api('GET', '/api/horses'),
             api('GET', '/api/ride-types'),
             api('GET', '/api/contacts'),
             api('GET', '/api/users'),
             api('GET', '/api/guides'),
-            api('GET', '/api/settings')
+            api('GET', '/api/settings'),
+            api('GET', '/api/schools')
         ]);
         state.horses = horses.horses;
         state.rideTypes = rideTypes.ride_types;
@@ -247,6 +249,7 @@
         state.users = users.users;
         state.guides = guides.guides;
         state.settings = settings.settings;
+        state.schools = schools.schools;
     }
 
     function activeHorses() { return state.horses.filter((h) => h.active); }
@@ -593,18 +596,6 @@
     function isoDow(dateStr) {
         const d = new Date(dateStr + 'T00:00:00').getDay();
         return d === 0 ? 7 : d;
-    }
-
-    // Does this contact have a term pass covering the given date?
-    function hasPassOn(c, dateStr) {
-        return ((c && c.term_passes) || []).some((tp) =>
-            tp.period_start <= dateStr && dateStr <= tp.period_end);
-    }
-
-    // A billable "extra" seat: rider has a term pass for the date, but the seat
-    // is neither a fixed lesson nor a reschedule make-up
-    function isExtraSeat(p) {
-        return !!(p.contact_id && p.in_pass_period && !p.from_recurring && !p.credit_used);
     }
 
     // No availability windows at all = no restriction. With windows, the whole
@@ -1076,7 +1067,6 @@
 
             const flags = [];
             if (!r.is_block && !r.recurring_id) flags.push('once-off');
-            if (riders.some(isExtraSeat)) flags.push('extra — billed monthly');
 
             html += `<tr class="ride-row"><td class="ridecol">
                 <div class="ride-box ${r.is_block ? 'blocked' : ''} ${r.invoiced ? 'invoiced' : ''}">
@@ -1916,12 +1906,6 @@
                 }
                 if (c.needs_collection) {
                     warnings.push(`Pick-up: ${c.name} from ${c.collection_teacher || '?'}${c.collection_class ? ', class ' + c.collection_class : ''}.`);
-                }
-                if (hasPassOn(c, defaults.date)) {
-                    const seat = isEdit && ride.participants.find((p) => String(p.contact_id) === String(c.id));
-                    if (!(seat && (seat.from_recurring || seat.credit_used))) {
-                        warnings.push(`⚠ ${c.name} has a term pass, but this is an extra ride — it will be invoiced separately (monthly).`);
-                    }
                 }
             });
             $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
@@ -3128,6 +3112,17 @@
 
     // Rider ticked -> they may have a parent who pays. Parent ticked -> they can
     // have riders hung underneath them. Both is fine (a parent who also rides).
+    // A rider is billed under their payer's arrangement: their own if they pay
+    // their way, otherwise the linked parent's.
+    function payerTermsFor(contact, ownTerms, paysParent) {
+        if (paysParent) {
+            const sel = document.getElementById('ct-parent');
+            const payer = sel && contactById(sel.value);
+            return payer ? payer.payment_terms : null;
+        }
+        return ownTerms || null;
+    }
+
     function wireContactRoles(contact) {
         const rider = document.getElementById('ct-is-rider');
         const parent = document.getElementById('ct-is-parent');
@@ -3163,7 +3158,18 @@
             // Terms are for whoever the invoice actually lands on
             const selfPays = !canHaveParent || paysOwn.checked;
             termsWrap.classList.toggle('hidden', !(parent.checked || hasKids || selfPays));
+            // The school decides a per-term rider's invoice period, so it is
+            // required for them; other riders may still record it.
+            const schoolWrap = document.getElementById('ct-school-wrap');
+            const perTerm = payerTermsFor(contact, termsSel.value, paysParent.checked);
+            schoolWrap.classList.toggle('hidden', !rider.checked);
+            schoolWrap.classList.toggle('needs-school',
+                perTerm === 'advance_term' && !document.getElementById('ct-school').value);
+            document.getElementById('ct-school-req').classList.toggle('hidden', perTerm !== 'advance_term');
         };
+        const termsSel = document.getElementById('ct-terms');
+        termsSel.addEventListener('change', sync);
+        document.getElementById('ct-school').addEventListener('change', sync);
         paysParent.addEventListener('change', sync);
         paysOwn.addEventListener('change', sync);
         rider.addEventListener('change', sync);
@@ -3384,6 +3390,7 @@
             is_rider: document.getElementById('ct-is-rider').checked,
             is_parent: document.getElementById('ct-is-parent').checked,
             payment_terms: document.getElementById('ct-terms').value || null,
+            school_id: document.getElementById('ct-school').value || null,
             needs_collection: document.getElementById('ct-collect').checked,
             collection_teacher: document.getElementById('ct-teacher').value,
             collection_class: document.getElementById('ct-class').value,
@@ -3401,6 +3408,12 @@
         }
         if (body.is_parent && !body.payment_terms) {
             dialogError('Choose how this parent pays before saving.');
+            return null;
+        }
+        const paysParentEl0 = document.getElementById('ct-pays-parent');
+        const effTerms = payerTermsFor(contact, body.payment_terms, paysParentEl0 && paysParentEl0.checked);
+        if (body.is_rider && effTerms === 'advance_term' && !body.school_id) {
+            dialogError('Pick the school — per-term invoices need its term dates.');
             return null;
         }
         // "Parent pays" with nobody picked would leave the invoice with no payer
@@ -3477,6 +3490,17 @@
                     ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
                         `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
+            </div>
+            <div id="ct-school-wrap">
+                <label>School <span class="req" id="ct-school-req">*</span></label>
+                <select id="ct-school">
+                    <option value="">(not set)</option>
+                    ${state.schools.filter((s) => s.active || (contact && String(contact.school_id) === String(s.id)))
+                        .map((s) => `<option value="${s.id}" ${contact && String(contact.school_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+                </select>
+                <div class="muted" id="ct-school-note" style="margin:-4px 0 10px">
+                    Per-term invoices use this school's term dates.
+                </div>
             </div>
             <div id="ct-parent-note" class="muted hidden" style="margin-bottom:10px">
                 Riders are linked to this contact, so they pay their own invoices —
@@ -3593,10 +3617,6 @@
                         `<div>🏠 Own horse: ${esc(h.name)}</div>`).join('')}
                     ${c.needs_collection ? `<div><b>Pick-up</b> from ${esc(c.collection_teacher || '?')}${c.collection_class ? ', class ' + esc(c.collection_class) : ''}</div>` : ''}
                     ${c.open_credits ? `<div>⟳ <b>${c.open_credits} ride${c.open_credits === 1 ? '' : 's'} to reschedule</b></div>` : ''}
-                    ${(c.term_passes || []).map((tp) => {
-                        const active = tp.period_start <= todayStr() && todayStr() <= tp.period_end;
-                        return `<div>🎫 Term pass ${tp.period_start} – ${tp.period_end}${active ? ' <span class="chip paid">active</span>' : (tp.period_end < todayStr() ? ' <span class="chip draft">expired</span>' : ' <span class="chip sent">upcoming</span>')}</div>`;
-                    }).join('')}
                     ${(c.horse_prefs || []).map((p) => p.kind === 'preferred'
                         ? `<div>⭐ Prefers ${esc(p.horse_name)}${p.reason ? ' — ' + esc(p.reason) : ''}</div>`
                         : `<div>⚠ Caution with ${esc(p.horse_name)}${p.reason ? ' — ' + esc(p.reason) : ''}</div>`).join('')}
@@ -3633,12 +3653,40 @@
                         </div>
                         <span class="chip ${inv.status}">${inv.status}</span>
                         <div class="li-right">${money(inv.total_cents)}</div>
-                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf" target="_blank">PDF</a>
+                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
+                           target="_blank" rel="noopener" title="Open in a new tab">View</a>
+                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
+                           download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
                     </div>`).join('') : (c.parent_id ? '' : '<div class="card muted">No invoices yet. They are created automatically after each month.</div>')}` : ''}`;
             document.getElementById('cd-edit').addEventListener('click', () => openContactDialog(c));
         } catch (err) {
             $view.innerHTML = `<div class="card">${esc(err.message)}</div>`;
         }
+    }
+
+    // One block per school, each billed over that school's own term dates
+    function renderTermRun(data, year, termNo) {
+        const $el = document.getElementById('inv-term');
+        $el.className = '';
+        const missing = data.no_school || [];
+        let html = missing.length ? `<div class="warn-bar">⚠ <b>${missing.length}
+            rider${missing.length === 1 ? '' : 's'}</b> on per-term billing have no school set,
+            so there are no term dates to invoice them for:
+            ${missing.map((r) => `<a href="#/contacts/${r.contact_id}">${esc(r.name)}</a>`).join(', ')}.</div>` : '';
+        html += data.groups.map((g) => `
+            <h3 style="margin:14px 0 4px">${esc(g.name)}
+                <span class="muted" style="font-weight:400">${g.no_dates
+                    ? '— Term ' + termNo + ' ' + year + ' dates not set'
+                    : shortDate(g.period_start) + ' – ' + shortDate(g.period_end)}</span></h3>
+            <div id="term-g-${g.id}">${g.no_dates
+                ? `<p class="school-missing">Set this school's Term ${termNo} dates under Settings before invoicing.</p>`
+                : ''}</div>`).join('');
+        $el.innerHTML = html || '<p class="muted">No active schools.</p>';
+        data.groups.filter((g) => !g.no_dates).forEach((g) => {
+            renderOverviewTable(document.getElementById(`term-g-${g.id}`), g.rows,
+                'Nobody at this school has uninvoiced lessons this term.',
+                { from: g.period_start, to: g.period_end, label: `Term ${termNo} ${year}` });
+        });
     }
 
     // The same table used by the advance run and the needs-attention list
@@ -3690,6 +3738,8 @@
     // WhatsApp cannot be handed a file by a link — only text. So do the tedious
     // half automatically: fetch the PDF so it lands in Downloads, then open the
     // chat with the message already written. The user attaches and sends.
+    // WhatsApp cannot be handed a file by a link — only text. So make the two
+    // steps explicit rather than firing a download the user never sees.
     function sendInvoiceOnWhatsApp(inv) {
         const num = waNumber(inv.contact_phone);
         if (!num) return toast('That contact has no phone number.', true);
@@ -3699,16 +3749,31 @@
             ? ` for ${shortDate(inv.period_start)} – ${shortDate(inv.period_end)}` : '';
         const text = `Hi ${inv.contact_name.split(' ')[0]}, here is ${who} invoice ${inv.number}` +
             `${period}: ${money(inv.total_cents)}. Thank you! — ${state.settings.business_name || 'SVSH'}`;
-        // the download and the chat must both come from this one click, or the
-        // browser blocks the popup
-        const a = document.createElement('a');
-        a.href = `/api/invoices/${inv.id}/pdf`;
-        a.download = `${inv.number}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.open(`https://wa.me/${num}?text=${encodeURIComponent(text)}`, '_blank');
-        toast('PDF downloaded — attach it in the WhatsApp chat that opened.');
+        openWhatsAppSteps({
+            title: `Send ${inv.number} to ${inv.contact_name}`,
+            fileUrl: `/api/invoices/${inv.id}/pdf?download=1`,
+            fileName: `${inv.number}.pdf`,
+            number: num,
+            text
+        });
+    }
+
+    function openWhatsAppSteps(o) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 4px">${esc(o.title)}</h3>
+            <p class="muted" style="margin:0 0 12px">WhatsApp cannot receive a file from a link,
+               so this is two steps: save the PDF, then attach it in the chat.</p>
+            <ol class="wa-steps">
+                <li><b>Save the PDF</b> to this device.
+                    <div><a class="btn secondary small" id="wa-dl" href="${esc(o.fileUrl)}"
+                            download="${esc(o.fileName)}">⬇ ${esc(o.fileName)}</a></div></li>
+                <li><b>Open the chat</b> — the message is written for you.
+                    <div><a class="btn small" id="wa-open" target="_blank" rel="noopener"
+                            href="https://wa.me/${esc(o.number)}?text=${encodeURIComponent(o.text)}">💬 Open WhatsApp</a></div></li>
+                <li>In WhatsApp, tap the <b>📎 attach</b> button and pick the file you just saved.</li>
+            </ol>
+            <div class="form-actions"><button class="secondary" id="wa-close">Close</button></div>`);
+        overlay.querySelector('#wa-close').addEventListener('click', () => overlay.remove());
     }
 
     function currentMonth() { return todayStr().slice(0, 7); }
@@ -3722,168 +3787,7 @@
         return [fmt(start), fmt(end)];
     }
 
-    function openTermPassDialog() {
-        const [qs, qe] = quarterBounds(0);
-        openDialog(`
-            <h2>New term pass — invoice in advance</h2>
-            <p class="muted">Covers the rider's <b>fixed lessons</b> in the period. Extra rides
-               outside the fixed lessons are flagged in the calendar and invoiced monthly.</p>
-            <label>Rider</label>
-            <select id="tp-contact">${contactOptions(null, '(pick rider)')}</select>
-            <div class="form-row">
-                <div><label>From</label><input type="date" id="tp-start" value="${qs}"></div>
-                <div><label>To</label><input type="date" id="tp-end" value="${qe}"></div>
-            </div>
-            <div class="form-actions" style="justify-content:flex-start;margin-top:6px">
-                <button type="button" class="secondary small" id="tp-thisq">This quarter</button>
-                <button type="button" class="secondary small" id="tp-nextq">Next quarter</button>
-            </div>
-            <label>Price (${esc(state.settings.currency || 'R')})</label>
-            <input id="tp-amount" type="number" inputmode="decimal" step="0.01" placeholder="e.g. 3600.00">
-            <label>Invoice line text (optional)</label>
-            <input id="tp-desc" placeholder="Term fee — fixed lessons for the period">
-            <div class="form-error"></div>
-            <div class="form-actions">
-                <button class="secondary" id="tp-cancel">Cancel</button>
-                <button id="tp-save">Create pass &amp; invoice</button>
-            </div>`);
-        const setPeriod = ([s, e]) => {
-            document.getElementById('tp-start').value = s;
-            document.getElementById('tp-end').value = e;
-        };
-        document.getElementById('tp-thisq').addEventListener('click', () => setPeriod(quarterBounds(0)));
-        document.getElementById('tp-nextq').addEventListener('click', () => setPeriod(quarterBounds(1)));
-        document.getElementById('tp-cancel').addEventListener('click', closeDialog);
-        document.getElementById('tp-save').addEventListener('click', async () => {
-            try {
-                const res = await api('POST', '/api/term-passes', {
-                    contact_id: document.getElementById('tp-contact').value || null,
-                    period_start: document.getElementById('tp-start').value,
-                    period_end: document.getElementById('tp-end').value,
-                    amount_cents: Math.round(parseFloat(document.getElementById('tp-amount').value || '0') * 100),
-                    description: document.getElementById('tp-desc').value
-                });
-                closeDialog();
-                toast(`Term pass created — invoice ${res.invoice.number} (in advance).`);
-                renderInvoices();
-            } catch (err) {
-                dialogError(err.message);
-            }
-        });
-    }
 
-    // Edit a draft term pass and its invoice together
-    function openEditPassDialog(tp) {
-        openDialog(`
-            <div class="assign-head">
-                <div>
-                    <h2 style="margin:0">Edit ${esc(tp.contact_name)}'s term pass</h2>
-                    <div class="muted">${esc(tp.invoice_number || 'no invoice')} · draft — the PDF updates when you save.</div>
-                </div>
-                <button class="secondary assign-x" id="ep-close">${ICON_X}</button>
-            </div>
-            <div class="form-row" style="margin-top:10px">
-                <div><label>From</label><input type="date" id="ep-start" value="${esc(tp.period_start)}"></div>
-                <div><label>To</label><input type="date" id="ep-end" value="${esc(tp.period_end)}"></div>
-            </div>
-            <label>Price (${esc(state.settings.currency || 'R')})</label>
-            <input id="ep-amount" type="number" inputmode="decimal" step="0.01"
-                   value="${((tp.total_cents || 0) / 100).toFixed(2)}">
-            <label>Invoice line text</label>
-            <input id="ep-desc" value="${esc(tp.invoice_line || '')}">
-            <div class="muted" style="margin-top:6px">${tp.lessons_so_far} lesson${tp.lessons_so_far === 1 ? '' : 's'} ridden so far in this period.
-                Changing the dates changes what the pass covers.</div>
-            <div class="form-error"></div>
-            <div class="form-actions">
-                <button class="secondary" id="ep-cancel">Cancel</button>
-                <button id="ep-save">Save</button>
-            </div>`);
-        document.getElementById('ep-close').addEventListener('click', closeDialog);
-        document.getElementById('ep-cancel').addEventListener('click', closeDialog);
-        document.getElementById('ep-save').addEventListener('click', async () => {
-            try {
-                await api('PUT', `/api/term-passes/${tp.id}`, {
-                    period_start: document.getElementById('ep-start').value,
-                    period_end: document.getElementById('ep-end').value,
-                    amount_cents: Math.round(parseFloat(document.getElementById('ep-amount').value || '0') * 100),
-                    description: document.getElementById('ep-desc').value
-                });
-                closeDialog();
-                toast('Term pass and invoice updated.');
-                renderInvoices();
-            } catch (err) {
-                dialogError(err.message);
-            }
-        });
-    }
-
-    function openBulkPassDialog() {
-        const [qs, qe] = quarterBounds(0);
-        openDialog(`
-            <h2>⚡ Term passes for all fixed riders</h2>
-            <p class="muted">Creates one pass + advance invoice per rider on the fixed schedule
-               <b>whose payer is set to "In advance, per term"</b>.
-               Each rider is charged their <b>planned fixed lessons in the period × price per lesson</b>
-               (riders with two lessons a week pay double; every-2nd-week riders half).
-               Riders who already have a pass for the period are skipped.</p>
-            <div class="form-row">
-                <div><label>From</label><input type="date" id="bp-start" value="${qs}"></div>
-                <div><label>To</label><input type="date" id="bp-end" value="${qe}"></div>
-            </div>
-            <label>Price per lesson (${esc(state.settings.currency || 'R')})</label>
-            <input id="bp-price" type="number" inputmode="decimal" step="0.01" placeholder="e.g. 300.00">
-            <div id="bp-preview" class="muted" style="margin-top:10px"></div>
-            <div class="form-error"></div>
-            <div class="form-actions">
-                <button class="secondary" id="bp-cancel">Cancel</button>
-                <button class="secondary" id="bp-run-preview">Preview</button>
-                <button id="bp-create" disabled>Create invoices</button>
-            </div>`);
-        document.getElementById('bp-cancel').addEventListener('click', closeDialog);
-        const payload = () => ({
-            period_start: document.getElementById('bp-start').value,
-            period_end: document.getElementById('bp-end').value,
-            price_per_lesson_cents: Math.round(parseFloat(document.getElementById('bp-price').value || '0') * 100)
-        });
-        document.getElementById('bp-run-preview').addEventListener('click', async () => {
-            try {
-                const res = await api('POST', '/api/term-passes/bulk', { ...payload(), dry_run: true });
-                const $p = document.getElementById('bp-preview');
-                if (!res.preview.length) {
-                    $p.textContent = 'No riders with fixed lessons in this period.';
-                    return;
-                }
-                const toCreate = res.preview.filter((r) => !r.skipped);
-                const total = toCreate.reduce((s, r) => s + r.amount_cents, 0);
-                $p.classList.remove('muted');
-                $p.innerHTML = `<div class="table-wrap" style="max-height:260px;overflow-y:auto"><table class="plain">
-                    <tr><th>Rider</th><th class="num">Lessons</th><th class="num">Invoice</th></tr>
-                    ${res.preview.map((r) => `
-                        <tr style="${r.skipped ? 'opacity:.45' : ''}">
-                            <td>${esc(r.name)}${r.skipped ? ' <span class="chip draft">has pass</span>' : ''}</td>
-                            <td class="num">${r.lessons}</td>
-                            <td class="num">${r.skipped ? '—' : money(r.amount_cents)}</td>
-                        </tr>`).join('')}
-                </table></div>
-                <p style="margin:8px 0 0"><b>${toCreate.length} invoices · ${money(total)} total</b></p>`;
-                document.getElementById('bp-create').disabled = !toCreate.length;
-            } catch (err) {
-                dialogError(err.message);
-            }
-        });
-        document.getElementById('bp-create').addEventListener('click', async () => {
-            if (!await askConfirm('Create these term passes?',
-                'One pass and one advance invoice per rider listed above.', 'Create them')) return;
-            try {
-                const res = await api('POST', '/api/term-passes/bulk', payload());
-                closeDialog();
-                toast(`${res.created} term passes created${res.skipped ? ` (${res.skipped} skipped — already had one)` : ''}.`);
-                renderInvoices();
-            } catch (err) {
-                dialogError(err.message);
-            }
-        });
-    }
 
     async function renderInvoices() {
         if (!canInvoice()) {
@@ -3900,11 +3804,8 @@
             const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             monthPills.push({ value, label: d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) });
         }
-        // The term is just a date range; default to the current calendar quarter
-        // until the user sets the real term dates.
-        const [defFrom, defTo] = quarterBounds(0);
-        const termFrom = state.termFrom || defFrom;
-        const termTo = state.termTo || defTo;
+        const termYear = state.termYear || now.getFullYear();
+        const termNo = state.termNo || Math.floor(now.getMonth() / 3) + 1;
 
         // Advance months are shown oldest first and flagged when still uninvoiced,
         // so a month already under way (August, mid-August) is not missed just
@@ -3945,23 +3846,18 @@
                 <div id="inv-advance" class="muted" style="margin-top:14px">Loading…</div>
             </div>
             <h2>In advance — per term</h2>
-            <p class="muted">Riders whose payer is set to <b>In advance, per term</b>.
-               Set the term's dates and invoice their lessons for the whole term up front.</p>
+            <p class="muted">Riders whose payer is set to <b>In advance, per term</b>, billed for their
+               <b>school's</b> term. Term dates are set per school under Settings.</p>
             <div class="card">
-                <div class="form-row">
-                    <div><label>Term from</label><input type="date" id="term-from" value="${esc(termFrom)}"></div>
-                    <div><label>Term to</label><input type="date" id="term-to" value="${esc(termTo)}"></div>
+                <div class="month-pills">
+                    ${[termYear - 1, termYear, termYear + 1].map((y) => `
+                        <button class="month-pill ${y === termYear ? 'active' : ''}" data-ty="${y}">${y}</button>`).join('')}
                 </div>
-                <div class="form-actions" style="justify-content:flex-start">
-                    <button class="secondary small" id="term-go">Show</button>
-                    <a class="btn secondary small" href="/api/invoices/batch-pdf?status=draft" target="_blank">⬇ All draft PDFs (one file)</a>
+                <div class="month-pills" style="margin-top:8px">
+                    ${[1, 2, 3, 4].map((n) => `
+                        <button class="month-pill ${n === termNo ? 'active' : ''}" data-tn="${n}">Term ${n}</button>`).join('')}
                 </div>
                 <div id="inv-term" class="muted" style="margin-top:14px">Loading…</div>
-            </div>
-            <div class="card ${'' /* only shown when old-style passes exist */}" id="pass-card" style="display:none">
-                <h2 style="margin-top:0">Term passes</h2>
-                <p class="muted">Created under the older term-pass scheme. They still cover their riders' fixed lessons.</p>
-                <div id="pass-list" class="muted">Loading…</div>
             </div>
             <h2>In arrears — monthly</h2>
             <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
@@ -3988,11 +3884,14 @@
             </div>
             <h2>Created invoices</h2>
             <div id="inv-list" class="muted">Loading…</div>`;
-        document.getElementById('term-go').addEventListener('click', () => {
-            state.termFrom = document.getElementById('term-from').value || defFrom;
-            state.termTo = document.getElementById('term-to').value || defTo;
+        document.querySelectorAll('[data-ty]').forEach((b) => b.addEventListener('click', () => {
+            state.termYear = Number(b.getAttribute('data-ty'));
             renderInvoices();
-        });
+        }));
+        document.querySelectorAll('[data-tn]').forEach((b) => b.addEventListener('click', () => {
+            state.termNo = Number(b.getAttribute('data-tn'));
+            renderInvoices();
+        }));
         document.querySelectorAll('.month-pill[data-month]').forEach((btn) => {
             btn.addEventListener('click', () => {
                 state.invoiceMonth = btn.getAttribute('data-month');
@@ -4006,80 +3905,13 @@
             });
         });
         try {
-            const [ov, advOv, termOv, invs, passesData] = await Promise.all([
+            const [ov, advOv, termOv, invs] = await Promise.all([
                 api('GET', `/api/invoices/overview?month=${month}`),
                 api('GET', `/api/invoices/overview?month=${adv}`),
-                api('GET', `/api/invoices/overview?from=${termFrom}&to=${termTo}`),
-                api('GET', '/api/invoices'),
-                api('GET', '/api/term-passes')
+                api('GET', `/api/invoices/term-overview?year=${termYear}&term=${termNo}`),
+                api('GET', '/api/invoices')
             ]);
-            // The term run works exactly like the monthly one, over a date range
-            renderOverviewTable(document.getElementById('inv-term'),
-                termOv.overview.filter((r) => r.payment_terms === 'advance_term'),
-                'Nobody on per-term billing has uninvoiced lessons in these dates.',
-                { from: termOv.from, to: termOv.to, label: `${termFrom} to ${termTo}` });
-            const $passes = document.getElementById('pass-list');
-            const today = todayStr();
-            document.getElementById('pass-card').style.display =
-                passesData.passes.length ? '' : 'none';
-            if (!passesData.passes.length) {
-                $passes.innerHTML = '';
-            } else {
-                $passes.classList.remove('muted');
-                $passes.innerHTML = passesData.passes.map((tp) => {
-                    const expired = tp.period_end < today;
-                    const expiringSoon = !expired && tp.period_end <= shiftDate(today, 21);
-                    return `
-                    <div class="list-item" style="${expired ? 'opacity:.55' : ''}">
-                        <div class="li-main">
-                            <div class="li-title">${esc(tp.contact_name)}
-                                ${expired ? '<span class="chip draft">expired</span>'
-                                    : expiringSoon ? '<span class="chip" style="background:#fdecdc;color:#b3542f">expires soon</span>' : ''}</div>
-                            <div class="li-sub">${tp.period_start} – ${tp.period_end} · ${tp.lessons_so_far} lesson${tp.lessons_so_far === 1 ? '' : 's'} so far
-                                ${tp.invoice_number ? ' · ' + esc(tp.invoice_number) : ''}</div>
-                        </div>
-                        ${tp.invoice_id ? `
-                            <select class="pass-status" data-pass-inv="${tp.invoice_id}" style="width:auto">
-                                ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${tp.invoice_status === s ? 'selected' : ''}>${s}</option>`).join('')}
-                            </select>
-                            ${tp.invoice_status === 'draft'
-                                ? `<button class="secondary small" data-pass-edit="${tp.id}">Edit</button>` : ''}
-                            <a class="btn secondary small" href="/api/invoices/${tp.invoice_id}/pdf" target="_blank">PDF</a>` : ''}
-                        <div class="li-right">${money(tp.total_cents || 0)}</div>
-                        <button class="danger small" data-pass-del="${tp.id}" data-pass-name="${esc(tp.contact_name)}">${ICON_X}</button>
-                    </div>`;
-                }).join('');
-                $passes.querySelectorAll('[data-pass-edit]').forEach((btn) => {
-                    btn.addEventListener('click', () => {
-                        const tp = passesData.passes.find((x) => String(x.id) === btn.getAttribute('data-pass-edit'));
-                        if (tp) openEditPassDialog(tp);
-                    });
-                });
-                $passes.querySelectorAll('.pass-status').forEach((sel) => {
-                    sel.addEventListener('change', async () => {
-                        try {
-                            await api('PUT', `/api/invoices/${sel.getAttribute('data-pass-inv')}`, { status: sel.value });
-                            toast('Status updated.');
-                        } catch (err) {
-                            toast(err.message, true);
-                        }
-                    });
-                });
-                $passes.querySelectorAll('[data-pass-del]').forEach((btn) => {
-                    btn.addEventListener('click', async () => {
-                        if (!await askConfirm(`Delete ${btn.getAttribute('data-pass-name')}'s term pass?`,
-                            'Their fixed lessons become billable per month again. The invoice itself stays.',
-                            'Delete the pass')) return;
-                        try {
-                            await api('DELETE', `/api/term-passes/${btn.getAttribute('data-pass-del')}`);
-                            toast('Term pass deleted.');
-                            renderInvoices();
-                        } catch (err) {
-                            toast(err.message, true);
-                        }
-                    });
-                });
-            }
+            renderTermRun(termOv, termYear, termNo);
             // Everyone lands in exactly one bucket, decided by their payer's terms
             // A ride with no type prices at zero, which would be invoiced silently
             const untyped = [...ov.overview, ...advOv.overview]
@@ -4149,7 +3981,10 @@
                         <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
                             ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
                         </select>
-                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf" target="_blank">PDF</a>
+                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
+                           target="_blank" rel="noopener" title="Open in a new tab">View</a>
+                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
+                           download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
                         ${waNumber(inv.contact_phone)
                             ? `<button class="secondary small" data-inv-wa="${inv.id}" title="Download the PDF and open WhatsApp to ${esc(inv.contact_name)}">💬 Send</button>`
                             : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
@@ -4718,6 +4553,12 @@
             <div id="set-guides" class="settings-grid"></div>
             <button class="secondary small" id="guide-add">＋ Add instructor</button>
 
+            <h2>Schools &amp; term dates</h2>
+            <p class="muted">Per-term invoices bill each rider for their own school's term,
+               so the dates are kept per school.</p>
+            <div id="set-schools"></div>
+            <button class="secondary small" id="school-add">＋ Add school</button>
+
             <h2>Ride types &amp; prices</h2>
             <div id="set-ridetypes"></div>
             <button class="secondary small" id="ridetype-add">＋ Add ride type</button>
@@ -4775,6 +4616,87 @@
                 <div class="form-actions"><button class="secondary" id="logout-btn">Log out</button></div>
             </div>`;
 
+        const schoolYear = () => state.schoolYear || new Date().getFullYear();
+        const drawSchools = () => {
+            const y = schoolYear();
+            document.getElementById('set-schools').innerHTML = `
+                <div class="month-pills" style="margin-bottom:10px">
+                    ${[y - 1, y, y + 1].map((yy) => `
+                        <button class="month-pill ${yy === y ? 'active' : ''}" data-sy="${yy}">${yy}</button>`).join('')}
+                </div>
+                ${state.schools.map((s) => {
+                    const byNo = {};
+                    (s.terms || []).filter((t) => t.year === y).forEach((t) => { byNo[t.term_no] = t; });
+                    return `<div class="card" style="margin-bottom:10px${s.active ? '' : ';opacity:.6'}">
+                        <div class="pick-row" style="gap:8px">
+                            <input class="sc-name" data-school="${s.id}" value="${esc(s.name)}" style="flex:1 1 auto;min-width:0">
+                            <span class="muted" style="flex:0 0 auto">${s.rider_count} rider${s.rider_count === 1 ? '' : 's'}</span>
+                            <button class="secondary small sc-toggle" data-school="${s.id}"
+                                    data-active="${s.active}" style="flex:0 0 auto">${s.active ? 'Active' : 'Inactive'}</button>
+                            <button class="danger small sc-del" data-school="${s.id}" data-name="${esc(s.name)}" style="flex:0 0 auto">${ICON_X}</button>
+                        </div>
+                        <div class="table-wrap"><table class="plain">
+                            <tr><th>Term</th><th>From</th><th>To</th><th></th></tr>
+                            ${[1, 2, 3, 4].map((n) => `
+                                <tr>
+                                    <td><b>Term ${n}</b></td>
+                                    <td><input type="date" class="st-from" data-school="${s.id}" data-term="${n}"
+                                               value="${byNo[n] ? byNo[n].period_start : ''}"></td>
+                                    <td><input type="date" class="st-to" data-school="${s.id}" data-term="${n}"
+                                               value="${byNo[n] ? byNo[n].period_end : ''}"></td>
+                                    <td>${byNo[n] ? '<span class="chip paid">set</span>' : '<span class="muted">not set</span>'}</td>
+                                </tr>`).join('')}
+                        </table></div>
+                    </div>`;
+                }).join('') || '<div class="card muted">No schools yet.</div>'}`;
+
+            document.querySelectorAll('[data-sy]').forEach((b) => b.addEventListener('click', () => {
+                state.schoolYear = Number(b.getAttribute('data-sy'));
+                drawSchools();
+            }));
+            const reloadSchools = async () => {
+                state.schools = (await api('GET', '/api/schools')).schools;
+                drawSchools();
+            };
+            document.querySelectorAll('.sc-name').forEach((inp) => inp.addEventListener('change', async () => {
+                try {
+                    await api('PUT', `/api/schools/${inp.getAttribute('data-school')}`, { name: inp.value });
+                    await reloadSchools();
+                    toast('School renamed.');
+                } catch (e) { toast(e.message, true); }
+            }));
+            document.querySelectorAll('.sc-toggle').forEach((btn) => btn.addEventListener('click', async () => {
+                try {
+                    await api('PUT', `/api/schools/${btn.getAttribute('data-school')}`,
+                        { active: btn.getAttribute('data-active') !== 'true' });
+                    await reloadSchools();
+                } catch (e) { toast(e.message, true); }
+            }));
+            document.querySelectorAll('.sc-del').forEach((btn) => btn.addEventListener('click', async () => {
+                if (!await askConfirm(`Delete ${btn.getAttribute('data-name')}?`,
+                    'Only possible if no rider is at this school.', 'Delete')) return;
+                try {
+                    await api('DELETE', `/api/schools/${btn.getAttribute('data-school')}`);
+                    await reloadSchools();
+                    toast('School deleted.');
+                } catch (e) { toast(e.message, true); }
+            }));
+            // saving one date saves the pair, so both inputs share a handler
+            const saveTerm = async (sid, n) => {
+                const from = document.querySelector(`.st-from[data-school="${sid}"][data-term="${n}"]`).value;
+                const to = document.querySelector(`.st-to[data-school="${sid}"][data-term="${n}"]`).value;
+                if ((from && !to) || (!from && to)) return;   // wait for the pair
+                try {
+                    await api('PUT', `/api/schools/${sid}/terms/${schoolYear()}/${n}`,
+                        { period_start: from, period_end: to });
+                    await reloadSchools();
+                    toast(from ? `Term ${n} saved.` : `Term ${n} cleared.`);
+                } catch (e) { toast(e.message, true); }
+            };
+            document.querySelectorAll('.st-from, .st-to').forEach((inp) => inp.addEventListener('change', () =>
+                saveTerm(inp.getAttribute('data-school'), inp.getAttribute('data-term'))));
+        };
+
         const drawHorses = () => {
             document.getElementById('set-horses').innerHTML = [...state.horses]
                 .sort((a, b) => a.name.localeCompare(b.name)).map((h) => `
@@ -4829,6 +4751,31 @@
                 });
             });
         };
+        drawSchools();
+        document.getElementById('school-add').addEventListener('click', async () => {
+            const overlay = openSubDialog(`
+                <h3 style="margin:0 0 10px">New school</h3>
+                <label>Name</label>
+                <input id="ns-name" autocomplete="off">
+                <div class="form-error"></div>
+                <div class="form-actions">
+                    <button class="secondary" id="ns-cancel">Cancel</button>
+                    <button id="ns-save">Add school</button>
+                </div>`);
+            overlay.querySelector('#ns-cancel').addEventListener('click', () => overlay.remove());
+            overlay.querySelector('#ns-save').addEventListener('click', async () => {
+                const v = overlay.querySelector('#ns-name').value.trim();
+                if (!v) { overlay.querySelector('.form-error').textContent = 'A name is required.'; return; }
+                try {
+                    await api('POST', '/api/schools', { name: v });
+                    state.schools = (await api('GET', '/api/schools')).schools;
+                    overlay.remove();
+                    drawSchools();
+                    toast('School added.');
+                } catch (e) { overlay.querySelector('.form-error').textContent = e.message; }
+            });
+            overlay.querySelector('#ns-name').focus();
+        });
         drawHorses();
         drawGuides();
         drawRideTypes();
@@ -4960,14 +4907,13 @@
         const text = `Hi ${guide.name.split(' ')[0]}, here are your ${count} lesson` +
             `${count === 1 ? '' : 's'} for ${shortDate(from)} – ${shortDate(to)}: ${money(totalCents)}. ` +
             `— ${state.settings.business_name || 'SVSH'}`;
-        const a = document.createElement('a');
-        a.href = `/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}`;
-        a.download = `lessons-${guide.name.replace(/[^a-zA-Z0-9]+/g, '-')}-${from}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.open(`https://wa.me/${num}?text=${encodeURIComponent(text)}`, '_blank');
-        toast('PDF downloaded — attach it in the WhatsApp chat that opened.');
+        openWhatsAppSteps({
+            title: `Send ${guide.name}'s lessons`,
+            fileUrl: `/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}&download=1`,
+            fileName: `lessons-${guide.name.replace(/[^a-zA-Z0-9]+/g, '-')}-${from}.pdf`,
+            number: num,
+            text
+        });
     }
 
     // "650" or "650.50" -> whole cents; blank -> null (not set)
@@ -5043,7 +4989,10 @@
                     </table></div>
                     ${rate ? '' : '<p class="no-parent">No pay per lesson set, so the total is zero.</p>'}
                     <div class="form-actions" style="justify-content:flex-start">
-                        <a class="btn secondary small" href="/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}" target="_blank">⬇ PDF</a>
+                        <a class="btn secondary small" href="/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}"
+                           target="_blank" rel="noopener">View</a>
+                        <a class="btn secondary small" href="/api/guides/${guide.id}/statement.pdf?from=${from}&to=${to}&download=1"
+                           download="lessons-${esc(guide.name.replace(/[^a-zA-Z0-9]+/g, '-'))}-${from}.pdf">⬇ PDF</a>
                         ${waNumber(guide.phone) ? `<button type="button" class="secondary small" id="g-wa">💬 Send</button>` : ''}
                     </div>` : 'No lessons in this month.';
                     const wa = document.getElementById('g-wa');

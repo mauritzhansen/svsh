@@ -334,6 +334,7 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                        FROM contacts k WHERE k.parent_id = c.id AND NOT k.archived) AS children,
                     (SELECT count(*)::int FROM recurring_participants xp
                       WHERE xp.contact_id = c.id) AS fixed_count,
+                    sc.name AS school_name,
                     -- the weekly slots this rider holds, for the contact list
                     (SELECT COALESCE(json_agg(json_build_object(
                             'weekday', rr.weekday, 'start_time', rr.start_time::text,
@@ -351,11 +352,9 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                             'weekday', av.weekday, 'start_time', av.start_time::text,
                             'end_time', av.end_time::text) ORDER BY av.weekday, av.start_time), '[]'::json)
                        FROM contact_availability av WHERE av.contact_id = c.id) AS availability,
-                    (SELECT COALESCE(json_agg(json_build_object(
-                            'period_start', tp.period_start::text, 'period_end', tp.period_end::text)), '[]'::json)
-                       FROM term_passes tp WHERE tp.contact_id = c.id) AS term_passes
                FROM contacts c
                LEFT JOIN contacts p ON p.id = c.parent_id
+               LEFT JOIN schools sc ON sc.id = c.school_id
               WHERE NOT c.archived
               ORDER BY c.name`);
         res.json({ contacts: rows });
@@ -370,10 +369,6 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
             `SELECT c.*, p.name AS parent_name,
                     (SELECT count(*)::int FROM reschedule_credits rc
                       WHERE rc.contact_id = c.id AND rc.used_ride_id IS NULL) AS open_credits,
-                    (SELECT COALESCE(json_agg(json_build_object(
-                            'id', tp.id::text, 'period_start', tp.period_start::text,
-                            'period_end', tp.period_end::text) ORDER BY tp.period_end DESC), '[]'::json)
-                       FROM term_passes tp WHERE tp.contact_id = c.id) AS term_passes,
                     (SELECT COALESCE(json_agg(json_build_object(
                             'horse_id', hp.horse_id::text, 'kind', hp.kind, 'reason', hp.reason,
                             'horse_name', h.name) ORDER BY hp.kind DESC, h.name), '[]'::json)
@@ -488,7 +483,8 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year, is_rider, is_parent, payment_terms } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent, payment_terms,
+                school_id } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
@@ -500,13 +496,14 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
                                    needs_collection, collection_teacher, collection_class,
-                                   is_prospect, birth_year, notes, is_rider, is_parent, payment_terms)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+                                   is_prospect, birth_year, notes, is_rider, is_parent, payment_terms,
+                                   school_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
              !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '',
-             is_rider !== false, !!is_parent, payment_terms || null]);
+             is_rider !== false, !!is_parent, payment_terms || null, school_id || null]);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -519,7 +516,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
     try {
         const { name, phone, email, address, parent_id, experience, notes, archived,
                 needs_collection, collection_teacher, collection_class,
-                is_prospect, birth_year, is_rider, is_parent, payment_terms } = req.body || {};
+                is_prospect, birth_year, is_rider, is_parent, payment_terms,
+                school_id } = req.body || {};
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
@@ -546,7 +544,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 birth_year = CASE WHEN $16 THEN $17::int ELSE birth_year END,
                 is_rider = COALESCE($18, is_rider),
                 is_parent = COALESCE($19, is_parent),
-                payment_terms = CASE WHEN $20 THEN $21 ELSE payment_terms END
+                payment_terms = CASE WHEN $20 THEN $21 ELSE payment_terms END,
+                school_id = CASE WHEN $22 THEN $23::bigint ELSE school_id END
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
@@ -557,7 +556,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
              birth_year !== undefined, Number.isInteger(birth_year) ? birth_year : null,
              typeof is_rider === 'boolean' ? is_rider : null,
              typeof is_parent === 'boolean' ? is_parent : null,
-             payment_terms !== undefined, payment_terms || null]);
+             payment_terms !== undefined, payment_terms || null,
+             school_id !== undefined, school_id || null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
@@ -585,7 +585,6 @@ app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
                        AND (rr.end_date IS NULL OR rr.end_date >= CURRENT_DATE))::int AS fixed,
                     (SELECT count(*) FROM invoices
                       WHERE contact_id = $1 OR rider_contact_id = $1)::int AS invoices,
-                    (SELECT count(*) FROM term_passes WHERE contact_id = $1)::int AS passes,
                     (SELECT count(*) FROM reschedule_credits WHERE contact_id = $1)::int AS credits,
                     (SELECT count(*) FROM horses WHERE owner_contact_id = $1)::int AS horses,
                     (SELECT count(*) FROM contacts WHERE parent_id = $1)::int AS children`,
@@ -596,7 +595,6 @@ app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
         // was never billed can simply be taken off the schedule and removed.
         const hard = [];
         if (r.invoices) hard.push(`${r.invoices} invoice${r.invoices === 1 ? '' : 's'}`);
-        if (r.passes) hard.push('a term pass');
         if (r.credits) hard.push('reschedule credits');
         if (r.horses) hard.push('an owned horse');
         if (r.children) hard.push(`${r.children} rider${r.children === 1 ? '' : 's'} under them`);
@@ -638,6 +636,110 @@ app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
         }
     } catch (err) {
         handleError(res, err, 'Deleting contact');
+    }
+});
+
+// ---------- Schools and their term dates ----------
+// Per-term billing follows the rider's SCHOOL term, and the schools do not
+// share dates — so terms are stored per school per year.
+app.get('/api/schools', requireAuth, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `SELECT s.*, (SELECT COALESCE(json_agg(json_build_object(
+                        'id', t.id::text, 'year', t.year, 'term_no', t.term_no,
+                        'period_start', t.period_start::text, 'period_end', t.period_end::text)
+                        ORDER BY t.year, t.term_no), '[]'::json)
+                    FROM school_terms t WHERE t.school_id = s.id) AS terms,
+                    (SELECT count(*)::int FROM contacts c
+                      WHERE c.school_id = s.id AND NOT c.archived) AS rider_count
+               FROM schools s ORDER BY s.sort_order, s.name`);
+        res.json({ schools: rows });
+    } catch (err) {
+        handleError(res, err, 'Loading schools');
+    }
+});
+
+app.post('/api/schools', requireRole('helper'), async (req, res) => {
+    try {
+        const name = String((req.body || {}).name || '').trim();
+        if (!name) return res.status(400).json({ error: 'A school name is required.' });
+        const { rows } = await pool.query(
+            `INSERT INTO schools (name, sort_order)
+             VALUES ($1, COALESCE((SELECT MAX(sort_order) + 1 FROM schools), 1)) RETURNING *`, [name]);
+        res.json({ school: rows[0] });
+    } catch (err) {
+        if (err.code === '23505') return res.status(400).json({ error: 'That school already exists.' });
+        handleError(res, err, 'Creating school');
+    }
+});
+
+app.put('/api/schools/:id', requireRole('helper'), async (req, res) => {
+    try {
+        const { name, active } = req.body || {};
+        const { rows } = await pool.query(
+            `UPDATE schools SET name = COALESCE($2, name), active = COALESCE($3, active)
+              WHERE id = $1 RETURNING *`,
+            [req.params.id, name ? String(name).trim() : null,
+             typeof active === 'boolean' ? active : null]);
+        if (!rows[0]) return res.status(404).json({ error: 'School not found.' });
+        res.json({ school: rows[0] });
+    } catch (err) {
+        if (err.code === '23505') return res.status(400).json({ error: 'That school already exists.' });
+        handleError(res, err, 'Updating school');
+    }
+});
+
+app.delete('/api/schools/:id', requireRole('helper'), async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            'SELECT count(*)::int AS n FROM contacts WHERE school_id = $1 AND NOT archived',
+            [req.params.id]);
+        if (rows[0].n) {
+            return res.status(409).json({
+                error: `${rows[0].n} rider${rows[0].n === 1 ? ' is' : 's are'} at this school. ` +
+                       'Move them first, or mark the school inactive instead.'
+            });
+        }
+        const { rowCount } = await pool.query('DELETE FROM schools WHERE id = $1', [req.params.id]);
+        if (!rowCount) return res.status(404).json({ error: 'School not found.' });
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Deleting school');
+    }
+});
+
+// Save one term's dates. Re-saving the same school/year/term overwrites it.
+app.put('/api/schools/:id/terms/:year/:term', requireRole('helper'), async (req, res) => {
+    try {
+        const year = Number(req.params.year), term = Number(req.params.term);
+        if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+            return res.status(400).json({ error: 'A valid year is required.' });
+        }
+        if (!Number.isInteger(term) || term < 1 || term > 4) {
+            return res.status(400).json({ error: 'The term must be 1, 2, 3 or 4.' });
+        }
+        const { period_start, period_end } = req.body || {};
+        // empty dates clear the term
+        if (!period_start && !period_end) {
+            await pool.query(
+                'DELETE FROM school_terms WHERE school_id = $1 AND year = $2 AND term_no = $3',
+                [req.params.id, year, term]);
+            return res.json({ ok: true, cleared: true });
+        }
+        if (!DATE_RE.test(period_start || '') || !DATE_RE.test(period_end || '') ||
+            period_start > period_end) {
+            return res.status(400).json({ error: 'Both dates are required, and the start must come first.' });
+        }
+        const { rows } = await pool.query(
+            `INSERT INTO school_terms (school_id, year, term_no, period_start, period_end)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (school_id, year, term_no)
+             DO UPDATE SET period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end
+             RETURNING *`,
+            [req.params.id, year, term, period_start, period_end]);
+        res.json({ term: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Saving term dates');
     }
 });
 
@@ -1421,9 +1523,6 @@ async function fetchRides(from, to) {
         `SELECT rp.*, h.name AS horse_name, ah.name AS alt_horse_name, c.name AS contact_name,
                 c.needs_collection, c.collection_teacher, c.collection_class,
                 (il.id IS NOT NULL) AS invoiced,
-                EXISTS (SELECT 1 FROM term_passes tp
-                         WHERE tp.contact_id = rp.contact_id
-                           AND r.date BETWEEN tp.period_start AND tp.period_end) AS in_pass_period,
                 EXISTS (SELECT 1 FROM reschedule_credits rc
                          WHERE rc.used_ride_id = rp.ride_id AND rc.contact_id = rp.contact_id) AS credit_used
            FROM ride_participants rp
@@ -2103,13 +2202,7 @@ function monthRange(month) {
 // pass spans the ride date AND the seat is a fixed lesson (from the weekly
 // template) or a reschedule make-up. Extra ad-hoc bookings stay billable.
 // Requires table aliases rp (ride_participants) and r (rides).
-const NOT_PASS_COVERED_SQL = `NOT (
-    EXISTS (SELECT 1 FROM term_passes tp
-             WHERE tp.contact_id = rp.contact_id
-               AND r.date BETWEEN tp.period_start AND tp.period_end)
-    AND (rp.from_recurring
-         OR EXISTS (SELECT 1 FROM reschedule_credits rc
-                     WHERE rc.used_ride_id = r.id AND rc.contact_id = rp.contact_id)))`;
+const NOT_PASS_COVERED_SQL = `TRUE`;   // term passes were removed; nothing is pre-covered
 
 // Per-contact summary of booked, not-yet-invoiced rides in a month
 // Which advance months still owe invoices? An advance run is only "done" when
@@ -2147,6 +2240,68 @@ app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, 
         res.json({ months: out });
     } catch (err) {
         handleError(res, err, 'Loading advance status');
+    }
+});
+
+// Per-term billing, grouped by school: each school's own term dates decide the
+// period, so one "Term 3 2026" run bills three different date ranges correctly.
+app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) => {
+    try {
+        const year = Number(req.query.year), term = Number(req.query.term);
+        if (!Number.isInteger(year) || year < 2000 || year > 2100 ||
+            !Number.isInteger(term) || term < 1 || term > 4) {
+            return res.status(400).json({ error: 'A valid year and term (1–4) are required.' });
+        }
+        const { rows: schools } = await pool.query(
+            `SELECT s.id, s.name, t.period_start::text AS period_start, t.period_end::text AS period_end
+               FROM schools s
+               LEFT JOIN school_terms t
+                      ON t.school_id = s.id AND t.year = $1 AND t.term_no = $2
+              WHERE s.active ORDER BY s.sort_order, s.name`,
+            [year, term]);
+
+        const groups = [];
+        for (const s of schools) {
+            if (!s.period_start) {
+                groups.push({ ...s, no_dates: true, rows: [] });
+                continue;
+            }
+            await materializeRecurring(s.period_start, s.period_end);
+            const { rows } = await pool.query(
+                `SELECT rider.id AS contact_id, rider.name, payer.name AS payer_name,
+                        payer.payment_terms,
+                        count(*)::int AS ride_count,
+                        SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents,
+                        count(*) FILTER (WHERE r.ride_type_id IS NULL
+                                           AND r.ride_type_name IS NULL)::int AS untyped_rides
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id
+                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE r.date BETWEEN $1 AND $2
+                    AND NOT rider.archived
+                    AND rider.school_id = $3
+                    AND payer.payment_terms = 'advance_term'
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                  GROUP BY rider.id, rider.name, payer.name, payer.payment_terms
+                  ORDER BY rider.name`,
+                [s.period_start, s.period_end, s.id]);
+            groups.push({ ...s, no_dates: false, rows });
+        }
+
+        // Per-term riders with no school cannot be placed in any term at all
+        const { rows: noSchool } = await pool.query(
+            `SELECT rider.id AS contact_id, rider.name, payer.name AS payer_name
+               FROM contacts rider
+               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+              WHERE NOT rider.archived AND rider.is_rider
+                AND payer.payment_terms = 'advance_term'
+                AND rider.school_id IS NULL
+              ORDER BY rider.name`);
+        res.json({ year, term, groups, no_school: noSchool });
+    } catch (err) {
+        handleError(res, err, 'Loading term overview');
     }
 });
 
@@ -2302,139 +2457,13 @@ app.post('/api/invoices', requireRole('helper'), async (req, res) => {
 });
 
 // ---------- Term passes (invoice in advance) ----------
-app.get('/api/term-passes', requireRole('helper'), async (req, res) => {
-    try {
-        const { rows } = await pool.query(
-            `SELECT tp.*, c.name AS contact_name,
-                    i.number AS invoice_number, i.status AS invoice_status, i.total_cents,
-                    (SELECT il.description FROM invoice_lines il
-                      WHERE il.invoice_id = i.id ORDER BY il.id LIMIT 1) AS invoice_line,
-                    (SELECT count(*)::int FROM ride_participants rp
-                      JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-                     WHERE rp.contact_id = tp.contact_id
-                       AND r.date BETWEEN tp.period_start AND LEAST(tp.period_end, CURRENT_DATE)
-                       AND (rp.from_recurring OR EXISTS (SELECT 1 FROM reschedule_credits rc
-                             WHERE rc.used_ride_id = r.id AND rc.contact_id = rp.contact_id))) AS lessons_so_far
-               FROM term_passes tp
-               JOIN contacts c ON c.id = tp.contact_id
-               LEFT JOIN invoices i ON i.id = tp.invoice_id
-              ORDER BY tp.period_end DESC, c.name`);
-        res.json({ passes: rows });
-    } catch (err) {
-        handleError(res, err, 'Loading term passes');
-    }
-});
 
 // Creates the pass and its up-front ('advance') invoice in one go.
 // The invoice goes to the payer (parent when set), like all invoices.
-app.post('/api/term-passes', requireRole('helper'), async (req, res) => {
-    const client = await pool.connect();
-    try {
-        const { contact_id, period_start, period_end, amount_cents, description } = req.body || {};
-        if (!contact_id || !DATE_RE.test(period_start || '') || !DATE_RE.test(period_end || '') ||
-            period_start > period_end) {
-            return res.status(400).json({ error: 'Rider and a valid period are required.' });
-        }
-        if (!Number.isInteger(amount_cents) || amount_cents <= 0) {
-            return res.status(400).json({ error: 'A price is required.' });
-        }
-        const { rows: riderRows } = await pool.query(
-            'SELECT id, name, parent_id FROM contacts WHERE id = $1', [contact_id]);
-        if (!riderRows[0]) return res.status(404).json({ error: 'Rider not found.' });
-        const rider = riderRows[0];
-        const payerId = rider.parent_id || rider.id;
-
-        await client.query('BEGIN');
-        const year = period_start.slice(0, 4);
-        const { rows: numRows } = await client.query(
-            `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
-               FROM invoices WHERE number LIKE $1`, [`INV-${year}-%`]);
-        const number = `INV-${year}-${String(numRows[0].next).padStart(4, '0')}`;
-        const desc = String(description || '').trim() ||
-            `Term fee ${rider.name}: fixed lessons ${period_start} to ${period_end}`;
-        const { rows: invRows } = await client.query(
-            `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
-             VALUES ($1, $2, $3, $4, $5, 'advance', $6) RETURNING *`,
-            [number, payerId, contact_id, period_start, period_end, amount_cents]);
-        await client.query(
-            `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
-             VALUES ($1, $2, $3, $4)`,
-            [invRows[0].id, desc, period_start, amount_cents]);
-        const { rows: passRows } = await client.query(
-            `INSERT INTO term_passes (contact_id, period_start, period_end, invoice_id)
-             VALUES ($1, $2, $3, $4) RETURNING *`,
-            [contact_id, period_start, period_end, invRows[0].id]);
-        await client.query('COMMIT');
-        res.json({ pass: passRows[0], invoice: invRows[0] });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        handleError(res, err, 'Creating term pass');
-    } finally {
-        client.release();
-    }
-});
 
 // Edit a term pass and its advance invoice together, while the invoice is
 // still a draft (period, amount and the line text). Anything already sent or
 // paid is refused — issue a separate invoice for the difference instead.
-app.put('/api/term-passes/:id', requireRole('helper'), async (req, res) => {
-    const client = await pool.connect();
-    try {
-        const { rows } = await pool.query(
-            `SELECT tp.*, i.status AS invoice_status, i.number AS invoice_number,
-                    c.name AS contact_name
-               FROM term_passes tp
-               JOIN contacts c ON c.id = tp.contact_id
-               LEFT JOIN invoices i ON i.id = tp.invoice_id
-              WHERE tp.id = $1`, [req.params.id]);
-        const pass = rows[0];
-        if (!pass) return res.status(404).json({ error: 'Term pass not found.' });
-        if (pass.invoice_id && pass.invoice_status !== 'draft') {
-            return res.status(400).json({
-                error: `${pass.invoice_number} is already marked ${pass.invoice_status} and cannot be changed. ` +
-                       'Issue a separate invoice for the difference instead.'
-            });
-        }
-        const { period_start, period_end, amount_cents, description } = req.body || {};
-        if (!DATE_RE.test(period_start || '') || !DATE_RE.test(period_end || '') || period_start > period_end) {
-            return res.status(400).json({ error: 'A valid period is required.' });
-        }
-        if (!Number.isInteger(amount_cents) || amount_cents <= 0) {
-            return res.status(400).json({ error: 'A price is required.' });
-        }
-
-        await client.query('BEGIN');
-        await client.query(
-            'UPDATE term_passes SET period_start = $2, period_end = $3 WHERE id = $1',
-            [pass.id, period_start, period_end]);
-        if (pass.invoice_id) {
-            await client.query(
-                `UPDATE invoices SET period_start = $2, period_end = $3, total_cents = $4
-                  WHERE id = $1`,
-                [pass.invoice_id, period_start, period_end, amount_cents]);
-            const desc = String(description || '').trim() ||
-                `Term fee ${pass.contact_name}: fixed lessons ${period_start} to ${period_end}`;
-            // the advance invoice always has exactly one line
-            const { rowCount } = await client.query(
-                `UPDATE invoice_lines SET description = $2, ride_date = $3, amount_cents = $4
-                  WHERE invoice_id = $1`,
-                [pass.invoice_id, desc, period_start, amount_cents]);
-            if (!rowCount) {
-                await client.query(
-                    `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
-                     VALUES ($1, $2, $3, $4)`,
-                    [pass.invoice_id, desc, period_start, amount_cents]);
-            }
-        }
-        await client.query('COMMIT');
-        res.json({ ok: true });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        handleError(res, err, 'Updating the term pass');
-    } finally {
-        client.release();
-    }
-});
 
 // Bulk: one pass + advance invoice for EVERY rider with fixed lessons in the
 // period, priced per planned lesson (so 2×/week riders pay double and
@@ -2443,138 +2472,10 @@ app.put('/api/term-passes/:id', requireRole('helper'), async (req, res) => {
 // Who is on per-term billing but has no pass covering the period? The term-pass
 // card cannot infer a term the way the monthly runs infer a month, so without
 // this it just says "no term passes yet" and never tells you who is missing one.
-app.get('/api/term-passes/outstanding', requireRole('helper'), async (req, res) => {
-    try {
-        const on = DATE_RE.test(req.query.on || '') ? req.query.on : null;
-        const { rows } = await pool.query(
-            `SELECT DISTINCT rider.id::text AS contact_id, rider.name, payer.name AS payer_name
-               FROM recurring_participants xp
-               JOIN recurring_rides rr ON rr.id = xp.recurring_id
-               JOIN contacts rider ON rider.id = xp.contact_id
-               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-              WHERE NOT rider.archived AND rr.active
-                AND (rr.end_date IS NULL OR rr.end_date >= COALESCE($1::date, CURRENT_DATE))
-                AND payer.payment_terms = 'advance_term'
-                AND NOT EXISTS (
-                    SELECT 1 FROM term_passes tp
-                     WHERE tp.contact_id = rider.id
-                       AND COALESCE($1::date, CURRENT_DATE) BETWEEN tp.period_start AND tp.period_end)
-              ORDER BY rider.name`,
-            [on]);
-        res.json({ riders: rows, on: on || null });
-    } catch (err) {
-        handleError(res, err, 'Loading outstanding term passes');
-    }
-});
 
-app.post('/api/term-passes/bulk', requireRole('helper'), async (req, res) => {
-    const client = await pool.connect();
-    try {
-        const { period_start, period_end, price_per_lesson_cents, dry_run } = req.body || {};
-        if (!DATE_RE.test(period_start || '') || !DATE_RE.test(period_end || '') || period_start > period_end) {
-            return res.status(400).json({ error: 'A valid period is required.' });
-        }
-        if (datesInRange(period_start, period_end).length > 366) {
-            return res.status(400).json({ error: 'Period too large (max 1 year).' });
-        }
-        const price = Number.isInteger(price_per_lesson_cents) ? price_per_lesson_cents : 0;
-        if (!dry_run && price <= 0) return res.status(400).json({ error: 'A price per lesson is required.' });
-
-        const { rows: templates } = await pool.query(
-            `SELECT id, weekday, start_date, end_date FROM recurring_rides
-              WHERE active AND start_date <= $2 AND (end_date IS NULL OR end_date >= $1)`,
-            [period_start, period_end]);
-        const { rows: parts } = templates.length ? await pool.query(
-            `SELECT rp.recurring_id, rp.contact_id, rp.frequency, rp.biweekly_anchor,
-                    rp.start_date, c.name, c.parent_id
-               FROM recurring_participants rp
-               JOIN contacts c ON c.id = rp.contact_id
-               -- only riders whose payer actually pays per term; the monthly and
-               -- in-arrears riders are billed by their own runs
-               JOIN contacts payer ON payer.id = COALESCE(c.parent_id, c.id)
-              WHERE rp.contact_id IS NOT NULL AND rp.recurring_id = ANY($1::bigint[])
-                AND NOT c.archived AND payer.payment_terms = 'advance_term'`,
-            [templates.map((t) => t.id)]) : { rows: [] };
-        const tplById = {};
-        templates.forEach((t) => { tplById[t.id] = t; });
-        const dates = datesInRange(period_start, period_end);
-        const perContact = {};
-        for (const p of parts) {
-            const t = tplById[p.recurring_id];
-            let n = 0;
-            for (const date of dates) {
-                if (isoWeekday(date) !== t.weekday) continue;
-                if (date < t.start_date || (t.end_date && date > t.end_date)) continue;
-                if (p.start_date && date < p.start_date) continue;
-                if (p.frequency === 'biweekly') {
-                    const w = weeksBetween(p.biweekly_anchor || t.start_date, date);
-                    if (w < 0 || w % 2 !== 0) continue;
-                }
-                n++;
-            }
-            if (!n) continue;
-            const entry = perContact[p.contact_id] =
-                perContact[p.contact_id] || { name: p.name, parent_id: p.parent_id, lessons: 0 };
-            entry.lessons += n;
-        }
-        const { rows: existing } = await pool.query(
-            'SELECT contact_id FROM term_passes WHERE period_start <= $2 AND period_end >= $1',
-            [period_start, period_end]);
-        const hasPass = new Set(existing.map((e) => String(e.contact_id)));
-        const preview = Object.entries(perContact).map(([cid, v]) => ({
-            contact_id: cid, name: v.name, lessons: v.lessons,
-            amount_cents: v.lessons * price,
-            skipped: hasPass.has(String(cid))
-        })).sort((a, b) => a.name.localeCompare(b.name));
-        if (dry_run) return res.json({ preview });
-
-        await client.query('BEGIN');
-        let created = 0;
-        const year = period_start.slice(0, 4);
-        for (const row of preview) {
-            if (row.skipped) continue;
-            const { rows: numRows } = await client.query(
-                `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
-                   FROM invoices WHERE number LIKE $1`, [`INV-${year}-%`]);
-            const number = `INV-${year}-${String(numRows[0].next).padStart(4, '0')}`;
-            const payerId = perContact[row.contact_id].parent_id || row.contact_id;
-            const { rows: invRows } = await client.query(
-                `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
-                 VALUES ($1, $2, $3, $4, $5, 'advance', $6) RETURNING id`,
-                [number, payerId, row.contact_id, period_start, period_end, row.amount_cents]);
-            await client.query(
-                `INSERT INTO invoice_lines (invoice_id, description, ride_date, amount_cents)
-                 VALUES ($1, $2, $3, $4)`,
-                [invRows[0].id,
-                 `Term fee ${row.name}: ${row.lessons} fixed lessons ${period_start} to ${period_end}`,
-                 period_start, row.amount_cents]);
-            await client.query(
-                `INSERT INTO term_passes (contact_id, period_start, period_end, invoice_id)
-                 VALUES ($1, $2, $3, $4)`,
-                [row.contact_id, period_start, period_end, invRows[0].id]);
-            created++;
-        }
-        await client.query('COMMIT');
-        res.json({ created, skipped: preview.length - created });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        handleError(res, err, 'Creating term passes');
-    } finally {
-        client.release();
-    }
-});
 
 // Deleting a pass makes its fixed lessons billable again. The advance invoice
 // is left alone — delete it separately if it was created in error.
-app.delete('/api/term-passes/:id', requireRole('helper'), async (req, res) => {
-    try {
-        const { rowCount } = await pool.query('DELETE FROM term_passes WHERE id = $1', [req.params.id]);
-        if (!rowCount) return res.status(404).json({ error: 'Term pass not found.' });
-        res.json({ ok: true });
-    } catch (err) {
-        handleError(res, err, 'Deleting term pass');
-    }
-});
 
 // ---------- Automatic month-end invoicing ----------
 // Once a month is over, every contact with uninvoiced booked rides in it gets
@@ -2802,7 +2703,8 @@ app.get('/api/guides/:id/statement.pdf', requireRole('helper'), async (req, res)
         const settings = await loadSettings();
         const safe = guide.name.replace(/[^a-zA-Z0-9]+/g, '-');
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="lessons-${safe}-${from}.pdf"`);
+        res.setHeader('Content-Disposition',
+            `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="lessons-${safe}-${from}.pdf"`);
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
         doc.pipe(res);
         drawGuideStatement(doc, guide, rides, from, to, settings);
@@ -2830,7 +2732,10 @@ app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
         const settings = await loadSettings();
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
+        // ?download=1 saves the file instead of taking over the screen — an
+        // inline PDF has no back button in a standalone/installed window.
+        res.setHeader('Content-Disposition',
+            `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${inv.number}.pdf"`);
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
         doc.pipe(res);
         drawInvoicePage(doc, inv, lines, settings);
