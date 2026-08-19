@@ -476,6 +476,11 @@ function paymentTermsError(body) {
     if (is_parent === true && !payment_terms) {
         return 'Choose how this parent pays before saving.';
     }
+    // Per-term invoices are billed over the school's term dates, so a payer on
+    // that arrangement must name a school.
+    if (payment_terms === 'advance_term' && (body || {}).school_id === null) {
+        return 'Pick the school — per-term invoices need its term dates.';
+    }
     return null;
 }
 
@@ -1945,6 +1950,23 @@ app.get('/api/credits', requireAuth, async (req, res) => {
     }
 });
 
+// Drop one unused credit for a contact — a credit raised in error would
+// otherwise sit in the calendar bar for ever with no way to clear it.
+app.delete('/api/credits/:contactId', requireAuth, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `DELETE FROM reschedule_credits
+              WHERE id = (SELECT id FROM reschedule_credits
+                           WHERE contact_id = $1 AND used_ride_id IS NULL
+                           ORDER BY created_at LIMIT 1)
+             RETURNING id`, [req.params.contactId]);
+        if (!rows[0]) return res.status(404).json({ error: 'No open credit for that rider.' });
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Removing reschedule credit');
+    }
+});
+
 app.post('/api/credits', requireAuth, async (req, res) => {
     try {
         const { contact_id, note } = req.body || {};
@@ -2268,24 +2290,38 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
             }
             await materializeRecurring(s.period_start, s.period_end);
             const { rows } = await pool.query(
-                `SELECT rider.id AS contact_id, rider.name, payer.name AS payer_name,
+                `WITH seats AS (
+                     SELECT rp.id, rider.name AS rider_name,
+                            COALESCE(rider.parent_id, rider.id) AS payer_id,
+                            r.date, r.ride_type_id, r.ride_type_name,
+                            COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                       FROM ride_participants rp
+                       JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                       JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+                       JOIN contacts p2 ON p2.id = COALESCE(rider.parent_id, rider.id)
+                       LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                      WHERE r.date BETWEEN $1 AND $2
+                        AND COALESCE(rider.school_id, p2.school_id) = $3
+                        AND p2.payment_terms = 'advance_term'
+                        AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                 )
+                 SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
                         payer.payment_terms,
                         count(*)::int AS ride_count,
-                        SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents,
-                        count(*) FILTER (WHERE r.ride_type_id IS NULL
-                                           AND r.ride_type_name IS NULL)::int AS untyped_rides
-                   FROM ride_participants rp
-                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-                   JOIN contacts rider ON rider.id = rp.contact_id
-                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                  WHERE r.date BETWEEN $1 AND $2
-                    AND NOT rider.archived
-                    AND rider.school_id = $3
-                    AND payer.payment_terms = 'advance_term'
-                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
-                  GROUP BY rider.id, rider.name, payer.name, payer.payment_terms
-                  ORDER BY rider.name`,
+                        SUM(s.cents)::int AS total_cents,
+                        count(*) FILTER (WHERE s.ride_type_id IS NULL
+                                           AND s.ride_type_name IS NULL)::int AS untyped_rides,
+                        (SELECT json_agg(x ORDER BY x->>'name')
+                           FROM (SELECT json_build_object(
+                                        'name', s2.rider_name,
+                                        'count', count(*),
+                                        'dates', json_agg(s2.date::text ORDER BY s2.date)) AS x
+                                   FROM seats s2 WHERE s2.payer_id = payer.id
+                                  GROUP BY s2.rider_name) q) AS riders
+                   FROM seats s
+                   JOIN contacts payer ON payer.id = s.payer_id
+                  GROUP BY payer.id, payer.name, payer.payment_terms
+                  ORDER BY payer.name`,
                 [s.period_start, s.period_end, s.id]);
             groups.push({ ...s, no_dates: false, rows });
         }
@@ -2297,7 +2333,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
               WHERE NOT rider.archived AND rider.is_rider
                 AND payer.payment_terms = 'advance_term'
-                AND rider.school_id IS NULL
+                AND rider.school_id IS NULL AND payer.school_id IS NULL
               ORDER BY rider.name`);
         res.json({ year, term, groups, no_school: noSchool });
     } catch (err) {
@@ -2326,31 +2362,41 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
             }
         }
         await materializeRecurring(from, to);
-        // One row per RIDER (invoices are per rider); the payer is shown for context
+        // One row per PAYER, since that is who gets the invoice, with a rider
+        // breakdown so the row can show who is on it and on which dates.
         const { rows } = await pool.query(
-            `SELECT rider.id AS contact_id, rider.name,
-                    payer.name AS payer_name, payer.id AS payer_id,
-                    payer.payment_terms,
+            `WITH seats AS (
+                 SELECT rp.id, rp.contact_id, rider.name AS rider_name,
+                        COALESCE(rider.parent_id, rider.id) AS payer_id,
+                        r.date, r.ride_type_id, r.ride_type_name,
+                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE r.date BETWEEN $1 AND $2
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                    AND ${NOT_PASS_COVERED_SQL}
+             )
+             SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
+                    payer.payment_terms, payer.school_id,
                     count(*)::int AS ride_count,
-                    SUM(COALESCE(rp.price_cents, rt.price_cents, 0))::int AS total_cents,
-                    -- cash is handed over after the lesson, so only rides that
-                    -- have actually happened can be billed
-                    -- rides with no type have no price, so they silently bill as zero
-                    count(*) FILTER (WHERE r.ride_type_id IS NULL
-                                       AND r.ride_type_name IS NULL)::int AS untyped_rides,
-                    count(*) FILTER (WHERE r.date <= CURRENT_DATE)::int AS past_rides,
-                    COALESCE(SUM(COALESCE(rp.price_cents, rt.price_cents, 0))
-                             FILTER (WHERE r.date <= CURRENT_DATE), 0)::int AS past_cents
-               FROM ride_participants rp
-               JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-               JOIN contacts rider ON rider.id = rp.contact_id
-               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-               LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-              WHERE r.date BETWEEN $1 AND $2
-                AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
-                AND ${NOT_PASS_COVERED_SQL}
-              GROUP BY rider.id, rider.name, payer.name, payer.id, payer.payment_terms
-              ORDER BY rider.name`,
+                    SUM(s.cents)::int AS total_cents,
+                    count(*) FILTER (WHERE s.ride_type_id IS NULL
+                                       AND s.ride_type_name IS NULL)::int AS untyped_rides,
+                    count(*) FILTER (WHERE s.date <= CURRENT_DATE)::int AS past_rides,
+                    COALESCE(SUM(s.cents) FILTER (WHERE s.date <= CURRENT_DATE), 0)::int AS past_cents,
+                    (SELECT json_agg(x ORDER BY x->>'name')
+                       FROM (SELECT json_build_object(
+                                    'name', s2.rider_name,
+                                    'count', count(*),
+                                    'dates', json_agg(s2.date::text ORDER BY s2.date)) AS x
+                               FROM seats s2 WHERE s2.payer_id = payer.id
+                              GROUP BY s2.rider_name) q) AS riders
+               FROM seats s
+               JOIN contacts payer ON payer.id = s.payer_id
+              GROUP BY payer.id, payer.name, payer.payment_terms, payer.school_id
+              ORDER BY payer.name`,
             [from, to]);
         res.json({ overview: rows, from, to });
     } catch (err) {
@@ -2385,7 +2431,9 @@ async function createInvoiceForContact(contactId, from, to) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        // Per-rider invoice: only this rider's rides, billed to their payer
+        // One invoice per PAYER: every rider they pay for, on one document —
+        // their children plus themselves if they ride too. contactId may be any
+        // of those people; the payer is resolved from it.
         const { rows: riderRows } = await client.query(
             'SELECT id, name, parent_id FROM contacts WHERE id = $1', [contactId]);
         if (!riderRows[0]) {
@@ -2394,24 +2442,28 @@ async function createInvoiceForContact(contactId, from, to) {
         }
         const payerId = riderRows[0].parent_id || riderRows[0].id;
         const { rows: rides } = await client.query(
-            `SELECT rp.id, r.date, r.start_time, h.name AS horse_name,
+            `SELECT rp.id, rp.contact_id, c.name AS rider_name, r.date, r.start_time,
                     COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
                     COALESCE(rp.price_cents, rt.price_cents, 0)::int AS amount_cents
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-               LEFT JOIN horses h ON h.id = rp.horse_id
+               JOIN contacts c ON c.id = rp.contact_id
                LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-              WHERE rp.contact_id = $1
+              WHERE COALESCE(c.parent_id, c.id) = $1
+                AND NOT c.archived
                 AND r.date BETWEEN $2 AND $3
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
-              ORDER BY r.date, r.start_time
+              ORDER BY c.name, r.date, r.start_time
               FOR UPDATE OF rp`,
-            [contactId, from, to]);
+            [payerId, from, to]);
         if (!rides.length) {
             await client.query('ROLLBACK');
             return null;
         }
+        // rider_contact_id only means something on a single-rider invoice
+        const riderIds = [...new Set(rides.map((r) => String(r.contact_id)))];
+        const soleRider = riderIds.length === 1 ? riderIds[0] : null;
         const year = from.slice(0, 4);
         const { rows: numRows } = await client.query(
             `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
@@ -2421,18 +2473,25 @@ async function createInvoiceForContact(contactId, from, to) {
         const { rows: invRows } = await client.query(
             `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
              VALUES ($1, $2, $3, $4, $5, 'monthly', $6) RETURNING *`,
-            [number, payerId, contactId, from, to, total]);
+            [number, payerId, soleRider, from, to, total]);
         for (const r of rides) {
             await client.query(
                 `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
                  VALUES ($1, $2, $3, $4, $5)`,
                 [invRows[0].id, r.id,
-                 // the horse is a stable-side detail; the payer only needs the lesson
-                 `${r.ride_type_name} at ${String(r.start_time).slice(0, 5)}`,
+                 // name the rider on every line when the invoice covers several,
+                 // so the payer can see what each child cost
+                 `${soleRider ? '' : r.rider_name + ' — '}${r.ride_type_name} at ${String(r.start_time).slice(0, 5)}`,
                  r.date, r.amount_cents]);
         }
         await client.query('COMMIT');
-        return { invoice: invRows[0], line_count: rides.length };
+        // Return the invoice the way the list shows it — with the payer's name
+        // and phone and its line count — so the caller can render it without
+        // re-fetching the whole page.
+        const { rows: full } = await pool.query(
+            `${INVOICE_WITH_CONTACT_SQL} WHERE i.id = $1`, [invRows[0].id]);
+        const invoice = { ...(full[0] || invRows[0]), line_count: rides.length };
+        return { invoice, line_count: rides.length, riders: riderIds.length };
     } catch (err) {
         await client.query('ROLLBACK');
         throw err;

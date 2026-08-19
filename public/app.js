@@ -801,12 +801,29 @@
         bar.className = 'credit-bar';
         bar.innerHTML = `<span>⟳ <b>${total} ride${total === 1 ? '' : 's'}</b> to be rescheduled —
             tap a name to put them on a ride today:</span>` +
-            credits.map((c) => `<button type="button" class="chip credit-chip" data-credit="${c.contact_id}">
-                ${esc(c.name)}${c.count > 1 ? ` <span class="chip-level">×${c.count}</span>` : ''}
-            </button>`).join('');
+            credits.map((c) => `<span class="credit-item">
+                <button type="button" class="chip credit-chip" data-credit="${c.contact_id}">
+                    ${esc(c.name)}${c.count > 1 ? ` <span class="chip-level">×${c.count}</span>` : ''}
+                </button>
+                <button type="button" class="credit-drop" data-drop="${c.contact_id}" data-name="${esc(c.name)}"
+                        title="Remove this credit — raised by mistake">${ICON_X}</button>
+            </span>`).join('');
         bar.querySelectorAll('[data-credit]').forEach((btn) => btn.addEventListener('click', () => {
             const credit = credits.find((c) => String(c.contact_id) === btn.getAttribute('data-credit'));
             if (credit) openReschedulePicker(credit, date, dayRides);
+        }));
+        bar.querySelectorAll('[data-drop]').forEach((btn) => btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-name');
+            if (!await askConfirm(`Remove ${name}'s reschedule credit?`,
+                'Use this when the credit was raised by mistake. It does not give them a ride.',
+                'Remove the credit')) return;
+            try {
+                await api('DELETE', `/api/credits/${btn.getAttribute('data-drop')}`);
+                toast(`${name}'s credit removed.`);
+                renderCalendar();
+            } catch (err) {
+                toast(err.message, true);
+            }
         }));
     }
 
@@ -3112,9 +3129,10 @@
 
     // Rider ticked -> they may have a parent who pays. Parent ticked -> they can
     // have riders hung underneath them. Both is fine (a parent who also rides).
-    // A rider is billed under their payer's arrangement: their own if they pay
-    // their way, otherwise the linked parent's.
-    function payerTermsFor(contact, ownTerms, paysParent) {
+    // Which arrangement actually applies to this contact? A parent uses their
+    // own; a rider uses their parent's when the parent pays, otherwise theirs.
+    function effectivePayerTerms(contact, ownTerms, isParent, paysParent) {
+        if (isParent) return ownTerms || null;
         if (paysParent) {
             const sel = document.getElementById('ct-parent');
             const payer = sel && contactById(sel.value);
@@ -3158,14 +3176,20 @@
             // Terms are for whoever the invoice actually lands on
             const selfPays = !canHaveParent || paysOwn.checked;
             termsWrap.classList.toggle('hidden', !(parent.checked || hasKids || selfPays));
-            // The school decides a per-term rider's invoice period, so it is
-            // required for them; other riders may still record it.
+            // The school decides the per-term invoice period. It is asked of
+            // whoever is on per-term billing — a rider paying their own way, or
+            // the parent (their riders inherit it) — because that is where the
+            // arrangement is chosen.
             const schoolWrap = document.getElementById('ct-school-wrap');
-            const perTerm = payerTermsFor(contact, termsSel.value, paysParent.checked);
-            schoolWrap.classList.toggle('hidden', !rider.checked);
+            const perTerm = effectivePayerTerms(contact, termsSel.value,
+                parent.checked || hasKids, canHaveParent && paysParent.checked);
+            schoolWrap.classList.toggle('hidden', false);
             schoolWrap.classList.toggle('needs-school',
                 perTerm === 'advance_term' && !document.getElementById('ct-school').value);
             document.getElementById('ct-school-req').classList.toggle('hidden', perTerm !== 'advance_term');
+            document.getElementById('ct-school-note').textContent = perTerm === 'advance_term'
+                ? "Required — per-term invoices use this school's term dates."
+                : "Optional. Only used for per-term invoicing.";
         };
         const termsSel = document.getElementById('ct-terms');
         termsSel.addEventListener('change', sync);
@@ -3411,8 +3435,10 @@
             return null;
         }
         const paysParentEl0 = document.getElementById('ct-pays-parent');
-        const effTerms = payerTermsFor(contact, body.payment_terms, paysParentEl0 && paysParentEl0.checked);
-        if (body.is_rider && effTerms === 'advance_term' && !body.school_id) {
+        const parentWrapHidden = document.getElementById('ct-parent-wrap').classList.contains('hidden');
+        const effTerms = effectivePayerTerms(contact, body.payment_terms, body.is_parent,
+            !parentWrapHidden && paysParentEl0 && paysParentEl0.checked);
+        if (effTerms === 'advance_term' && !body.school_id) {
             dialogError('Pick the school — per-term invoices need its term dates.');
             return null;
         }
@@ -3689,6 +3715,17 @@
         });
     }
 
+    // Who is on this payer's invoice and which days they rode — compact enough
+    // to sit under the name without turning the table into a wall.
+    function riderSummaryHtml(row) {
+        const riders = row.riders || [];
+        if (!riders.length) return '';
+        return `<div class="rider-summary">${riders.map((r) => `
+            <span class="rs-rider"><b>${esc(r.name)}</b>
+                <span class="rs-dates">${r.dates.map((d) => esc(shortDate(d))).join(', ')}</span>
+            </span>`).join('')}</div>`;
+    }
+
     // The same table used by the advance run and the needs-attention list
     function renderOverviewTable($el, rows, emptyText, range) {
         if (!$el) return;
@@ -3698,8 +3735,8 @@
             <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
             ${rows.map((row) => `
                 <tr>
-                    <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>${
-                        row.payer_name && row.payer_name !== row.name ? ` <span class="muted">→ ${esc(row.payer_name)}</span>` : ''}</td>
+                    <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
+                        ${riderSummaryHtml(row)}</td>
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
@@ -3724,8 +3761,12 @@
                 try {
                     const res = await api('POST', '/api/invoices',
                         { contact_id: btn.getAttribute('data-inv-contact'), from: range.from, to: range.to });
-                    toast(`Invoice ${res.invoice.number} created (${res.line_count} rides).`);
-                    renderInvoices();
+                    // Update in place rather than re-rendering — a full redraw
+                    // loses your place in a long list, badly so on a phone.
+                    const row = btn.closest('tr');
+                    if (row) row.remove();
+                    addInvoiceToList(res.invoice);
+                    openInvoiceCreatedDialog(res.invoice, res.riders || 1);
                 } catch (err) {
                     btn.disabled = false;
                     toast(err.message, true);
@@ -3734,10 +3775,115 @@
         });
     }
 
+    // Slot a newly created invoice into the created list without a page redraw
+    function addInvoiceToList(inv) {
+        const $list = document.getElementById('inv-list');
+        if (!$list) return;
+        if (!$list.querySelector('.list-item')) $list.innerHTML = '';
+        $list.classList.remove('muted');
+        $list.insertAdjacentHTML('afterbegin', invoiceRowHtml(inv));
+        wireInvoiceRow($list.firstElementChild, inv);
+    }
+
     // ---------- Invoices ----------
     // WhatsApp cannot be handed a file by a link — only text. So do the tedious
     // half automatically: fetch the PDF so it lands in Downloads, then open the
     // chat with the message already written. The user attaches and sends.
+    // One created-invoice row. Extracted so a freshly created invoice can be
+    // slipped into the list without re-rendering (and re-scrolling) the page.
+    function invoiceRowHtml(inv) {
+        return `<div class="list-item" data-inv-row="${inv.id}">
+            <div class="li-main">
+                <div class="li-title">${esc(inv.number)} — ${esc(inv.contact_name)}
+                    ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
+                <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${
+                    (inv.period_start || '').slice(0, 10)} – ${(inv.period_end || '').slice(0, 10)} · ${
+                    inv.line_count} ride${inv.line_count === 1 ? '' : 's'} · ${money(inv.total_cents)}</div>
+            </div>
+            <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
+                ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+            </select>
+            <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
+               target="_blank" rel="noopener" title="Open in a new tab">View</a>
+            <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
+               download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
+            ${waNumber(inv.contact_phone)
+                ? `<button class="secondary small" data-inv-wa="${inv.id}">💬 Send</button>`
+                : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
+            ${inv.status === 'draft'
+                ? `<button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}"
+                           title="Delete this draft — its rides can then be invoiced again">✕</button>`
+                : `<button class="danger small" disabled
+                           title="Only drafts can be deleted; this one is marked ${esc(inv.status)}">✕</button>`}
+        </div>`;
+    }
+
+    function wireInvoiceRow(el, inv) {
+        if (!inv) return;
+        const wa = el.querySelector('[data-inv-wa]');
+        if (wa) wa.addEventListener('click', () => sendInvoiceOnWhatsApp(inv));
+        const sel = el.querySelector('.inv-status');
+        if (sel) sel.addEventListener('change', async () => {
+            try {
+                await api('PUT', `/api/invoices/${inv.id}`, { status: sel.value });
+                inv.status = sel.value;
+                toast('Status updated.');
+                // only drafts may be deleted, so the ✕ has to follow the status
+                const del = el.querySelector('[data-inv-del], [data-inv-del] , button.danger');
+                if (del) del.disabled = sel.value !== 'draft';
+            } catch (err) {
+                toast(err.message, true);
+            }
+        });
+        const del = el.querySelector('[data-inv-del]');
+        if (del) del.addEventListener('click', async () => {
+            if (!await askConfirm(`Delete invoice ${inv.number}?`,
+                'Its rides go back to the to-invoice list and can be invoiced again.',
+                'Delete the draft')) return;
+            try {
+                await api('DELETE', `/api/invoices/${inv.id}`);
+                toast('Invoice deleted.');
+                renderInvoices();
+            } catch (err) {
+                toast(err.message, true);
+            }
+        });
+    }
+
+    // Straight after creating one: offer to send it, let the status be set, done.
+    function openInvoiceCreatedDialog(inv, riderCount) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 4px">${esc(inv.number)} created</h3>
+            <p class="muted" style="margin:0 0 12px">${esc(inv.contact_name)} ·
+                ${inv.line_count} ride${inv.line_count === 1 ? '' : 's'}${
+                riderCount > 1 ? ` for ${riderCount} riders` : ''} · <b>${money(inv.total_cents)}</b></p>
+            <label>Status</label>
+            <select id="ic-status">
+                ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+            </select>
+            <div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
+                ${waNumber(inv.contact_phone) ? '<button id="ic-send">💬 Send now</button>' : ''}
+                <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
+                   download="${esc(inv.number)}.pdf">⬇ PDF</a>
+                <span class="spacer"></span>
+                <button class="secondary" id="ic-close">Close</button>
+            </div>`);
+        const statusSel = overlay.querySelector('#ic-status');
+        statusSel.addEventListener('change', async () => {
+            try {
+                await api('PUT', `/api/invoices/${inv.id}`, { status: statusSel.value });
+                inv.status = statusSel.value;
+                // keep the row in the list in step
+                const row = document.querySelector(`[data-inv-row="${inv.id}"] .inv-status`);
+                if (row) row.value = statusSel.value;
+                toast('Status updated.');
+            } catch (err) { toast(err.message, true); }
+        });
+        const send = overlay.querySelector('#ic-send');
+        if (send) send.addEventListener('click', () => sendInvoiceOnWhatsApp(inv));
+        overlay.querySelector('#ic-close').addEventListener('click', () => overlay.remove());
+    }
+
     // WhatsApp cannot be handed a file by a link — only text. So make the two
     // steps explicit rather than firing a download the user never sees.
     function sendInvoiceOnWhatsApp(inv) {
@@ -3954,7 +4100,8 @@
                     <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
                     ${arrears.map((row) => `
                         <tr>
-                            <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>${row.payer_name && row.payer_name !== row.name ? ` <span class="muted">→ ${esc(row.payer_name)}</span>` : ''}</td>
+                            <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
+                                ${riderSummaryHtml(row)}</td>
                             <td>${row.payment_terms
                                 ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                                 : '<span class="no-parent">not set</span>'}</td>
@@ -3971,59 +4118,9 @@
                 $list.innerHTML = '<div class="card muted">No invoices yet.</div>';
             } else {
                 $list.classList.remove('muted');
-                $list.innerHTML = invs.invoices.map((inv) => `
-                    <div class="list-item">
-                        <div class="li-main">
-                            <div class="li-title">${esc(inv.number)} — ${esc(inv.contact_name)}
-                                ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
-                            <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${inv.period_start || ''} – ${inv.period_end || ''} · ${inv.kind === 'advance' ? 'term fee' : `${inv.line_count} ride${inv.line_count === 1 ? '' : 's'}`} · ${money(inv.total_cents)}</div>
-                        </div>
-                        <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
-                            ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
-                        </select>
-                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
-                           target="_blank" rel="noopener" title="Open in a new tab">View</a>
-                        <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
-                           download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
-                        ${waNumber(inv.contact_phone)
-                            ? `<button class="secondary small" data-inv-wa="${inv.id}" title="Download the PDF and open WhatsApp to ${esc(inv.contact_name)}">💬 Send</button>`
-                            : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
-                        ${inv.status === 'draft'
-                            ? `<button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}"
-                                       title="Delete this draft — its rides can then be invoiced again">✕</button>`
-                            : `<button class="danger small" disabled
-                                       title="Only drafts can be deleted; this one is marked ${esc(inv.status)}">✕</button>`}
-                    </div>`).join('');
-                $list.querySelectorAll('[data-inv-wa]').forEach((btn) => {
-                    btn.addEventListener('click', () => {
-                        const inv = invs.invoices.find((i) => String(i.id) === btn.getAttribute('data-inv-wa'));
-                        if (inv) sendInvoiceOnWhatsApp(inv);
-                    });
-                });
-                $list.querySelectorAll('.inv-status').forEach((sel) => {
-                    sel.addEventListener('change', async () => {
-                        try {
-                            await api('PUT', `/api/invoices/${sel.getAttribute('data-inv-id')}`, { status: sel.value });
-                            toast('Status updated.');
-                        } catch (err) {
-                            toast(err.message, true);
-                        }
-                    });
-                });
-                $list.querySelectorAll('[data-inv-del]').forEach((btn) => {
-                    btn.addEventListener('click', async () => {
-                        if (!await askConfirm(`Delete invoice ${btn.getAttribute('data-inv-num')}?`,
-                            'Its rides go back to the to-invoice list and can be invoiced again.',
-                            'Delete the draft')) return;
-                        try {
-                            await api('DELETE', `/api/invoices/${btn.getAttribute('data-inv-del')}`);
-                            toast('Invoice deleted.');
-                            renderInvoices();
-                        } catch (err) {
-                            toast(err.message, true);
-                        }
-                    });
-                });
+                $list.innerHTML = invs.invoices.map(invoiceRowHtml).join('');
+                $list.querySelectorAll('.list-item[data-inv-row]').forEach((el) =>
+                    wireInvoiceRow(el, invs.invoices.find((i) => String(i.id) === el.getAttribute('data-inv-row'))));
             }
         } catch (err) {
             document.getElementById('inv-overview').textContent = err.message;
@@ -4627,26 +4724,26 @@
                 ${state.schools.map((s) => {
                     const byNo = {};
                     (s.terms || []).filter((t) => t.year === y).forEach((t) => { byNo[t.term_no] = t; });
-                    return `<div class="card" style="margin-bottom:10px${s.active ? '' : ';opacity:.6'}">
-                        <div class="pick-row" style="gap:8px">
-                            <input class="sc-name" data-school="${s.id}" value="${esc(s.name)}" style="flex:1 1 auto;min-width:0">
-                            <span class="muted" style="flex:0 0 auto">${s.rider_count} rider${s.rider_count === 1 ? '' : 's'}</span>
+                    // One compact row per term: 4 rows of two small date inputs,
+                    // not a full table each.
+                    return `<div class="school-row${s.active ? '' : ' inactive'}">
+                        <div class="school-head">
+                            <input class="sc-name" data-school="${s.id}" value="${esc(s.name)}">
+                            <span class="muted school-count">${s.rider_count}</span>
                             <button class="secondary small sc-toggle" data-school="${s.id}"
-                                    data-active="${s.active}" style="flex:0 0 auto">${s.active ? 'Active' : 'Inactive'}</button>
-                            <button class="danger small sc-del" data-school="${s.id}" data-name="${esc(s.name)}" style="flex:0 0 auto">${ICON_X}</button>
+                                    data-active="${s.active}" title="${s.active ? 'Active' : 'Inactive'}">${s.active ? '✓' : '–'}</button>
+                            <button class="danger small sc-del" data-school="${s.id}" data-name="${esc(s.name)}">${ICON_X}</button>
                         </div>
-                        <div class="table-wrap"><table class="plain">
-                            <tr><th>Term</th><th>From</th><th>To</th><th></th></tr>
+                        <div class="term-grid">
                             ${[1, 2, 3, 4].map((n) => `
-                                <tr>
-                                    <td><b>Term ${n}</b></td>
-                                    <td><input type="date" class="st-from" data-school="${s.id}" data-term="${n}"
-                                               value="${byNo[n] ? byNo[n].period_start : ''}"></td>
-                                    <td><input type="date" class="st-to" data-school="${s.id}" data-term="${n}"
-                                               value="${byNo[n] ? byNo[n].period_end : ''}"></td>
-                                    <td>${byNo[n] ? '<span class="chip paid">set</span>' : '<span class="muted">not set</span>'}</td>
-                                </tr>`).join('')}
-                        </table></div>
+                                <span class="term-cell${byNo[n] ? ' set' : ''}">
+                                    <b>T${n}</b>
+                                    <input type="date" class="st-from" data-school="${s.id}" data-term="${n}"
+                                           title="Term ${n} start" value="${byNo[n] ? byNo[n].period_start : ''}">
+                                    <input type="date" class="st-to" data-school="${s.id}" data-term="${n}"
+                                           title="Term ${n} end" value="${byNo[n] ? byNo[n].period_end : ''}">
+                                </span>`).join('')}
+                        </div>
                     </div>`;
                 }).join('') || '<div class="card muted">No schools yet.</div>'}`;
 

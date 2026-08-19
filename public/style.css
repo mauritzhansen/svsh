@@ -1419,3 +1419,40 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .wa-steps { margin: 0 0 4px; padding-left: 20px; }
 .wa-steps li { margin-bottom: 12px; line-height: 1.5; }
 .wa-steps li > div { margin-top: 6px; }
+
+/* Schools & terms: dense, one line per school plus a 4-up term grid */
+.school-row {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 8px 10px; margin-bottom: 8px;
+}
+.school-row.inactive { opacity: 0.55; }
+.school-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.school-head .sc-name { flex: 1 1 auto; min-width: 0; margin: 0; padding: 5px 8px; font-weight: 600; }
+.school-head .school-count { flex: 0 0 auto; font-size: 12px; }
+.school-head button { flex: 0 0 auto; padding: 5px 9px; }
+.term-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.term-cell {
+    display: flex; align-items: center; gap: 3px; min-width: 0;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 3px 5px;
+}
+.term-cell.set { background: var(--green-light); border-color: #cddcc6; }
+.term-cell b { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
+.term-cell input { margin: 0; padding: 3px 2px; font-size: 11.5px; min-width: 0; flex: 1 1 0; }
+@media (max-width: 900px) {
+    .term-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+    .term-grid { grid-template-columns: 1fr; }
+}
+.credit-item { display: inline-flex; align-items: center; gap: 2px; }
+.credit-drop {
+    border: none; background: none; cursor: pointer; padding: 2px 4px;
+    color: var(--danger); font-size: 12px; line-height: 1; opacity: 0.65;
+}
+.credit-drop:hover { opacity: 1; }
+
+/* Who is on a payer's invoice, and when they rode */
+.rider-summary { margin-top: 3px; display: flex; flex-direction: column; gap: 1px; }
+.rs-rider { font-size: 12px; line-height: 1.35; }
+.rs-rider b { font-weight: 600; }
+.rs-dates { color: var(--muted); }
