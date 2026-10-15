@@ -2387,9 +2387,15 @@
                 ? [...ride.participants, { contact_id: defaults.addContactId, horse_id: null }]
                 : ride.participants)
             : [{ horse_id: defaultHorse, contact_id: null }];
+        // Cadence comes from two places: riders sitting out this week are in
+        // off_riders, riders who are on it carry it on the participant itself.
         const seriesFreq = {};
-        if (isEdit) (ride.off_riders || []).forEach((o) => { seriesFreq[String(o.contact_id)] = o.frequency; });
-        if (isEdit && ride.rider_freq) Object.assign(seriesFreq, ride.rider_freq);
+        if (isEdit) {
+            (ride.off_riders || []).forEach((o) => { seriesFreq[String(o.contact_id)] = o.frequency; });
+            (ride.participants || []).forEach((p) => {
+                if (p.frequency) seriesFreq[String(p.contact_id)] = p.frequency;
+            });
+        }
         parts.forEach((p) => addRow('ride-parts',
             participantRowHtml(p, isEdit, seriesFreq[String(p.contact_id)])));
         // 3a: riders taken off earlier come back as struck-through rows, so the

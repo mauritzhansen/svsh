@@ -1654,6 +1654,16 @@ async function fetchRides(from, to) {
         tplParts.forEach((p) => { (byTpl[p.recurring_id] = byTpl[p.recurring_id] || []).push(p); });
         rides.forEach((r) => {
             if (!r.recurring_id) return;
+            // Riders who ARE on this week still need their cadence reported, or
+            // the ride dialog has no way to know and shows everyone as weekly —
+            // which then saves back over the real setting.
+            const freqBy = {};
+            (byTpl[r.recurring_id] || []).forEach((p) => {
+                freqBy[String(p.contact_id)] = p.frequency;
+            });
+            r.participants.forEach((p) => {
+                p.frequency = freqBy[String(p.contact_id)] || 'weekly';
+            });
             const here = new Set(r.participants.map((p) => String(p.contact_id)));
             // a cancellation is shown explicitly; don't also list them as "off"
             r.cancellations.forEach((c) => here.add(String(c.contact_id)));
