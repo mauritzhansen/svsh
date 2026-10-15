@@ -543,6 +543,24 @@
             `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${esc(h.name)}</option>`).join('');
     }
 
+    // Each lesson type carries its own length, so picking one sets the duration
+    // to match. It is announced rather than done silently: the box visibly
+    // changes, and anyone who had typed a different number needs to know it was
+    // replaced so they can put it back.
+    function syncDurationToRideType(typeSelId, durationId) {
+        const typeSel = document.getElementById(typeSelId);
+        const durInput = document.getElementById(durationId);
+        if (!typeSel || !durInput) return;
+        const rt = state.rideTypes.find((t) => String(t.id) === String(typeSel.value));
+        if (!rt || !rt.duration_min) return;
+        const before = parseInt(durInput.value, 10) || null;
+        if (before === rt.duration_min) return;
+        durInput.value = rt.duration_min;
+        toast(before
+            ? `Duration changed from ${before} to ${rt.duration_min} min to match ${rt.name}.`
+            : `Duration set to ${rt.duration_min} min to match ${rt.name}.`);
+    }
+
     function rideTypeOptions(selectedId) {
         return '<option value="">(none)</option>' + activeRideTypes().map((t) =>
             `<option value="${t.id}" ${String(selectedId) === String(t.id) ? 'selected' : ''}>${esc(t.name)} — ${money(t.price_cents)}</option>`).join('');
@@ -2393,7 +2411,10 @@
             addRow('ride-guides', guideRowHtml(null)));
         document.getElementById('ride-cancel').addEventListener('click', closeDialog);
         document.getElementById('ride-time').addEventListener('change', refreshOptions);
-        document.getElementById('ride-type').addEventListener('change', refreshOptions);
+        document.getElementById('ride-type').addEventListener('change', () => {
+            syncDurationToRideType('ride-type', 'ride-duration');
+            refreshOptions();
+        });
         document.getElementById('ride-duration').addEventListener('change', refreshOptions);
         document.getElementById('ride-parts').addEventListener('change', (e) => {
             if (e.target.classList.contains('pr-contact')) {
@@ -2779,6 +2800,8 @@
         document.getElementById('fx-part-add').addEventListener('click', () => addFxRow('fx-parts', fixedRiderRowHtml(null)));
         document.getElementById('fx-guide-add').addEventListener('click', () => addFxRow('fx-guides', fixedGuideRowHtml(null)));
         document.getElementById('fx-cancel').addEventListener('click', closeDialog);
+        document.getElementById('fx-ridetype').addEventListener('change', () =>
+            syncDurationToRideType('fx-ridetype', 'fx-duration'));
 
         document.getElementById('fx-save').addEventListener('click', async () => {
             if (!document.getElementById('fx-ridetype').value) {

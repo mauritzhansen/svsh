@@ -1858,6 +1858,52 @@ app.post('/api/rides/:id/repeat', requireRole('helper'), async (req, res) => {
 
 // Keep the series' rider list in step with an occurrence: adds riders that
 // were added on the day, and updates how often each one rides.
+// Changing a rider's cadence has to reach the weeks that were ALREADY created.
+// Materialisation only ever fills gaps — it skips any date that has a ride row —
+// so without this the rider stays on every week until something else rebuilds
+// the series, which is what made "every 2nd week" look like it did nothing.
+//
+// Seats are adjusted in place rather than deleting and re-creating the future
+// occurrences: those rides may carry horse assignments, instructors and ad-hoc
+// riders that have nothing to do with this change. Only seats the series itself
+// put there are removed, and never an invoiced one.
+async function syncSeriesCadence(client, recurringId) {
+    const { rows: tpl } = await client.query(
+        'SELECT start_date::text AS start_date FROM recurring_rides WHERE id = $1', [recurringId]);
+    if (!tpl[0]) return;
+    const { rows: parts } = await client.query(
+        `SELECT contact_id, frequency, biweekly_anchor::text AS biweekly_anchor,
+                start_date::text AS start_date
+           FROM recurring_participants
+          WHERE recurring_id = $1 AND contact_id IS NOT NULL`, [recurringId]);
+    const { rows: rides } = await client.query(
+        `SELECT id, date::text AS date FROM rides
+          WHERE recurring_id = $1 AND date >= CURRENT_DATE AND status = 'active'`, [recurringId]);
+    for (const r of rides) {
+        for (const p of parts) {
+            const due = (!p.start_date || r.date >= p.start_date) &&
+                (p.frequency !== 'biweekly' ||
+                 (() => {
+                     const w = weeksBetween(p.biweekly_anchor || tpl[0].start_date, r.date);
+                     return w >= 0 && w % 2 === 0;
+                 })());
+            if (due) {
+                await client.query(
+                    `INSERT INTO ride_participants (ride_id, contact_id, from_recurring)
+                     VALUES ($1, $2, true)
+                     ON CONFLICT (ride_id, contact_id) DO NOTHING`, [r.id, p.contact_id]);
+            } else {
+                await client.query(
+                    `DELETE FROM ride_participants rp
+                      WHERE rp.ride_id = $1 AND rp.contact_id = $2 AND rp.from_recurring
+                        AND NOT EXISTS (SELECT 1 FROM invoice_lines il
+                                         WHERE il.participant_id = rp.id)`,
+                    [r.id, p.contact_id]);
+            }
+        }
+    }
+}
+
 app.put('/api/rides/:id/repeat-riders', requireRole('helper'), async (req, res) => {
     const client = await pool.connect();
     try {
@@ -1885,6 +1931,7 @@ app.put('/api/rides/:id/repeat-riders', requireRole('helper'), async (req, res) 
                      frequency === 'biweekly' ? ride.date : null, ride.date]);
             }
         }
+        await syncSeriesCadence(client, ride.recurring_id);
         await client.query('COMMIT');
         res.json({ ok: true });
     } catch (err) {
