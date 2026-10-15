@@ -39,6 +39,7 @@ CREATE TABLE contacts (
     -- how a payer settles up; NULL = not assigned yet (see migration 016)
     payment_terms TEXT CHECK (payment_terms IN ('advance_monthly', 'advance_term', 'arrears', 'cash_after')),
     school_id BIGINT REFERENCES schools(id) ON DELETE SET NULL, -- term dates come from the school
+    pays_arena_fee BOOLEAN NOT NULL DEFAULT false, -- charged once a quarter (see migration 022)
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
@@ -286,9 +287,14 @@ CREATE TABLE schools (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     active BOOLEAN NOT NULL DEFAULT true,
-    sort_order INT NOT NULL DEFAULT 0
+    sort_order INT NOT NULL DEFAULT 0,
+    -- Month the ACADEMIC year starts in: 1 for a Jan-Dec school, 8 for AISCT
+    -- (Aug-Jul). school_terms.year is the year that academic year starts in.
+    year_start_month INT NOT NULL DEFAULT 1 CHECK (year_start_month BETWEEN 1 AND 12)
 );
 
+-- year = the year the school's ACADEMIC year starts in (see schools.year_start_month),
+-- so AISCT's year 2026 spans Aug 2026 - Jul 2027 and holds its terms 1-4 in order.
 CREATE TABLE school_terms (
     id BIGSERIAL PRIMARY KEY,
     school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
@@ -298,4 +304,16 @@ CREATE TABLE school_terms (
     period_end DATE NOT NULL,
     UNIQUE (school_id, year, term_no),
     CHECK (period_start <= period_end)
+);
+
+-- Riders taken off a ride, kept rather than deleted so the day still shows what
+-- happened and they can be put back (see migration 021).
+CREATE TABLE ride_cancellations (
+    id BIGSERIAL PRIMARY KEY,
+    ride_id BIGINT NOT NULL REFERENCES rides(id) ON DELETE CASCADE,
+    contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('cancelled', 'rescheduled')),
+    from_series BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (ride_id, contact_id)
 );

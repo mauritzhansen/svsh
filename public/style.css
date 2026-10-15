@@ -381,7 +381,15 @@ table.plain td.num, table.plain th.num { text-align: right; }
     background: var(--card);
     width: 100%;
     max-width: 480px;
+    /* On a phone this is a bottom sheet, so any height it cannot fit overflows
+       off the TOP of the screen, taking the heading with it. vh measures the
+       large viewport (URL bar hidden), which is taller than what is actually
+       visible while the bar is showing — so a tall form like a new contact was
+       clipped at the top. dvh tracks the visible height instead; the vh line
+       above it is the fallback for browsers without dvh. The 28px strip leaves
+       something to tap to dismiss. */
     max-height: 88vh;
+    max-height: calc(100dvh - 28px);
     overflow-y: auto;
     border-radius: 16px 16px 0 0;
     padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
@@ -389,7 +397,8 @@ table.plain td.num, table.plain th.num { text-align: right; }
 
 @media (min-width: 640px) {
     #dialog-backdrop { align-items: center; padding: 20px; }
-    #dialog { border-radius: 16px; }
+    /* Centred on a wide screen, so it does not need the full height */
+    #dialog { border-radius: 16px; max-height: 88vh; max-height: 88dvh; }
 }
 
 #dialog h2 { margin-top: 0; }
@@ -1456,3 +1465,82 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
 .rs-rider { font-size: 12px; line-height: 1.35; }
 .rs-rider b { font-weight: 600; }
 .rs-dates { color: var(--muted); }
+
+/* No signal: one honest bar, pinned where it cannot be missed */
+.offline-bar {
+    position: fixed;
+    left: 0; right: 0;
+    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+    z-index: 30;
+    margin: 0 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius);
+    background: #fdeecf;
+    border: 1px solid #edd39a;
+    color: #7a5200;
+    font-size: 13.5px;
+    line-height: 1.4;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+@media (max-height: 560px) { .offline-bar { bottom: 8px; } }
+/* while offline, saving is not possible — say so on the controls themselves */
+body.is-offline .ride-box { opacity: 0.92; }
+
+/* A rider marked off the ride: still visible, clearly struck through, undoable */
+.pick-row.removed select,
+.pick-row.removed .pr-alt-toggle {
+    opacity: 0.45;
+    text-decoration: line-through;
+}
+.pick-row.removed { background: #fbf4f2; border-radius: 8px; }
+.removed-tag {
+    flex: 0 0 100%;
+    padding: 2px 4px 0;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--danger);
+}
+.pick-row.removed[data-remove-kind="rescheduled"] .removed-tag { color: #8a5a00; }
+
+/* askChoice: a long label must not collapse into a narrow column */
+/* The hint used to be nowrap, so it took the whole row and squeezed the label
+   to zero width — "This day and later weeks" stacked one word per line. Let the
+   hint wrap instead, and give the label a floor it cannot be pushed below. */
+.assign-row { align-items: baseline; gap: 14px; }
+.assign-row .assign-name { flex: 1 1 auto; min-width: 9em; }
+.assign-row .assign-cur { flex: 0 1 auto; white-space: normal; text-align: right; }
+@media (max-width: 520px) {
+    .assign-row { flex-wrap: wrap; }
+    .assign-row .assign-cur { flex: 1 1 100%; text-align: left; }
+}
+.rider-row.off-rider.cancelled .rider-off { color: var(--danger); font-style: normal; }
+.rider-row.off-rider.rescheduled .rider-off { color: #8a5a00; font-style: normal; }
+
+/* Which schools are on holiday — context above the day's rides */
+.holiday-bar {
+    background: #eaf2fb; border: 1px solid #c3d8ef; color: #1f4d7a;
+    border-radius: var(--radius); padding: 9px 12px; margin-bottom: 10px;
+    font-size: 13.5px; line-height: 1.45;
+}
+.carried { font-size: 11.5px; font-weight: 700; color: #1f4d7a; cursor: help; }
+
+/* Unbilled lessons older than the one-month carry-over: not on the current
+   invoice, so flagged rather than quietly left out of every run. */
+.older-flag { font-size: 0.85em; color: #8a6d3b; background: #fcf4e3;
+              border-radius: 3px; padding: 0 4px; margin-left: 3px; cursor: help; }
+
+/* Academic-year selector beside each school name in Settings.
+   width:auto is load-bearing: the global rule gives every select width:100%,
+   which a flex-basis of auto then resolves to the full row, collapsing the
+   school name input next to it. Font size stays at the inherited 16px so
+   focusing it does not zoom the page on iOS. */
+.school-head .sc-ysm { flex: 0 0 auto; width: auto; padding: 5px 6px; }
+.term-year { font-size: 11px; margin: 0 0 3px; }
+
+/* Inline "new parent" block inside the contact form — set back from the fields
+   around it so it reads as one unit belonging to the payer question. */
+.np-inline { border: 1px solid var(--border); border-radius: 10px;
+             background: var(--bg); padding: 10px 12px; margin: 4px 0 10px; }
+.np-inline-head { display: flex; align-items: center; justify-content: space-between;
+                  gap: 8px; margin-bottom: 4px; }
+.np-inline > label:first-of-type { margin-top: 0; }

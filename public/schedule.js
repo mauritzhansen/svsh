@@ -90,6 +90,11 @@
         } else {
             riderRows = '<div class="rider-row"><span class="rider-name muted">No riders yet</span></div>';
         }
+        riderRows += (r.cancellations || []).map((c) => `
+            <div class="rider-row off-rider ${c.kind}">
+                <span class="rider-name">${esc(c.name)}</span>
+                <span class="rider-off">${c.kind === 'rescheduled' ? '⟳ rescheduled' : '✕ cancelled'}</span>
+            </div>`).join('');
         riderRows += (r.off_riders || []).map((o) => `
             <div class="rider-row off-rider">
                 <span class="rider-name">${esc(o.name)}</span>

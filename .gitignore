@@ -1,2 +1,8 @@
 node_modules/
 .DS_Store
+
+# fleet (agent worktrees + local lead state)
+.claude/worktrees/
+.claude/settings.local.json
+.cursor/plans/journal/
+__pycache__/

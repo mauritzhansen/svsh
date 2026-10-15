@@ -289,8 +289,9 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 
 app.put('/api/settings', requireRole('admin'), async (req, res) => {
     try {
-        const allowed = ['business_name', 'business_address', 'currency', 'invoice_footer',
-                         'bank_details', 'day_start', 'day_end'];
+        const allowed = ['business_name', 'business_address', 'business_phone', 'business_email',
+                         'currency', 'invoice_footer', 'bank_details', 'arena_fee_cents',
+                         'arena_fee_note', 'day_start', 'day_end'];
         for (const key of allowed) {
             if (typeof (req.body || {})[key] === 'string') {
                 await pool.query(
@@ -476,10 +477,15 @@ function paymentTermsError(body) {
     if (is_parent === true && !payment_terms) {
         return 'Choose how this parent pays before saving.';
     }
-    // Per-term invoices are billed over the school's term dates, so a payer on
-    // that arrangement must name a school.
-    if (payment_terms === 'advance_term' && (body || {}).school_id === null) {
-        return 'Pick the school — per-term invoices need its term dates.';
+    return null;
+}
+
+// Term dates decide which of a rider's lessons are term-time and which fall in
+// the holidays, and that drives what is invoiced — so every rider needs one.
+function schoolError(body) {
+    const b = body || {};
+    if (b.is_rider === true && b.school_id === null) {
+        return 'Pick the school — term dates decide which lessons are term-time.';
     }
     return null;
 }
@@ -489,26 +495,29 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
         const { name, phone, email, address, parent_id, experience, notes,
                 needs_collection, collection_teacher, collection_class,
                 is_prospect, birth_year, is_rider, is_parent, payment_terms,
-                school_id } = req.body || {};
+                school_id, pays_arena_fee } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
         const termsError = paymentTermsError(req.body);
         if (termsError) return res.status(400).json({ error: termsError });
+        const schErr = schoolError(req.body);
+        if (schErr) return res.status(400).json({ error: schErr });
         const parentError = await validateParent(parent_id, null);
         if (parentError) return res.status(400).json({ error: parentError });
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
                                    needs_collection, collection_teacher, collection_class,
                                    is_prospect, birth_year, notes, is_rider, is_parent, payment_terms,
-                                   school_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
+                                   school_id, pays_arena_fee)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
              !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '',
-             is_rider !== false, !!is_parent, payment_terms || null, school_id || null]);
+             is_rider !== false, !!is_parent, payment_terms || null, school_id || null,
+             !!pays_arena_fee]);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -522,12 +531,14 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
         const { name, phone, email, address, parent_id, experience, notes, archived,
                 needs_collection, collection_teacher, collection_class,
                 is_prospect, birth_year, is_rider, is_parent, payment_terms,
-                school_id } = req.body || {};
+                school_id, pays_arena_fee } = req.body || {};
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
         const termsError = paymentTermsError(req.body);
         if (termsError) return res.status(400).json({ error: termsError });
+        const schErr = schoolError(req.body);
+        if (schErr) return res.status(400).json({ error: schErr });
         if (parent_id !== undefined) {
             const parentError = await validateParent(parent_id, req.params.id);
             if (parentError) return res.status(400).json({ error: parentError });
@@ -550,7 +561,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 is_rider = COALESCE($18, is_rider),
                 is_parent = COALESCE($19, is_parent),
                 payment_terms = CASE WHEN $20 THEN $21 ELSE payment_terms END,
-                school_id = CASE WHEN $22 THEN $23::bigint ELSE school_id END
+                school_id = CASE WHEN $22 THEN $23::bigint ELSE school_id END,
+                pays_arena_fee = COALESCE($24, pays_arena_fee)
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
@@ -562,7 +574,8 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
              typeof is_rider === 'boolean' ? is_rider : null,
              typeof is_parent === 'boolean' ? is_parent : null,
              payment_terms !== undefined, payment_terms || null,
-             school_id !== undefined, school_id || null]);
+             school_id !== undefined, school_id || null,
+             typeof pays_arena_fee === 'boolean' ? pays_arena_fee : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
@@ -680,12 +693,18 @@ app.post('/api/schools', requireRole('helper'), async (req, res) => {
 
 app.put('/api/schools/:id', requireRole('helper'), async (req, res) => {
     try {
-        const { name, active } = req.body || {};
+        const { name, active, year_start_month: ysm } = req.body || {};
+        const month = Number(ysm);
+        if (ysm !== undefined && (!Number.isInteger(month) || month < 1 || month > 12)) {
+            return res.status(400).json({ error: 'The academic year must start in a valid month.' });
+        }
         const { rows } = await pool.query(
-            `UPDATE schools SET name = COALESCE($2, name), active = COALESCE($3, active)
+            `UPDATE schools SET name = COALESCE($2, name), active = COALESCE($3, active),
+                    year_start_month = COALESCE($4, year_start_month)
               WHERE id = $1 RETURNING *`,
             [req.params.id, name ? String(name).trim() : null,
-             typeof active === 'boolean' ? active : null]);
+             typeof active === 'boolean' ? active : null,
+             ysm === undefined ? null : month]);
         if (!rows[0]) return res.status(404).json({ error: 'School not found.' });
         res.json({ school: rows[0] });
     } catch (err) {
@@ -710,6 +729,40 @@ app.delete('/api/schools/:id', requireRole('helper'), async (req, res) => {
         res.json({ ok: true });
     } catch (err) {
         handleError(res, err, 'Deleting school');
+    }
+});
+
+// Which schools are on holiday on a given day? A school is "on holiday" only
+// when its terms for that year ARE known and the date falls outside them —
+// with no term dates we say so rather than guessing, because a wrong holiday
+// banner would have her cancelling lessons that are actually running.
+app.get('/api/schools/holidays', requireAuth, async (req, res) => {
+    try {
+        const date = String(req.query.date || '');
+        if (!DATE_RE.test(date)) return res.status(400).json({ error: 'A valid date is required.' });
+        const year = Number(date.slice(0, 4));
+        const { rows } = await pool.query(
+            `SELECT s.id, s.name,
+                    (SELECT count(*) FROM school_terms t
+                      WHERE t.school_id = s.id AND t.year = $2)::int AS terms_known,
+                    (SELECT t.term_no FROM school_terms t
+                      WHERE t.school_id = s.id AND $1::date BETWEEN t.period_start AND t.period_end
+                      LIMIT 1) AS in_term,
+                    (SELECT min(t.period_start)::text FROM school_terms t
+                      WHERE t.school_id = s.id AND t.period_start > $1::date) AS next_term_start
+               FROM schools s WHERE s.active ORDER BY s.sort_order, s.name`,
+            [date, year]);
+        res.json({
+            date,
+            schools: rows.map((r) => ({
+                id: r.id, name: r.name,
+                status: r.in_term ? 'term' : (r.terms_known ? 'holiday' : 'unknown'),
+                term_no: r.in_term || null,
+                next_term_start: r.next_term_start
+            }))
+        });
+    } catch (err) {
+        handleError(res, err, 'Loading school holidays');
     }
 });
 
@@ -1406,7 +1459,17 @@ function parseRideBody(body) {
             guides.push({ guide_id: g.guide_id, mode, horse_id: horseId });
         }
     }
-    if (!participants.length && (isBlock || !guides.length)) {
+    // riders taken off this ride, kept rather than deleted
+    const cancellations = (Array.isArray((body || {}).cancellations) ? body.cancellations : [])
+        .filter((c) => c && c.contact_id)
+        .map((c) => ({
+            contact_id: c.contact_id,
+            kind: c.kind === 'rescheduled' ? 'rescheduled' : 'cancelled',
+            from_series: !!c.from_series
+        }));
+    // A lesson where everyone called off is still a real record of the day, so
+    // cancellations count as content even when no seat is left.
+    if (!participants.length && !cancellations.length && (isBlock || !guides.length)) {
         return { error: isBlock ? 'Pick at least one horse to block.'
             : 'A ride needs at least one rider, horse or instructor.' };
     }
@@ -1418,9 +1481,21 @@ function parseRideBody(body) {
         ride_type_id: ride_type_id || null,
         notes: notes || '',
         instructor_notes: instructor_notes || '',
-        participants, guides,
+        participants, guides, cancellations,
         horseIds: [...horsesUsed]
     };
+}
+
+async function replaceCancellations(client, rideId, cancellations) {
+    await client.query('DELETE FROM ride_cancellations WHERE ride_id = $1', [rideId]);
+    for (const c of cancellations || []) {
+        await client.query(
+            `INSERT INTO ride_cancellations (ride_id, contact_id, kind, from_series)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (ride_id, contact_id) DO UPDATE
+                 SET kind = EXCLUDED.kind, from_series = EXCLUDED.from_series`,
+            [rideId, c.contact_id, c.kind, c.from_series]);
+    }
 }
 
 async function insertRideChildren(client, rideId, participants, guides) {
@@ -1547,7 +1622,7 @@ async function fetchRides(from, to) {
           ORDER BY g.is_assistant, g.name`, [ids]);
     const byId = {};
     rides.forEach((r) => {
-        r.participants = []; r.guides = []; r.off_riders = []; r.invoiced = false;
+        r.participants = []; r.guides = []; r.off_riders = []; r.cancellations = []; r.invoiced = false;
         byId[r.id] = r;
     });
     parts.forEach((p) => {
@@ -1555,6 +1630,14 @@ async function fetchRides(from, to) {
         if (p.invoiced) byId[p.ride_id].invoiced = true;
     });
     rideGuides.forEach((g) => byId[g.ride_id].guides.push(g));
+
+    // Riders taken off these rides — kept so the day still shows what happened
+    const { rows: cancels } = ids.length ? await pool.query(
+        `SELECT rc.ride_id, rc.contact_id::text, rc.kind, rc.from_series, c.name AS contact_name
+           FROM ride_cancellations rc JOIN contacts c ON c.id = rc.contact_id
+          WHERE rc.ride_id = ANY($1::bigint[])
+          ORDER BY c.name`, [ids]) : { rows: [] };
+    cancels.forEach((c) => { if (byId[c.ride_id]) byId[c.ride_id].cancellations.push(c); });
 
     // Riders who belong to the weekly series but aren't riding this week
     // (every-2nd-week riders on their off week, or taken off for the day).
@@ -1572,6 +1655,8 @@ async function fetchRides(from, to) {
         rides.forEach((r) => {
             if (!r.recurring_id) return;
             const here = new Set(r.participants.map((p) => String(p.contact_id)));
+            // a cancellation is shown explicitly; don't also list them as "off"
+            r.cancellations.forEach((c) => here.add(String(c.contact_id)));
             (byTpl[r.recurring_id] || []).forEach((p) => {
                 if (here.has(String(p.contact_id))) return;
                 if (p.start_date && r.date < p.start_date) return;
@@ -1664,6 +1749,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         await client.query('DELETE FROM ride_participants WHERE ride_id = $1', [req.params.id]);
         await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
         await insertRideChildren(client, req.params.id, parsed.participants, parsed.guides);
+        await replaceCancellations(client, req.params.id, parsed.cancellations);
         // Typing one occurrence of a fixed ride types the whole series: the
         // template (so future weeks inherit it) plus every other occurrence that
         // has no type yet, past ones included. Occurrences with a type already
@@ -2226,6 +2312,27 @@ function monthRange(month) {
 // Requires table aliases rp (ride_participants) and r (rides).
 const NOT_PASS_COVERED_SQL = `TRUE`;   // term passes were removed; nothing is pre-covered
 
+// Is this ride inside one of the rider's school terms? A rider inherits their
+// payer's school when they have none of their own. With no term dates on record
+// the answer is false — i.e. treated as holiday — so an unknown period is billed
+// after the fact rather than charged in advance for lessons that may not happen.
+// Requires aliases r (rides), rider and payer (contacts).
+const IN_TERM_SQL = `EXISTS (
+    SELECT 1 FROM school_terms st
+     WHERE st.school_id = COALESCE(rider.school_id, payer.school_id)
+       AND r.date BETWEEN st.period_start AND st.period_end)`;
+
+// How far back an advance invoice reaches for lessons that were ridden but
+// never billed — holiday lessons and ad-hoc ones. Exactly one calendar month:
+// October's invoice carries September's leftovers and nothing older. Without
+// the cap a single missed run would drag months of old lessons onto one
+// invoice, which is not something a parent can check against their diary.
+//
+// Anything older than the cap is not lost, only out of scope for the automatic
+// runs: it is counted as `older_unbilled` and shown as a warning so it can be
+// billed deliberately with a custom date range.
+const CARRY_BACK = `INTERVAL '1 month'`;
+
 // Per-contact summary of booked, not-yet-invoiced rides in a month
 // Which advance months still owe invoices? An advance run is only "done" when
 // every rider on that arrangement has been invoiced for the period, so the page
@@ -2259,7 +2366,11 @@ app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, 
                 [from, to, terms]);
             out.push({ month, riders: rows[0].riders, total_cents: rows[0].total_cents });
         }
-        res.json({ months: out });
+        // The invoices page offers a month picker; there is no point offering
+        // months from before the school has any rides at all.
+        const { rows: firstRow } = await pool.query(
+            "SELECT min(date)::text AS first FROM rides WHERE status = 'active'");
+        res.json({ months: out, first_ride_date: (firstRow[0] || {}).first || null });
     } catch (err) {
         handleError(res, err, 'Loading advance status');
     }
@@ -2275,7 +2386,8 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
             return res.status(400).json({ error: 'A valid year and term (1–4) are required.' });
         }
         const { rows: schools } = await pool.query(
-            `SELECT s.id, s.name, t.period_start::text AS period_start, t.period_end::text AS period_end
+            `SELECT s.id, s.name, s.year_start_month,
+                    t.period_start::text AS period_start, t.period_end::text AS period_end
                FROM schools s
                LEFT JOIN school_terms t
                       ON t.school_id = s.id AND t.year = $1 AND t.term_no = $2
@@ -2335,9 +2447,168 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                 AND payer.payment_terms = 'advance_term'
                 AND rider.school_id IS NULL AND payer.school_id IS NULL
               ORDER BY rider.name`);
-        res.json({ year, term, groups, no_school: noSchool });
+        // Per-term payers still ride in the holidays and still take ad-hoc
+        // lessons. Those cannot be in the term invoice, so they are collected
+        // here month by month once they have happened.
+        const { rows: catchup } = await pool.query(
+            `WITH seats AS (
+                 SELECT rp.id, rider.name AS rider_name,
+                        COALESCE(rider.parent_id, rider.id) AS payer_id,
+                        r.date, COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE payer.payment_terms = 'advance_term'
+                    AND r.date < CURRENT_DATE
+                    AND NOT ${IN_TERM_SQL}
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+             ), reach AS (
+                 -- same one-month cap as the month-ahead run, so a catch-up
+                 -- invoice covers one month of holiday lessons and no more
+                 SELECT *, (date >= date_trunc('month', CURRENT_DATE) - ${CARRY_BACK}) AS in_reach
+                   FROM seats
+             )
+             SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
+                    payer.payment_terms,
+                    count(*)::int AS ride_count,
+                    SUM(s.cents)::int AS total_cents,
+                    min(s.date)::text AS first_date, max(s.date)::text AS last_date,
+                    (SELECT count(*)::int FROM reach o
+                      WHERE o.payer_id = payer.id AND NOT o.in_reach) AS older_unbilled,
+                    (SELECT min(o.date)::text FROM reach o
+                      WHERE o.payer_id = payer.id AND NOT o.in_reach) AS older_from,
+                    (SELECT json_agg(x ORDER BY x->>'month')
+                       FROM (SELECT json_build_object('month', to_char(o.date, 'YYYY-MM'),
+                                                      'count', count(*)) AS x
+                               FROM reach o
+                              WHERE o.payer_id = payer.id AND NOT o.in_reach
+                              GROUP BY to_char(o.date, 'YYYY-MM')) q) AS older_months,
+                    (SELECT json_agg(x ORDER BY x->>'name')
+                       FROM (SELECT json_build_object(
+                                    'name', s2.rider_name, 'count', count(*),
+                                    'dates', json_agg(s2.date::text ORDER BY s2.date)) AS x
+                               FROM reach s2 WHERE s2.payer_id = payer.id AND s2.in_reach
+                              GROUP BY s2.rider_name) q) AS riders
+               FROM reach s JOIN contacts payer ON payer.id = s.payer_id
+              WHERE s.in_reach
+              GROUP BY payer.id, payer.name, payer.payment_terms
+             UNION ALL
+             -- holiday lessons older than the cap still have to be billed; they
+             -- are shown with no total so they are chased deliberately
+             SELECT payer.id, payer.name, payer.name, payer.payment_terms,
+                    0, 0, NULL::text, NULL::text,
+                    count(*)::int, min(o.date)::text,
+                    (SELECT json_agg(x ORDER BY x->>'month')
+                       FROM (SELECT json_build_object('month', to_char(o2.date, 'YYYY-MM'),
+                                                      'count', count(*)) AS x
+                               FROM reach o2
+                              WHERE o2.payer_id = payer.id AND NOT o2.in_reach
+                              GROUP BY to_char(o2.date, 'YYYY-MM')) q),
+                    NULL::json
+               FROM reach o JOIN contacts payer ON payer.id = o.payer_id
+              WHERE NOT o.in_reach
+                AND NOT EXISTS (SELECT 1 FROM reach b
+                                 WHERE b.payer_id = o.payer_id AND b.in_reach)
+              GROUP BY payer.id, payer.name, payer.payment_terms
+              ORDER BY 2`);
+        res.json({ year, term, groups, no_school: noSchool, catchup });
     } catch (err) {
         handleError(res, err, 'Loading term overview');
+    }
+});
+
+// The month-ahead run. Two different things go on one invoice:
+//   * the coming month's TERM lessons, which follow the fixed schedule and can
+//     safely be billed before they happen; and
+//   * everything still unbilled from before it — holiday and ad-hoc lessons,
+//     which are only knowable once they have been ridden.
+// Holiday lessons in the coming month are deliberately NOT billed now; they
+// land on next month's invoice once it is known who actually rode.
+app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res) => {
+    try {
+        const month = String(req.query.month || '');
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+            return res.status(400).json({ error: 'A valid month (YYYY-MM) is required.' });
+        }
+        const [from, to] = monthRange(month);
+        await materializeRecurring(from, to);
+        const { rows } = await pool.query(
+            `WITH seats AS (
+                 SELECT rp.id, rider.name AS rider_name,
+                        COALESCE(rider.parent_id, rider.id) AS payer_id,
+                        r.date, r.ride_type_id, r.ride_type_name,
+                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents,
+                        (r.date BETWEEN $1 AND $2) AS in_month,
+                        (r.date >= $1::date - ${CARRY_BACK}) AS in_reach,
+                        ${IN_TERM_SQL} AS in_term
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE r.date <= $2
+                    AND payer.payment_terms = 'advance_monthly'
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+             ), billable AS (
+                 -- term lessons of the coming month, plus the previous month's leftovers
+                 SELECT * FROM seats
+                  WHERE (in_month AND in_term) OR (NOT in_month AND in_reach)
+             )
+             SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
+                    payer.payment_terms,
+                    count(*)::int AS ride_count,
+                    SUM(b.cents)::int AS total_cents,
+                    count(*) FILTER (WHERE b.in_month)::int AS term_ahead,
+                    count(*) FILTER (WHERE NOT b.in_month)::int AS carried_over,
+                    (SELECT count(*)::int FROM seats s
+                      WHERE s.payer_id = payer.id AND NOT s.in_reach) AS older_unbilled,
+                    (SELECT min(s.date)::text FROM seats s
+                      WHERE s.payer_id = payer.id AND NOT s.in_reach) AS older_from,
+                    (SELECT json_agg(x ORDER BY x->>'month')
+                       FROM (SELECT json_build_object('month', to_char(o.date, 'YYYY-MM'),
+                                                      'count', count(*)) AS x
+                               FROM seats o
+                              WHERE o.payer_id = payer.id AND NOT o.in_reach
+                              GROUP BY to_char(o.date, 'YYYY-MM')) q) AS older_months,
+                    count(*) FILTER (WHERE b.ride_type_id IS NULL
+                                       AND b.ride_type_name IS NULL)::int AS untyped_rides,
+                    (SELECT json_agg(x ORDER BY x->>'name')
+                       FROM (SELECT json_build_object(
+                                    'name', b2.rider_name,
+                                    'count', count(*),
+                                    'dates', json_agg(b2.date::text ORDER BY b2.date)) AS x
+                               FROM billable b2 WHERE b2.payer_id = payer.id
+                              GROUP BY b2.rider_name) q) AS riders
+               FROM billable b
+               JOIN contacts payer ON payer.id = b.payer_id
+              GROUP BY payer.id, payer.name, payer.payment_terms
+             UNION ALL
+             -- payers whose ONLY unbilled lessons are older than the cap: they
+             -- get no invoice this run but must still be visible
+             -- column order must match the branch above exactly:
+             -- ride_count, total_cents, term_ahead, carried_over,
+             -- older_unbilled, older_from, older_months, untyped_rides, riders
+             SELECT payer.id, payer.name, payer.name, payer.payment_terms,
+                    0, 0, 0, 0,
+                    count(*)::int, min(s.date)::text,
+                    (SELECT json_agg(x ORDER BY x->>'month')
+                       FROM (SELECT json_build_object('month', to_char(o.date, 'YYYY-MM'),
+                                                      'count', count(*)) AS x
+                               FROM seats o
+                              WHERE o.payer_id = payer.id AND NOT o.in_reach
+                              GROUP BY to_char(o.date, 'YYYY-MM')) q),
+                    0, NULL::json
+               FROM seats s JOIN contacts payer ON payer.id = s.payer_id
+              WHERE NOT s.in_reach
+                AND NOT EXISTS (SELECT 1 FROM billable b WHERE b.payer_id = s.payer_id)
+              GROUP BY payer.id, payer.name, payer.payment_terms
+              ORDER BY 2`,
+            [from, to]);
+        res.json({ overview: rows, from, to, month });
+    } catch (err) {
+        handleError(res, err, 'Loading advance overview');
     }
 });
 
@@ -2427,7 +2698,53 @@ app.get('/api/invoices', requireRole('helper'), async (req, res) => {
 
 // Creates one invoice for all uninvoiced booked rides of a contact in a period.
 // Returns null if there is nothing to invoice. Runs in its own transaction.
-async function createInvoiceForContact(contactId, from, to) {
+// The arena fee is charged once a quarter, on the invoice that covers that
+// quarter's FIRST month — so it lands on whichever run bills that month,
+// whether that is the month ahead, the month in arrears, or the term.
+function arenaFeeQuarters(from, to) {
+    const out = [];
+    const start = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    let y = start.getUTCFullYear();
+    for (let year = y - 1; year <= end.getUTCFullYear() + 1; year++) {
+        for (const m of [0, 3, 6, 9]) {            // Jan, Apr, Jul, Oct
+            const mStart = new Date(Date.UTC(year, m, 1));
+            const mEnd = new Date(Date.UTC(year, m + 1, 0));
+            if (mEnd >= start && mStart <= end) {
+                out.push({ year, quarter: m / 3 + 1, on: mStart.toISOString().slice(0, 10) });
+            }
+        }
+    }
+    return out;
+}
+
+async function arenaFeeLines(client, riderIds, from, to, soleRider) {
+    const feeRow = await client.query(
+        "SELECT value FROM settings WHERE key = 'arena_fee_cents'");
+    const cents = parseInt((feeRow.rows[0] || {}).value, 10);
+    if (!Number.isInteger(cents) || cents <= 0 || !riderIds.length) return [];
+    const quarters = arenaFeeQuarters(from, to);
+    if (!quarters.length) return [];
+    const { rows: payers } = await client.query(
+        'SELECT id, name FROM contacts WHERE id = ANY($1::bigint[]) AND pays_arena_fee',
+        [riderIds]);
+    const lines = [];
+    for (const r of payers) {
+        for (const q of quarters) {
+            lines.push({
+                description: `${soleRider ? '' : r.name + ' — '}Arena fee Q${q.quarter} ${q.year}`,
+                ride_date: q.on,
+                amount_cents: cents
+            });
+        }
+    }
+    return lines;
+}
+
+// mode 'advance_month' bills the month-ahead rule (term lessons of the coming
+// month + everything unbilled from before it). Anything else bills the plain
+// date range, which is what the arrears, cash and term runs want.
+async function createInvoiceForContact(contactId, from, to, mode) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -2448,10 +2765,15 @@ async function createInvoiceForContact(contactId, from, to) {
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                JOIN contacts c ON c.id = rp.contact_id
+               JOIN contacts rider ON rider.id = rp.contact_id
+               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
                LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
               WHERE COALESCE(c.parent_id, c.id) = $1
                 AND NOT c.archived
-                AND r.date BETWEEN $2 AND $3
+                AND ${mode === 'advance_month'
+                    ? `(r.date <= $3 AND ((r.date >= $2 AND ${IN_TERM_SQL})
+                         OR (r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})))`
+                    : 'r.date BETWEEN $2 AND $3'}
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
               ORDER BY c.name, r.date, r.start_time
@@ -2464,12 +2786,14 @@ async function createInvoiceForContact(contactId, from, to) {
         // rider_contact_id only means something on a single-rider invoice
         const riderIds = [...new Set(rides.map((r) => String(r.contact_id)))];
         const soleRider = riderIds.length === 1 ? riderIds[0] : null;
+        const fees = await arenaFeeLines(client, riderIds, from, to, soleRider);
         const year = from.slice(0, 4);
         const { rows: numRows } = await client.query(
             `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
                FROM invoices WHERE number LIKE $1`, [`INV-${year}-%`]);
         const number = `INV-${year}-${String(numRows[0].next).padStart(4, '0')}`;
-        const total = rides.reduce((sum, r) => sum + r.amount_cents, 0);
+        const total = rides.reduce((sum, r) => sum + r.amount_cents, 0)
+            + fees.reduce((sum, f) => sum + f.amount_cents, 0);
         const { rows: invRows } = await client.query(
             `INSERT INTO invoices (number, contact_id, rider_contact_id, period_start, period_end, kind, total_cents)
              VALUES ($1, $2, $3, $4, $5, 'monthly', $6) RETURNING *`,
@@ -2484,6 +2808,12 @@ async function createInvoiceForContact(contactId, from, to) {
                  `${soleRider ? '' : r.rider_name + ' — '}${r.ride_type_name} at ${String(r.start_time).slice(0, 5)}`,
                  r.date, r.amount_cents]);
         }
+        for (const f of fees) {
+            await client.query(
+                `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
+                 VALUES ($1, NULL, $2, $3, $4)`,
+                [invRows[0].id, f.description, f.ride_date, f.amount_cents]);
+        }
         await client.query('COMMIT');
         // Return the invoice the way the list shows it — with the payer's name
         // and phone and its line count — so the caller can render it without
@@ -2491,7 +2821,8 @@ async function createInvoiceForContact(contactId, from, to) {
         const { rows: full } = await pool.query(
             `${INVOICE_WITH_CONTACT_SQL} WHERE i.id = $1`, [invRows[0].id]);
         const invoice = { ...(full[0] || invRows[0]), line_count: rides.length };
-        return { invoice, line_count: rides.length, riders: riderIds.length };
+        return { invoice, line_count: rides.length + fees.length,
+                 riders: riderIds.length, arena_fees: fees.length };
     } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -2503,11 +2834,11 @@ async function createInvoiceForContact(contactId, from, to) {
 // Create an invoice for all uninvoiced booked rides of a contact in a period
 app.post('/api/invoices', requireRole('helper'), async (req, res) => {
     try {
-        const { contact_id, from, to } = req.body || {};
+        const { contact_id, from, to, mode } = req.body || {};
         if (!contact_id || !DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
             return res.status(400).json({ error: 'Contact and a valid period are required.' });
         }
-        const result = await createInvoiceForContact(contact_id, from, to);
+        const result = await createInvoiceForContact(contact_id, from, to, mode);
         if (!result) return res.status(400).json({ error: 'No uninvoiced rides in that period.' });
         res.json(result);
     } catch (err) {
@@ -2537,9 +2868,11 @@ app.post('/api/invoices', requireRole('helper'), async (req, res) => {
 // is left alone — delete it separately if it was created in error.
 
 // ---------- Automatic month-end invoicing ----------
-// Once a month is over, every contact with uninvoiced booked rides in it gets
-// an invoice automatically. Safe to run repeatedly: already-invoiced rides are
-// skipped, so reruns create nothing new.
+// Once a month is over, payers billed IN ARREARS get their invoice
+// automatically. Nobody else does: advance-monthly and per-term payers are
+// billed before the period from their own runs, and cash riders settle on the
+// day — auto-invoicing them would raise a second, contradictory bill.
+// Safe to run repeatedly: already-invoiced rides are skipped.
 async function autoInvoiceClosedMonths() {
     try {
         const now = new Date();
@@ -2548,24 +2881,59 @@ async function autoInvoiceClosedMonths() {
         const [from, to] = monthRange(month);
         await materializeRecurring(from, to);
         const { rows } = await pool.query(
-            `SELECT DISTINCT rp.contact_id AS rider_id
+            `SELECT DISTINCT COALESCE(rider.parent_id, rider.id) AS payer_id
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-              WHERE rp.contact_id IS NOT NULL AND r.date BETWEEN $1 AND $2
+               JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+               JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+              WHERE r.date BETWEEN $1 AND $2
+                AND payer.payment_terms = 'arrears'
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}`,
             [from, to]);
+        let made = 0, skipped = 0;
         for (const row of rows) {
-            const result = await createInvoiceForContact(row.rider_id, from, to);
-            if (result) console.log(`Auto-created invoice ${result.invoice.number} (${result.line_count} rides) for rider ${row.rider_id}`);
+            const result = await createInvoiceForContact(row.payer_id, from, to);
+            if (!result) continue;
+            // A zero invoice almost always means the rides have no ride type,
+            // so it is a data gap rather than a real bill. Undo it and say so
+            // rather than leaving junk drafts for someone to clear up.
+            if (result.invoice.total_cents === 0) {
+                await pool.query('DELETE FROM invoices WHERE id = $1', [result.invoice.id]);
+                skipped++;
+                continue;
+            }
+            made++;
+            console.log(`Auto-created invoice ${result.invoice.number} (${result.line_count} rides) for payer ${row.payer_id}`);
+        }
+        if (made || skipped) {
+            console.log(`Month-end invoicing for ${month}: ${made} created` +
+                (skipped ? `, ${skipped} skipped with a zero total (rides have no ride type)` : ''));
         }
     } catch (err) {
         console.error('Automatic month-end invoicing failed:', err);
     }
 }
 
-setTimeout(autoInvoiceClosedMonths, 10 * 1000); // shortly after startup
-setInterval(autoInvoiceClosedMonths, 12 * 3600 * 1000); // and twice a day
+// OFF by default. It was creating invoices for payers billed in advance, and
+// unattended invoicing is only safe once every payer has payment terms and
+// every ride has a type. Turn it back on with a settings row:
+//   INSERT INTO settings (key, value) VALUES ('auto_invoice', 'on')
+//     ON CONFLICT (key) DO UPDATE SET value = 'on';
+// It then invoices IN-ARREARS payers only, for the month just ended.
+async function autoInvoiceIfEnabled() {
+    try {
+        const { rows } = await pool.query(
+            "SELECT value FROM settings WHERE key = 'auto_invoice'");
+        if ((rows[0] || {}).value !== 'on') return;
+        await autoInvoiceClosedMonths();
+    } catch (err) {
+        console.error('Auto-invoice check failed:', err);
+    }
+}
+
+setTimeout(autoInvoiceIfEnabled, 10 * 1000); // shortly after startup
+setInterval(autoInvoiceIfEnabled, 12 * 3600 * 1000); // and twice a day
 
 app.put('/api/invoices/:id', requireRole('helper'), async (req, res) => {
     try {
@@ -2612,21 +2980,35 @@ async function loadSettings() {
 }
 
 // Draws one invoice onto the current page of `doc`
+// "14 Oct 2026" — the same format the screen uses
+function fmtDay(value) {
+    if (!value) return '';
+    // pg hands back a Date for timestamptz and a string for date columns
+    const d = value instanceof Date ? value
+        : new Date(String(value).slice(0, 10) + 'T00:00:00Z');
+    if (isNaN(d)) return String(value);
+    return d.toLocaleDateString('en-GB', {
+        day: '2-digit', month: 'short', year: 'numeric',
+        // a plain date column has no zone; read it as written
+        timeZone: value instanceof Date ? undefined : 'UTC'
+    });
+}
+
 function drawInvoicePage(doc, inv, lines, settings) {
     const cur = settings.currency || 'R';
     const money = (cents) => `${cur} ${(cents / 100).toFixed(2)}`;
 
     doc.fillColor('#000000').fontSize(20).font('Helvetica-Bold')
         .text(settings.business_name || 'Invoice', 50, 50);
-    if (settings.business_address) {
-        doc.fontSize(9).font('Helvetica').fillColor('#555555')
-            .text(settings.business_address);
-    }
+    doc.fontSize(9).font('Helvetica').fillColor('#555555');
+    if (settings.business_address) doc.text(settings.business_address);
+    const contact = [settings.business_phone, settings.business_email].filter(Boolean).join('  ·  ');
+    if (contact) doc.text(contact);
     doc.moveDown(1.5);
     doc.fillColor('#000000').fontSize(14).font('Helvetica-Bold').text(`Invoice ${inv.number}`);
     doc.fontSize(10).font('Helvetica').moveDown(0.3);
-    doc.text(`Date: ${new Date(inv.created_at).toISOString().slice(0, 10)}`);
-    if (inv.period_start) doc.text(`Period: ${inv.period_start} to ${inv.period_end}`);
+    doc.text(`Date: ${fmtDay(inv.created_at)}`);
+    if (inv.period_start) doc.text(`Period: ${fmtDay(inv.period_start)} to ${fmtDay(inv.period_end)}`);
     doc.moveDown(0.8);
     doc.font('Helvetica-Bold').text('Billed to:');
     doc.font('Helvetica').text(inv.contact_name);
@@ -2657,12 +3039,24 @@ function drawInvoicePage(doc, inv, lines, settings) {
     doc.moveDown(0.4);
     for (const line of lines) {
         if (doc.y > doc.page.height - 120) doc.addPage();
-        drawRow(line.ride_date || '', line.description, money(line.amount_cents), false);
+        drawRow(fmtDay(line.ride_date), line.description, money(line.amount_cents), false);
     }
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
     drawRow('', 'Total', money(inv.total_cents), true);
 
+    if (inv.holiday_note) {
+        doc.moveDown(1);
+        doc.fontSize(9.5).font('Helvetica').fillColor('#555555')
+            .text(inv.holiday_note, left, doc.y, { width: right - left });
+    }
+    // Explain the arena fee, but only on an invoice that actually carries one —
+    // otherwise it is a paragraph about a charge that is not there.
+    if (settings.arena_fee_note && lines.some((l) => /^(.*— )?Arena fee /.test(l.description || ''))) {
+        doc.moveDown(1);
+        doc.fontSize(9.5).font('Helvetica').fillColor('#555555')
+            .text(settings.arena_fee_note, left, doc.y, { width: right - left });
+    }
     if (settings.bank_details) {
         doc.moveDown(1.5);
         if (doc.y > doc.page.height - 140) doc.addPage();
@@ -2689,13 +3083,14 @@ function drawGuideStatement(doc, guide, rides, from, to, settings) {
 
     doc.fillColor('#000000').fontSize(20).font('Helvetica-Bold')
         .text(settings.business_name || 'Riding school', 50, 50);
-    if (settings.business_address) {
-        doc.fontSize(9).font('Helvetica').fillColor('#555555').text(settings.business_address);
-    }
+    doc.fontSize(9).font('Helvetica').fillColor('#555555');
+    if (settings.business_address) doc.text(settings.business_address);
+    const hdr = [settings.business_phone, settings.business_email].filter(Boolean).join('  ·  ');
+    if (hdr) doc.text(hdr);
     doc.moveDown(1.5);
     doc.fillColor('#000000').fontSize(14).font('Helvetica-Bold').text('Lessons and pay');
     doc.fontSize(10).font('Helvetica').moveDown(0.3);
-    doc.text(`Period: ${from} to ${to}`);
+    doc.text(`Period: ${fmtDay(from)} to ${fmtDay(to)}`);
     doc.moveDown(0.8);
     doc.font('Helvetica-Bold').text('Instructor:');
     doc.font('Helvetica').text(guide.name + (guide.is_assistant ? ' (assistant)' : ''));
@@ -2723,7 +3118,7 @@ function drawGuideStatement(doc, guide, rides, from, to, settings) {
         const what = [r.start_time.slice(0, 5), r.ride_type_name || 'Lesson',
             r.rider_count ? `${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}` : 'no riders']
             .filter(Boolean).join(' · ');
-        drawRow(r.date, what, money(rate), false);
+        drawRow(fmtDay(r.date), what, money(rate), false);
     }
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
@@ -2780,6 +3175,52 @@ const INVOICE_WITH_CONTACT_SQL = `
       FROM invoices i JOIN contacts c ON c.id = i.contact_id
       LEFT JOIN contacts rc ON rc.id = i.rider_contact_id`;
 
+// What this invoice deliberately does NOT cover. An invoice raised ahead of
+// the period cannot know what will be ridden in the holidays or booked ad hoc,
+// so rather than guessing it says so — naming the holiday window when there is
+// a relevant one, either inside the period or immediately before it.
+async function invoiceHolidayNote(inv) {
+    if (!inv.period_start || !inv.period_end) return null;
+    const { rows: schools } = await pool.query(
+        `SELECT DISTINCT s.id, s.name
+           FROM invoice_lines il
+           JOIN ride_participants rp ON rp.id = il.participant_id
+           JOIN contacts rider ON rider.id = rp.contact_id
+           JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+           JOIN schools s ON s.id = COALESCE(rider.school_id, payer.school_id)
+          WHERE il.invoice_id = $1`, [inv.id]);
+    const from = String(inv.period_start).slice(0, 10);
+    const to = String(inv.period_end).slice(0, 10);
+    const windows = [];
+    for (const s of schools) {
+        const { rows: terms } = await pool.query(
+            `SELECT period_start::text AS s, period_end::text AS e
+               FROM school_terms WHERE school_id = $1 ORDER BY period_start`, [s.id]);
+        if (!terms.length) continue;
+        // the gaps between terms are the holidays
+        const gaps = [];
+        for (let i = 1; i < terms.length; i++) {
+            const gs = shiftDays(terms[i - 1].e, 1), ge = shiftDays(terms[i].s, -1);
+            if (gs <= ge) gaps.push([gs, ge]);
+        }
+        gaps.push([shiftDays(terms[terms.length - 1].e, 1), null]);
+        // Relevant = any holiday near this period: inside it, just before it
+        // (a term invoice starts mid-month and leaves that stretch unbilled) or
+        // just after it (the holiday the term runs into). A month either side is
+        // enough to catch all three without listing distant ones.
+        const near = [shiftDays(from, -31), shiftDays(to, 31)];
+        const hits = gaps.filter(([gs, ge]) => gs <= near[1] && (!ge || ge >= near[0]));
+        hits.forEach(([gs, ge]) => {
+            windows.push(`${s.name} school holidays: ${fmtDay(gs)}` +
+                (ge ? ` to ${fmtDay(ge)}` : ' onwards'));
+        });
+    }
+    const policy = 'Lessons ridden during the school holidays, and any extra lessons ' +
+        'outside the regular weekly schedule, are not billed in advance. They are ' +
+        'invoiced the following month, once they have been ridden.';
+    return windows.length ? `${windows.join('\n')}\n${policy}` : policy;
+}
+
 app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
     try {
         const { rows } = await pool.query(
@@ -2789,6 +3230,7 @@ app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
         const { rows: lines } = await pool.query(
             'SELECT * FROM invoice_lines WHERE invoice_id = $1 ORDER BY ride_date, id', [inv.id]);
         const settings = await loadSettings();
+        inv.holiday_note = await invoiceHolidayNote(inv);
 
         res.setHeader('Content-Type', 'application/pdf');
         // ?download=1 saves the file instead of taking over the screen — an
@@ -3105,6 +3547,9 @@ app.get('/api/public/schedule', async (req, res) => {
                             .map((p) => p.horse_name),
                         off_riders: (r.off_riders || []).map((o) => ({
                             name: o.contact_name, frequency: o.frequency, next_date: o.next_date
+                        })),
+                        cancellations: (r.cancellations || []).map((c) => ({
+                            name: c.contact_name, kind: c.kind
                         })),
                         staff: r.guides.map((g) => ({
                             name: g.guide_name, assistant: g.is_assistant,

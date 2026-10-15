@@ -10,10 +10,20 @@
  *      background and replace the cached copy — so the next time the phone is
  *      opened it is already current, signal or not.
  */
-const VERSION = 'svsh-v1';
+const VERSION = 'svsh-v2';
 const SHELL = `${VERSION}-shell`;
 const DATA = `${VERSION}-data`;
-const SHELL_FILES = ['/schedule', '/schedule.html', '/style.css', '/schedule.js'];
+const SHELL_FILES = ['/schedule', '/schedule.html', '/style.css', '/schedule.js',
+                     '/', '/index.html', '/app.js'];
+
+/* The office app reads these while standing in an arena with no signal. Only
+ * GETs are cached; writes never are. The cache is cleared on logout, since it
+ * holds contact details and would otherwise outlive the session on the device. */
+const OFFICE_API = ['/api/auth/me', '/api/users', '/api/schools/holidays',
+                    '/api/rides', '/api/contacts', '/api/horses', '/api/guides',
+                    '/api/ride-types', '/api/settings', '/api/schools', '/api/credits',
+                    '/api/recurring', '/api/todos', '/api/service-contacts'];
+const isOfficeApi = (url) => OFFICE_API.includes(url.pathname);
 
 self.addEventListener('install', (e) => {
     e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
@@ -29,6 +39,23 @@ self.addEventListener('activate', (e) => {
 
 const isSchedule = (url) => url.pathname === '/api/public/schedule';
 
+// Network first, cache as the fallback, stamped so the page can say how old it
+// is. Never cache an error or a 401 — a cached "not logged in" would be worse
+// than no cache at all.
+async function networkFirstData(request) {
+    const cache = await caches.open(DATA);
+    try {
+        const res = await fetch(request);
+        if (res.ok) await cache.put(request, await stamp(res.clone()));
+        return res;
+    } catch (err) {
+        const hit = await cache.match(request);
+        if (hit) return hit;
+        return new Response(JSON.stringify({ error: 'offline', offline: true }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } });
+    }
+}
+
 self.addEventListener('fetch', (e) => {
     const url = new URL(e.request.url);
     if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
@@ -36,20 +63,8 @@ self.addEventListener('fetch', (e) => {
     // Schedule data: network first (it must be fresh when it can be), falling
     // back to the last good copy. A cached response is tagged with the time it
     // was stored so the page can say "showing 06:41".
-    if (isSchedule(url)) {
-        e.respondWith((async () => {
-            const cache = await caches.open(DATA);
-            try {
-                const res = await fetch(e.request);
-                if (res.ok) await cache.put(e.request, await stamp(res.clone()));
-                return res;
-            } catch (err) {
-                const hit = await cache.match(e.request);
-                if (hit) return hit;
-                return new Response(JSON.stringify({ error: 'offline', offline: true }),
-                    { status: 503, headers: { 'Content-Type': 'application/json' } });
-            }
-        })());
+    if (isSchedule(url) || isOfficeApi(url)) {
+        e.respondWith(networkFirstData(e.request));
         return;
     }
 
@@ -137,7 +152,10 @@ self.addEventListener('notificationclick', (e) => {
     })());
 });
 
-// The page asks for a refresh when it comes back to the foreground
+// The page asks for a refresh when it comes back to the foreground, and for the
+// cached data to be dropped on logout.
 self.addEventListener('message', (e) => {
-    if (e.data && e.data.type === 'refresh') e.waitUntil(refreshCachedSchedules());
+    if (!e.data) return;
+    if (e.data.type === 'refresh') e.waitUntil(refreshCachedSchedules());
+    if (e.data.type === 'clear-data') e.waitUntil(caches.delete(DATA));
 });

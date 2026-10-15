@@ -52,6 +52,14 @@
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
 
+    // "14 Oct 2026" — the house format for a plain date on screen and on paper
+    function fmtDay(dateStr) {
+        if (!dateStr) return '';
+        const d = new Date(String(dateStr).slice(0, 10) + 'T00:00:00');
+        if (isNaN(d)) return String(dateStr);
+        return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+
     function fmtDate(dateStr) {
         return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB',
             { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -81,9 +89,29 @@
             opts.headers['Content-Type'] = 'application/json';
             opts.body = JSON.stringify(body);
         }
-        const res = await fetch(url, opts);
+        let res;
+        try {
+            res = await fetch(url, opts);
+        } catch (netErr) {
+            // The connection failed outright. Be explicit about it: a change
+            // that looks saved but was not is the worst outcome here.
+            setOffline(true);
+            const err = new Error(method === 'GET'
+                ? 'No signal — could not load that.'
+                : 'Not saved — you are offline. Try again once you have signal.');
+            err.offline = true;
+            throw err;
+        }
         let data = null;
         try { data = await res.json(); } catch (e) { /* non-JSON */ }
+        // 503 + offline flag is the service worker saying it had nothing cached
+        if (res.status === 503 && data && data.offline) {
+            setOffline(true);
+            const err = new Error('No signal, and this has not been saved to the device yet.');
+            err.offline = true;
+            throw err;
+        }
+
         if (res.status === 401 && state.user) {
             state.user = null;
             renderLogin();
@@ -95,7 +123,80 @@
             Object.assign(err, data || {});
             throw err;
         }
+        // The worker only falls back to its cache when the network failed, so an
+        // X-Cached-At stamp is a reliable "we are offline" signal — a cached 200
+        // must never be mistaken for the connection being back.
+        const cachedAt = res.headers.get('X-Cached-At');
+        if (cachedAt) {
+            setOffline(true);
+            setStale(cachedAt);
+        } else if (res.ok) {
+            setOffline(false);
+        }
         return data;
+    }
+
+    // ---------- Offline state ----------
+    // One banner, honest about two different things: that there is no signal,
+    // and that what is on screen may be older than the server.
+    let staleSince = null;
+    function offlineBar() {
+        let el = document.getElementById('offline-bar');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'offline-bar';
+            el.className = 'offline-bar hidden';
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+
+    function paintOfflineBar() {
+        const el = offlineBar();
+        const off = !navigator.onLine || document.body.classList.contains('is-offline');
+        if (!off) { el.classList.add('hidden'); return; }
+        const when = staleSince ? new Date(staleSince) : null;
+        const clock = when
+            ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
+            : null;
+        el.innerHTML = `⚠ <b>No signal.</b> ${clock
+            ? `Showing the schedule as at ${clock}. Changes will not save until you are back online.`
+            : 'Changes will not save until you are back online.'}`;
+        el.classList.remove('hidden');
+    }
+
+    // A page that LOADED while offline never receives the 'online' event, and on
+    // mobile the event is unreliable anyway — so while we believe we are offline,
+    // keep asking. Cheap, and it is the only thing that reliably notices the
+    // signal coming back.
+    let reconnectTimer = null;
+    function startReconnectWatch() {
+        if (reconnectTimer) return;
+        reconnectTimer = setInterval(() => {
+            if (!document.body.classList.contains('is-offline')) return stopReconnectWatch();
+            confirmOnline();
+        }, 5000);
+    }
+    function stopReconnectWatch() {
+        if (reconnectTimer) clearInterval(reconnectTimer);
+        reconnectTimer = null;
+    }
+
+    function setOffline(off) {
+        const was = document.body.classList.contains('is-offline');
+        document.body.classList.toggle('is-offline', !!off);
+        if (!off) staleSince = null;
+        if (off) startReconnectWatch(); else stopReconnectWatch();
+        if (was && !off) {
+            // the signal is back — refill the device's copy
+            warmEssentials().then(() => prewarmDays(21));
+        }
+        paintOfflineBar();
+    }
+
+    function setStale(iso) {
+        staleSince = iso;
+        paintOfflineBar();
     }
 
     function canInvoice() { return state.user && ['admin', 'helper'].includes(state.user.role); }
@@ -107,6 +208,11 @@
 
     function openDialog(html) {
         $dialog.innerHTML = html;
+        // A dialog can be replaced in place while the old one is scrolled down
+        // (reopening a parent after adding a child, tapping edit from a scrolled
+        // form). Replacing innerHTML does not reset the scroll, so the new
+        // dialog would open part-way down with its heading off-screen.
+        $dialog.scrollTop = 0;
         $backdrop.classList.remove('hidden');
         enhanceTimeInputs($dialog);
     }
@@ -408,10 +514,28 @@
                    onclick="event.stopPropagation()" title="Call">📞</a>`;
     }
 
-    function contactOptions(selectedId, emptyLabel, busy) {
-        return `<option value="">${esc(emptyLabel || '')}</option>` +
-            state.contacts.filter((c) => keepOption(c.id, selectedId, busy)).map((c) =>
-                `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    // ridersOnly drops contacts who are only a parent — they are about half the
+    // list and never take a seat, so they just get in the way when picking who
+    // rides. Anyone already selected stays on the list whatever their roles,
+    // otherwise opening a ride whose rider is not flagged as one would show a
+    // blank picker and saving would quietly drop them from the ride. Those are
+    // flagged in the label so the contact can be corrected.
+    // Sentinel value for the "add a new rider" entry at the top of a rider
+    // picker. Contact ids are bigint strings, so this can never collide with
+    // one, and the change handler swaps it straight back out — it is never a
+    // value that reaches a save.
+    const NEW_RIDER = '__new';
+    const newRiderOption = () => `<option value="${NEW_RIDER}">＋ Add new rider…</option>`;
+
+    function contactOptions(selectedId, emptyLabel, busy, ridersOnly, withNew) {
+        const isSel = (c) => String(selectedId) === String(c.id);
+        return (withNew ? newRiderOption() : '') +
+            `<option value="">${esc(emptyLabel || '')}</option>` +
+            state.contacts
+                .filter((c) => keepOption(c.id, selectedId, busy))
+                .filter((c) => !ridersOnly || c.is_rider || isSel(c))
+                .map((c) => `<option value="${c.id}" ${isSel(c) ? 'selected' : ''}>${esc(c.name)}`
+                    + `${ridersOnly && !c.is_rider ? ' — not marked as a rider' : ''}</option>`).join('');
     }
 
     function horseOptions(selectedId, busy) {
@@ -527,6 +651,8 @@
                 showShell();
                 location.hash = '#/calendar';
                 route();
+                // fill the device's copy now that there is a session to fetch with
+                setTimeout(() => warmEssentials().then(() => prewarmDays(21)), 1500);
             } catch (err) {
                 document.getElementById('login-error').textContent = err.message;
             }
@@ -773,6 +899,7 @@
         const oldScroller = $view.querySelector('.calendar-scroller');
         if (oldScroller) state.calScroll = { x: oldScroller.scrollLeft, y: oldScroller.scrollTop };
         $view.innerHTML = `
+            <div id="holiday-bar" class="holiday-bar hidden"></div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
 `;
@@ -786,9 +913,39 @@
             dayRides = ridesData.rides;
             drawDayGrid(dayRides, date);
             drawCreditBar(creditsData.credits || [], date, dayRides);
+            drawHolidayBar(date);
         } catch (err) {
             document.getElementById('cal-grid').textContent = err.message;
         }
+    }
+
+    // Which schools are on holiday today. The weekly schedule keeps running
+    // through the holidays — riders drop in and out — so this is context, not a
+    // reason to hide anything.
+    async function drawHolidayBar(date) {
+        const bar = document.getElementById('holiday-bar');
+        if (!bar) return;
+        let data;
+        try {
+            data = await api('GET', `/api/schools/holidays?date=${date}`);
+        } catch (err) { bar.classList.add('hidden'); return; }
+        const onHoliday = data.schools.filter((s) => s.status === 'holiday');
+        const unknown = data.schools.filter((s) => s.status === 'unknown');
+        if (!onHoliday.length && !unknown.length) { bar.classList.add('hidden'); return; }
+        const parts = [];
+        if (onHoliday.length) {
+            const names = onHoliday.map((s) => {
+                const back = s.next_term_start ? ` <span class="muted">(back ${esc(shortDate(s.next_term_start))})</span>` : '';
+                return `<b>${esc(s.name)}</b>${back}`;
+            }).join(', ');
+            parts.push(`🏖️ School holidays: ${names}`);
+        }
+        if (unknown.length) {
+            parts.push(`<span class="muted">Term dates not set for ${
+                unknown.map((s) => esc(s.name)).join(', ')} — set them under Settings.</span>`);
+        }
+        bar.innerHTML = parts.join('<br>');
+        bar.classList.remove('hidden');
     }
 
     // Riders who missed a lesson hold a credit until they are put on another
@@ -1075,6 +1232,16 @@
             // riders in the weekly series who aren't on this week
             const inote = r.instructor_notes
                 ? `<div class="rider-row instructor-note">📝 ${esc(r.instructor_notes)}</div>` : '';
+            // Three different reasons a rider is not on the ride, and they must
+            // not look the same: cancelled, rescheduled (holds a credit), or
+            // simply an off week on a fortnightly slot.
+            riderRows += (r.cancellations || []).map((c) => `
+                <div class="rider-row off-rider ${c.kind}">
+                    <span class="rider-name">${esc(c.contact_name)}</span>
+                    <span class="rider-off">${c.kind === 'rescheduled'
+                        ? '⟳ rescheduled'
+                        : (c.from_series ? '✕ off the weekly ride' : '✕ cancelled')}</span>
+                </div>`).join('');
             riderRows += (r.off_riders || []).map((o) => `
                 <div class="rider-row off-rider">
                     <span class="rider-name">${esc(o.contact_name)}</span>
@@ -1786,12 +1953,20 @@
 
     // Contact options for a rider row: contacts whose availability windows
     // don't cover the ride time drop into a flagged group.
+    //
+    // Contacts who are only a parent never take a seat, so they are left out —
+    // they are about half the contact list and only get in the way here. Anyone
+    // already on the ride stays on the list whatever their roles, or opening a
+    // ride whose rider is not flagged as one would blank the picker and saving
+    // would drop them; those are labelled so the contact can be corrected.
     function partContactOptions(selectedId, busy, weekday, startMin, durMin) {
-        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}${c.is_prospect ? ' (interested)' : ''}</option>`;
-        const avail = state.contacts.filter((c) => keepOption(c.id, selectedId, busy));
+        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}${c.is_prospect ? ' (interested)' : ''}${!c.is_rider ? ' — not marked as a rider' : ''}</option>`;
+        const avail = state.contacts.filter((c) => keepOption(c.id, selectedId, busy))
+            .filter((c) => c.is_rider || String(c.id) === String(selectedId));
         const ok = avail.filter((c) => contactAvailable(c, weekday, startMin, durMin));
         const flagged = avail.filter((c) => !contactAvailable(c, weekday, startMin, durMin));
-        let html = '<option value="">(open seat)</option>' + ok.map((c) => opt(c, '')).join('');
+        let html = newRiderOption() + '<option value="">(open seat)</option>'
+            + ok.map((c) => opt(c, '')).join('');
         if (flagged.length) {
             html += `<optgroup label="⚠ Not usually available then">${flagged.map((c) => opt(c, '⚠ ')).join('')}</optgroup>`;
         }
@@ -1808,7 +1983,8 @@
     function participantRowHtml(p, withResched, freq) {
         return `
             <div class="pick-row" data-kind="part">
-                <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)')}</select>
+                <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)', null, true, true)}</select>
+                <button type="button" class="secondary small pr-new" title="New rider — someone who has not ridden here before">＋</button>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
                 <select class="pr-alt ${p && p.alt_horse_id ? '' : 'hidden'}" title="Alternative horse — instructor picks on the day">
@@ -1839,6 +2015,62 @@
             </div>`;
     }
 
+    // A walk-in: someone riding today who is not in the book yet. Deliberately
+    // the smallest possible form — name, phone, level — because it is filled in
+    // with the person standing there. They default to paying cash on the day.
+    function openWalkInRiderDialog(row) {
+        const overlay = openSubDialog(`
+            <h3 style="margin:0 0 4px">New rider</h3>
+            <p class="muted" style="margin:0 0 10px">For a once-off or someone new.
+               You can fill in the rest later.</p>
+            <label>Name</label>
+            <input id="wi-name" autocomplete="off">
+            <label>Phone (WhatsApp)</label>
+            ${phoneFieldHtml('wi-phone', '')}
+            <label>Experience level</label>
+            <select id="wi-exp">
+                <option value="">(not set)</option>
+                ${LEVELS.map((l) => `<option value="${l}">${LEVEL_LABELS[l]}</option>`).join('')}
+            </select>
+            <label>How they pay</label>
+            <select id="wi-terms">
+                ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
+                    `<option value="${k}" ${k === 'cash_after' ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+            <div class="form-error"></div>
+            <div class="form-actions">
+                <button class="secondary" id="wi-cancel">Cancel</button>
+                <button id="wi-save">Add rider</button>
+            </div>`);
+        overlay.querySelector('#wi-cancel').addEventListener('click', () => overlay.remove());
+        overlay.querySelector('#wi-save').addEventListener('click', async () => {
+            const name = overlay.querySelector('#wi-name').value.trim();
+            const err = overlay.querySelector('.form-error');
+            if (!name) { err.textContent = 'A name is required.'; return; }
+            try {
+                const res = await api('POST', '/api/contacts', {
+                    name,
+                    phone: readPhoneField('wi-phone'),
+                    experience: overlay.querySelector('#wi-exp').value || null,
+                    is_rider: true,
+                    is_parent: false,
+                    payment_terms: overlay.querySelector('#wi-terms').value
+                });
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                overlay.remove();
+                // put them straight into the row that asked for them
+                const sel = row.querySelector('.pr-contact');
+                sel.innerHTML = contactOptions(res.contact.id, '(no rider — horse only)', null, true, true);
+                sel.value = res.contact.id;
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                toast(`${name} added.`);
+            } catch (e2) {
+                err.textContent = e2.message;
+            }
+        });
+        overlay.querySelector('#wi-name').focus();
+    }
+
     function openRideDialog(ride, defaults) {
         const isEdit = !!ride;
         const locked = isEdit && ride.invoiced;
@@ -1865,10 +2097,10 @@
             // Rows marked as rescheduled are leaving the ride — theirs don't count
             $dialog.querySelectorAll('.pr-horse, .gr-horse').forEach((sel) => {
                 if (sel !== exceptSel && sel.value && !sel.classList.contains('hidden') &&
-                    !sel.closest('.rescheduled')) horses.add(sel.value);
+                    !sel.closest('.removed')) horses.add(sel.value);
             });
             $dialog.querySelectorAll('.pr-contact').forEach((sel) => {
-                if (sel !== exceptSel && sel.value && !sel.closest('.rescheduled')) contacts.add(sel.value);
+                if (sel !== exceptSel && sel.value && !sel.closest('.removed')) contacts.add(sel.value);
             });
             $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
                 if (sel !== exceptSel && sel.value) { guides.add(sel.value); dialogGuides.add(sel.value); }
@@ -1887,7 +2119,7 @@
             const startMin = toMin(timeVal());
             const dur = currentDuration();
             $dialog.querySelectorAll('[data-kind="part"]').forEach((row) => {
-                if (row.classList.contains('rescheduled')) return; // frozen until undone
+                if (row.classList.contains('removed')) return; // frozen until undone
                 const horseSel = row.querySelector('.pr-horse');
                 const contactSel = row.querySelector('.pr-contact');
                 horseSel.innerHTML = partHorseOptions(horseSel.value, takenSets(horseSel).horses, contactSel.value);
@@ -1938,7 +2170,8 @@
         // Riders marked via ⟳ stay in the dialog, greyed out; the credit is
         // only created on save. Undo reverts the marking before then.
         function reschedRows() {
-            return [...$dialog.querySelectorAll('[data-kind="part"].rescheduled')].map((row) => {
+            return [...$dialog.querySelectorAll('[data-kind="part"].removed')]
+                .filter((row) => row.dataset.removeKind === 'rescheduled').map((row) => {
                 const cid = row.querySelector('.pr-contact').value;
                 const c = contactById(cid);
                 return { contact_id: cid, name: (c && c.name) || 'Rider' };
@@ -1952,13 +2185,106 @@
             }
         }
 
-        const removeFromSeries = [];   // contact ids to drop from the weekly template
+        // ---- 3b: nothing to save until something changes ----
+        // Saving an untouched ride would ask the series question and write a
+        // no-op, so the button stays disabled until the form is actually dirty.
+        let dirty = false;
+        function markDirty() {
+            dirty = true;
+            const btn = document.getElementById('ride-save');
+            if (btn) { btn.disabled = false; btn.title = ''; }
+        }
+
+        // Only the ride's own settings can be pushed to the whole series —
+        // rider changes are per-occurrence and carry their own scope.
+        let rideFieldsAtOpen = null;
+        function rideFieldsNow() {
+            const v = (id) => (document.getElementById(id) || {}).value || '';
+            return JSON.stringify([v('ride-time'), v('ride-type'), v('ride-level'),
+                v('ride-venue'), v('ride-duration'), v('ride-inotes'),
+                [...$dialog.querySelectorAll('[data-kind="guide"]')].map((r) => [
+                    r.querySelector('.gr-guide').value,
+                    r.querySelector('.gr-mode').value,
+                    (r.querySelector('.gr-horse') || {}).value || ''
+                ])]);
+        }
+        function rideFieldsChanged() {
+            return rideFieldsAtOpen !== null && rideFieldsNow() !== rideFieldsAtOpen;
+        }
+
+        // ---- marking riders off the ride (nothing is saved until Save) ----
+        // A marked row stays visible, struck through, so she can see what she
+        // has done and undo it. kind: 'cancelled' (not riding) or 'rescheduled'
+        // (not riding, gets a credit). scope: 'week' or 'series'.
+        function markRemoved(row, scope, kind) {
+            row.classList.add('removed');
+            row.dataset.removeScope = scope;
+            row.dataset.removeKind = kind;
+            row.querySelectorAll('select').forEach((s) => { s.disabled = true; });
+            const x = row.querySelector('.row-x');
+            x.textContent = 'Undo';
+            x.classList.remove('danger');
+            x.classList.add('secondary');
+            x.title = 'Put this rider back on the ride';
+            const rb = row.querySelector('.row-resched');
+            if (rb) rb.style.display = kind === 'rescheduled' ? '' : 'none';
+            if (rb && kind === 'rescheduled') {
+                rb.textContent = 'Undo';
+                rb.title = 'Revert — keep the rider on this ride';
+            }
+            let tag = row.querySelector('.removed-tag');
+            if (!tag) {
+                tag = document.createElement('span');
+                tag.className = 'removed-tag';
+                row.appendChild(tag);
+            }
+            tag.textContent = kind === 'rescheduled'
+                ? '⟳ rescheduled — gets a credit'
+                : (scope === 'series' ? '✕ removed from the weekly schedule' : '✕ not riding this week');
+        }
+
+        function unmarkRemoved(row) {
+            row.classList.remove('removed');
+            delete row.dataset.removeScope;
+            delete row.dataset.removeKind;
+            row.querySelectorAll('select').forEach((s) => { s.disabled = false; });
+            const x = row.querySelector('.row-x');
+            x.innerHTML = ICON_X;
+            x.classList.add('danger');
+            x.classList.remove('secondary');
+            x.title = '';
+            const rb = row.querySelector('.row-resched');
+            if (rb) {
+                rb.style.display = '';
+                rb.innerHTML = ICON_ROTATE;
+                rb.title = "Can't make it — give a reschedule credit";
+            }
+            const tag = row.querySelector('.removed-tag');
+            if (tag) tag.remove();
+        }
+
         function wireRow(row) {
-            row.querySelector('.row-x').addEventListener('click', async () => {
+            const xBtn = row.querySelector('.row-x');
+            xBtn.addEventListener('click', async () => {
+                // Already marked? This click is the undo.
+                if (row.classList.contains('removed')) {
+                    unmarkRemoved(row);
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
                 const contactSel = row.querySelector('.pr-contact');
                 const cid = contactSel && contactSel.value;
-                const inSeries = isEdit && ride.recurring_id && cid;
-                if (inSeries) {
+                // An empty row, or a horse-only seat, is just deleted — there is
+                // nobody to record a cancellation against.
+                if (!cid) {
+                    row.remove();
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
+                let scope = 'week';
+                if (isEdit && ride.recurring_id) {
                     const name = (contactById(cid) || {}).name || 'this rider';
                     const choice = await askChoice(`Remove ${name}`,
                         'They are on the weekly fixed ride.', [
@@ -1966,33 +2292,32 @@
                             { key: 'series', label: 'Remove from the weekly schedule', hint: 'this week and from now on' }
                         ]);
                     if (!choice) return;
-                    if (choice === 'series') removeFromSeries.push(cid);
+                    scope = choice;
                 }
-                row.remove();
+                // Nothing is saved yet — it is shown struck through so it can be
+                // undone before saving, and so she can see what she has done.
+                markRemoved(row, scope, 'cancelled');
+                markDirty();
                 refreshOptions();
             });
             const reschedBtn = row.querySelector('.row-resched');
             if (reschedBtn) {
                 reschedBtn.addEventListener('click', () => {
-                    if (row.classList.contains('rescheduled')) {
-                        row.classList.remove('rescheduled');
-                        row.querySelectorAll('select').forEach((s) => { s.disabled = false; });
-                        reschedBtn.innerHTML = ICON_ROTATE;
-                        reschedBtn.title = "Can't make it — give a reschedule credit";
-                        row.querySelector('.row-x').style.display = '';
-                    } else {
+                    if (row.classList.contains('removed')) unmarkRemoved(row);
+                    else {
                         const cid = row.querySelector('.pr-contact').value;
                         if (!cid) return dialogError('Pick the rider first, then tap ⟳.');
-                        row.classList.add('rescheduled');
-                        row.querySelectorAll('select').forEach((s) => { s.disabled = true; });
-                        reschedBtn.textContent = 'Undo';
-                        reschedBtn.title = 'Revert — keep the rider on this ride';
-                        row.querySelector('.row-x').style.display = 'none';
+                        markRemoved(row, 'week', 'rescheduled');
                     }
+                    markDirty();
                     refreshOptions();
                     updateReschedInfo();
                 });
             }
+            const partSel = row.querySelector('.pr-contact');
+            if (partSel) partSel.dataset.prev = partSel.value;
+            const newBtn = row.querySelector('.pr-new');
+            if (newBtn) newBtn.addEventListener('click', () => openWalkInRiderDialog(row));
             const altToggle = row.querySelector('.pr-alt-toggle');
             if (altToggle) altToggle.addEventListener('click', () => {
                 row.querySelector('.pr-alt').classList.toggle('hidden');
@@ -2012,7 +2337,7 @@
             refreshOptions();
         }
         openDialog(`
-            <h2>${isEdit ? (ride.is_block ? '🚫 Blocked horses' : '🐴 Ride') : 'New ride'} — ${esc(defaults.date)}</h2>
+            <h2>${isEdit ? (ride.is_block ? '🚫 Blocked horses' : '🐴 Ride') : 'New ride'} — ${esc(fmtDay(defaults.date))}</h2>
             ${isEdit && ride.recurring_id ? '<p class="muted">🔁 This comes from a fixed weekly slot. When you save you can choose to change just this day or the whole series.</p>' : ''}
             ${locked ? '<p class="muted">🧾 This ride is on an invoice and can no longer be changed.</p>' : ''}
             <fieldset style="border:none;margin:0;padding:0" ${locked ? 'disabled' : ''}>
@@ -2064,7 +2389,9 @@
             <div class="form-warning" id="ride-warnings"></div>
             <div class="form-error"></div>
             <div class="form-actions">
-                ${isEdit && !locked ? '<button class="danger small" id="ride-delete">Delete</button><span class="spacer"></span>' : ''}
+                ${isEdit && !locked ? '<button class="danger small" id="ride-delete">Delete</button>' : ''}
+                ${isEdit && !locked ? '<button type="button" class="secondary small" id="ride-bill" title="Invoice this ride now, whatever the date">💳 Bill now</button>' : ''}
+                ${isEdit && !locked ? '<span class="spacer"></span>' : ''}
                 <button class="secondary" id="ride-cancel">${locked ? 'Close' : 'Cancel'}</button>
                 ${locked ? '' : '<button id="ride-save">Save</button>'}
             </div>`);
@@ -2082,6 +2409,18 @@
         if (isEdit && ride.rider_freq) Object.assign(seriesFreq, ride.rider_freq);
         parts.forEach((p) => addRow('ride-parts',
             participantRowHtml(p, isEdit, seriesFreq[String(p.contact_id)])));
+        // 3a: riders taken off earlier come back as struck-through rows, so the
+        // day still shows what happened and they can be put back.
+        if (isEdit) {
+            (ride.cancellations || []).forEach((c) => {
+                addRow('ride-parts', participantRowHtml(
+                    { contact_id: c.contact_id, horse_id: null }, isEdit,
+                    seriesFreq[String(c.contact_id)]));
+                const row = document.getElementById('ride-parts').lastElementChild;
+                // the row's own X is already the undo (see wireRow)
+                markRemoved(row, c.from_series ? 'series' : 'week', c.kind);
+            });
+        }
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
         document.getElementById('part-add').addEventListener('click', () =>
             addRow('ride-parts', participantRowHtml(null, isEdit)));
@@ -2092,8 +2431,17 @@
         document.getElementById('ride-type').addEventListener('change', refreshOptions);
         document.getElementById('ride-duration').addEventListener('change', refreshOptions);
         document.getElementById('ride-parts').addEventListener('change', (e) => {
-            // Picking a rider defaults the ride's level to their experience
             if (e.target.classList.contains('pr-contact')) {
+                // "Add new rider" is an action, not a choice — put the previous
+                // selection back at once so cancelling the dialog leaves the row
+                // exactly as it was, then open the form.
+                if (e.target.value === NEW_RIDER) {
+                    e.target.value = e.target.dataset.prev || '';
+                    openWalkInRiderDialog(e.target.closest('.pick-row'));
+                    return;
+                }
+                e.target.dataset.prev = e.target.value;
+                // Picking a rider defaults the ride's level to their experience
                 const lvlSel = document.getElementById('ride-level');
                 const c = contactById(e.target.value);
                 if (lvlSel && !lvlSel.value && c && c.experience) lvlSel.value = c.experience;
@@ -2112,6 +2460,18 @@
         refreshOptions();
         if (locked) return;
 
+        // Snapshot after the form is fully built, so a redraw is not mistaken
+        // for an edit. Any real input from here on enables Save.
+        rideFieldsAtOpen = rideFieldsNow();
+        const saveBtn = document.getElementById('ride-save');
+        if (isEdit) {
+            saveBtn.disabled = true;
+            saveBtn.title = 'Nothing has changed yet';
+        }
+        $dialog.addEventListener('input', markDirty);
+        $dialog.addEventListener('change', markDirty);
+
+
         document.getElementById('ride-save').addEventListener('click', async () => {
             if (!document.getElementById('ride-type').value) {
                 return dialogError('Pick a ride type — it sets the price and drives the reports.');
@@ -2127,8 +2487,14 @@
                 duration_min: parseInt(document.getElementById('ride-duration').value, 10) || null,
                 notes: document.getElementById('ride-notes').value,
                 instructor_notes: document.getElementById('ride-inotes').value,
+                cancellations: [...$dialog.querySelectorAll('[data-kind="part"].removed')]
+                    .map((row) => ({
+                        contact_id: row.querySelector('.pr-contact').value,
+                        kind: row.dataset.removeKind || 'cancelled',
+                        from_series: row.dataset.removeScope === 'series'
+                    })).filter((c) => c.contact_id),
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
-                    .filter((row) => !row.classList.contains('rescheduled'))
+                    .filter((row) => !row.classList.contains('removed'))
                     .map((row) => ({
                         horse_id: row.querySelector('.pr-horse').value || null,
                         alt_horse_id: (row.querySelector('.pr-alt') || {}).value || null,
@@ -2143,11 +2509,15 @@
                     };
                 }).filter((g) => g.guide_id)
             };
-            if (isEdit && ride.recurring_id) {
+            // Only the ride's own settings can apply to the whole series. Taking a
+            // rider off already asked its own week/series question, so asking
+            // again here would be a second, confusing scope prompt for the same
+            // action — and asking at all when nothing changed is just noise.
+            if (isEdit && ride.recurring_id && rideFieldsChanged()) {
                 const scope = await askChoice('Change the weekly ride',
                     `This is one occurrence of a fixed ${WEEKDAYS[isoDow(defaults.date) - 1]} ride.`, [
-                        { key: 'one', label: 'Just this day', hint: `only ${defaults.date} changes` },
-                        { key: 'series', label: 'This day and the whole series',
+                        { key: 'one', label: 'Just this day', hint: `only ${fmtDay(defaults.date)} changes` },
+                        { key: 'series', label: 'This day and later weeks',
                           hint: 'updates the weekly slot and every later week that is not invoiced' }
                     ]);
                 if (!scope) return;
@@ -2172,11 +2542,12 @@
                         contact_id: defaults.addContactId, ride_id: ride.id
                     });
                 }
-                for (const cid of removeFromSeries) {
-                    await api('DELETE', `/api/rides/${ride.id}/repeat-riders/${cid}`);
+                for (const c of body.cancellations.filter((x) => x.from_series)) {
+                    await api('DELETE', `/api/rides/${ride.id}/repeat-riders/${c.contact_id}`);
                 }
                 const box = document.getElementById('ride-repeat');
-                const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')].map((row) => ({
+                const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')]
+                    .filter((row) => !row.classList.contains('removed')).map((row) => ({
                     contact_id: row.querySelector('.pr-contact').value || null,
                     frequency: row.querySelector('.pr-freq').value
                 })).filter((p) => p.contact_id);
@@ -2200,6 +2571,45 @@
                 dialogError(err.message);
             }
         });
+        // ---- Bill now: for the rider who pays on the day ----
+        // The cash run only lists lessons that have already happened, which is
+        // right for the normal case but useless for someone paying on arrival.
+        const billBtn = document.getElementById('ride-bill');
+        if (billBtn) billBtn.addEventListener('click', async () => {
+            if (dirty && !await askConfirm('Unsaved changes',
+                'Billing uses what is already saved on this ride, not what is on screen.',
+                'Bill the saved ride anyway')) return;
+            // one invoice per payer, covering just this day
+            const payers = new Map();
+            (ride.participants || []).filter((p) => p.contact_id).forEach((p) => {
+                const c = contactById(p.contact_id);
+                const payer = (c && c.parent_id) ? contactById(c.parent_id) : c;
+                if (!payer) return;
+                if (!payers.has(String(payer.id))) payers.set(String(payer.id), { payer, riders: [] });
+                payers.get(String(payer.id)).riders.push((c && c.name) || 'rider');
+            });
+            if (!payers.size) return dialogError('Nobody on this ride to invoice.');
+            let pick = [...payers.values()][0];
+            if (payers.size > 1) {
+                const choice = await askChoice('Who are you billing?',
+                    'One invoice is created per payer, for this day only.',
+                    [...payers.values()].map((p) => ({
+                        key: String(p.payer.id), label: p.payer.name, hint: p.riders.join(', ')
+                    })));
+                if (!choice) return;
+                pick = payers.get(choice);
+            }
+            try {
+                const res = await api('POST', '/api/invoices',
+                    { contact_id: pick.payer.id, from: defaults.date, to: defaults.date });
+                closeDialog();
+                renderCalendar();
+                openInvoiceCreatedDialog(res.invoice, res.riders || 1);
+            } catch (err) {
+                dialogError(err.message);
+            }
+        });
+
         const deleteBtn = document.getElementById('ride-delete');
         if (deleteBtn) deleteBtn.addEventListener('click', async () => {
             if (!ride.recurring_id) {
@@ -2234,7 +2644,7 @@
             <div class="assign-list">
                 <button class="assign-row" data-scope="one">
                     <span class="assign-name">Just this day</span>
-                    <span class="assign-cur">${esc(ride.date)}</span>
+                    <span class="assign-cur">${esc(fmtDay(ride.date))}</span>
                 </button>
                 <button class="assign-row" data-scope="future">
                     <span class="assign-name">This day and all later ones</span>
@@ -2315,7 +2725,7 @@
         const freq = p && p.frequency === 'biweekly' ? 'biweekly' : 'weekly';
         return `
             <div class="pick-row" data-kind="fxpart">
-                <select class="fp-contact">${contactOptions(p ? p.contact_id : null, '(pick rider)')}</select>
+                <select class="fp-contact">${contactOptions(p ? p.contact_id : null, '(pick rider)', null, true)}</select>
                 <select class="fp-freq" style="flex:0 0 128px">
                     <option value="weekly" ${freq === 'weekly' ? 'selected' : ''}>Every week</option>
                     <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
@@ -3141,6 +3551,38 @@
         return ownTerms || null;
     }
 
+    // Show the inline new-parent fields in place of the picker. The picker is
+    // hidden rather than disabled so there is one obvious answer on screen to
+    // "who pays" — either a chosen contact or the one being typed in.
+    function openInlineParent() {
+        const np = document.getElementById('ct-np-wrap');
+        const pick = document.getElementById('ct-parent-pick');
+        if (!np || !pick) return;
+        np.classList.remove('hidden');
+        pick.classList.add('hidden');
+        const name = document.getElementById('np-name');
+        if (name) name.focus();
+    }
+
+    function closeInlineParent() {
+        const np = document.getElementById('ct-np-wrap');
+        const pick = document.getElementById('ct-parent-pick');
+        if (!np || !pick) return;
+        np.classList.add('hidden');
+        pick.classList.remove('hidden');
+        ['np-name', 'np-email', 'np-address', 'np-terms'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.value = '';
+        });
+        const rides = document.getElementById('np-also-rides');
+        if (rides) rides.checked = false;
+    }
+
+    const inlineParentOpen = () => {
+        const np = document.getElementById('ct-np-wrap');
+        return !!np && !np.classList.contains('hidden');
+    };
+
     function wireContactRoles(contact) {
         const rider = document.getElementById('ct-is-rider');
         const parent = document.getElementById('ct-is-parent');
@@ -3169,100 +3611,58 @@
             // has riders under them is the top of the chain.
             const canHaveParent = rider.checked && !hasKids;
             paysWrap.classList.toggle('hidden', !canHaveParent);
-            parentWrap.classList.toggle('hidden', !(canHaveParent && paysParent.checked));
+            const parentPays = canHaveParent && paysParent.checked;
+            parentWrap.classList.toggle('hidden', !parentPays);
+            // The payer's details are the ones that matter when they pay, so the
+            // rider's own phone/email/address are not asked for. They stay in
+            // the DOM pre-filled, so editing an existing contact never blanks
+            // details that were already recorded.
+            const contactWrap = document.getElementById('ct-contact-wrap');
+            if (contactWrap) contactWrap.classList.toggle('hidden', parentPays);
+            // Creating a payer inline replaces the picker, not sits beside it
+            const np = document.getElementById('ct-np-wrap');
+            if (np && !parentPays && !np.classList.contains('hidden')) closeInlineParent();
             kidsWrap.classList.toggle('hidden', !parent.checked);
             const note = document.getElementById('ct-parent-note');
             if (note) note.classList.toggle('hidden', !(rider.checked && hasKids));
             // Terms are for whoever the invoice actually lands on
             const selfPays = !canHaveParent || paysOwn.checked;
             termsWrap.classList.toggle('hidden', !(parent.checked || hasKids || selfPays));
-            // The school decides the per-term invoice period. It is asked of
-            // whoever is on per-term billing — a rider paying their own way, or
-            // the parent (their riders inherit it) — because that is where the
-            // arrangement is chosen.
+            // Every rider needs a school: term dates decide which of their rides
+            // are term-time and which fall in the holidays, and that drives what
+            // gets invoiced — not only the per-term payers.
             const schoolWrap = document.getElementById('ct-school-wrap');
-            const perTerm = effectivePayerTerms(contact, termsSel.value,
-                parent.checked || hasKids, canHaveParent && paysParent.checked);
-            schoolWrap.classList.toggle('hidden', false);
+            const needsSchool = rider.checked;
             schoolWrap.classList.toggle('needs-school',
-                perTerm === 'advance_term' && !document.getElementById('ct-school').value);
-            document.getElementById('ct-school-req').classList.toggle('hidden', perTerm !== 'advance_term');
-            document.getElementById('ct-school-note').textContent = perTerm === 'advance_term'
-                ? "Required — per-term invoices use this school's term dates."
-                : "Optional. Only used for per-term invoicing.";
+                needsSchool && !document.getElementById('ct-school').value);
+            document.getElementById('ct-school-req').classList.toggle('hidden', !needsSchool);
+            const schNote = document.getElementById('ct-school-note');
+            if (schNote) schNote.textContent = needsSchool
+                ? "Required — term dates decide which lessons are term-time and which are holidays."
+                : "Optional for someone who does not ride.";
+            // A brand-new rider paying their own way is almost always a walk-in
+            // settling on the day — otherwise they land in "terms not set".
+            if (!contact && !termsSel.value && !parent.checked &&
+                rider.checked && canHaveParent && paysOwn.checked && !termsTouched) {
+                termsSel.value = 'cash_after';
+            }
         };
         const termsSel = document.getElementById('ct-terms');
-        termsSel.addEventListener('change', sync);
+        let termsTouched = false;
+        termsSel.addEventListener('change', () => { termsTouched = true; sync(); });
         document.getElementById('ct-school').addEventListener('change', sync);
         paysParent.addEventListener('change', sync);
         paysOwn.addEventListener('change', sync);
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
         sync();
-        document.getElementById('ct-add-parent').addEventListener('click', () =>
-            openNewParentFor(contact, document.getElementById('ct-parent')));
+        document.getElementById('ct-add-parent').addEventListener('click', openInlineParent);
+        document.getElementById('ct-np-cancel').addEventListener('click', closeInlineParent);
         document.getElementById('ct-add-kid').addEventListener('click', async () => {
             // Save the parent first so the new rider has something to point at
             const saved = await saveContactForm(contact);
             if (saved) openNewRiderUnder(saved);
         });
-    }
-
-    // Create the payer without leaving the rider's form: a sub-dialog keeps the
-    // half-filled form underneath, and the new parent is selected on return.
-    function openNewParentFor(contact, select) {
-        const overlay = openSubDialog(`
-            <h3 style="margin:0 0 4px">New parent</h3>
-            <p class="muted" style="margin:0 0 10px">They will pay this rider's invoices.</p>
-            <label>Name</label>
-            <input id="np-name" autocomplete="off">
-            <label>Phone (WhatsApp)</label>
-            ${phoneFieldHtml('np-phone', '')}
-            <label>Email</label>
-            <input id="np-email" type="email">
-            <label>Address (optional)</label>
-            <textarea id="np-address"></textarea>
-            <label>How they pay <span class="req">*</span></label>
-            <select id="np-terms">
-                <option value="">(not assigned)</option>
-                ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
-                    `<option value="${k}">${label}</option>`).join('')}
-            </select>
-            <label class="role-check" style="margin-top:6px">
-                <input type="checkbox" id="np-also-rides"> They ride as well
-            </label>
-            <div class="form-error"></div>
-            <div class="form-actions">
-                <button class="secondary" id="np-cancel">Cancel</button>
-                <button id="np-save">Add parent</button>
-            </div>`);
-        overlay.querySelector('#np-cancel').addEventListener('click', () => overlay.remove());
-        overlay.querySelector('#np-save').addEventListener('click', async () => {
-            const name = overlay.querySelector('#np-name').value.trim();
-            const err = overlay.querySelector('.form-error');
-            if (!name) { err.textContent = 'A name is required.'; return; }
-            const terms = overlay.querySelector('#np-terms').value;
-            if (!terms) { err.textContent = 'Choose how this parent pays.'; return; }
-            try {
-                const res = await api('POST', '/api/contacts', {
-                    name,
-                    payment_terms: terms,
-                    phone: readPhoneField('np-phone'),
-                    email: overlay.querySelector('#np-email').value,
-                    address: overlay.querySelector('#np-address').value,
-                    is_parent: true,
-                    is_rider: overlay.querySelector('#np-also-rides').checked
-                });
-                state.contacts = (await api('GET', '/api/contacts')).contacts;
-                // rebuild the picker in place so the form underneath is untouched
-                select.innerHTML = parentOptions(res.contact.id, contact ? contact.id : null);
-                overlay.remove();
-                toast(`${name} added as the payer.`);
-            } catch (e2) {
-                err.textContent = e2.message;
-            }
-        });
-        overlay.querySelector('#np-name').focus();
     }
 
     // Riders can be brand new, or someone already in the book who simply had no
@@ -3404,6 +3804,7 @@
             email: document.getElementById('ct-email').value,
             address: document.getElementById('ct-address').value,
             // "Pays own invoices" means no payer above them, whatever the picker holds
+            // Filled in below from the inline form when a parent is being created
             parent_id: document.getElementById('ct-pays-parent').checked &&
                 !document.getElementById('ct-parent-wrap').classList.contains('hidden')
                 ? (document.getElementById('ct-parent').value || null) : null,
@@ -3415,6 +3816,7 @@
             is_parent: document.getElementById('ct-is-parent').checked,
             payment_terms: document.getElementById('ct-terms').value || null,
             school_id: document.getElementById('ct-school').value || null,
+            pays_arena_fee: document.getElementById('ct-arena').checked,
             needs_collection: document.getElementById('ct-collect').checked,
             collection_teacher: document.getElementById('ct-teacher').value,
             collection_class: document.getElementById('ct-class').value,
@@ -3442,6 +3844,31 @@
             dialogError('Pick the school — per-term invoices need its term dates.');
             return null;
         }
+        // A payer being typed in inline is created first, so the rider has a
+        // real id to point at. Validated before anything is written, so a bad
+        // rider form cannot leave an orphan parent behind.
+        if (inlineParentOpen()) {
+            const npName = document.getElementById('np-name').value.trim();
+            const npTerms = document.getElementById('np-terms').value;
+            if (!npName) { dialogError('The new parent needs a name.'); return null; }
+            if (!npTerms) { dialogError('Choose how the new parent pays.'); return null; }
+            try {
+                const made = await api('POST', '/api/contacts', {
+                    name: npName,
+                    payment_terms: npTerms,
+                    phone: readPhoneField('np-phone'),
+                    email: document.getElementById('np-email').value,
+                    address: document.getElementById('np-address').value,
+                    is_parent: true,
+                    is_rider: document.getElementById('np-also-rides').checked
+                });
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                body.parent_id = made.contact.id;
+            } catch (e) {
+                dialogError(e.message);
+                return null;
+            }
+        }
         // "Parent pays" with nobody picked would leave the invoice with no payer
         const paysParentEl = document.getElementById('ct-pays-parent');
         if (paysParentEl && paysParentEl.checked && !body.parent_id &&
@@ -3465,18 +3892,9 @@
         openDialog(`
             ${withTabs ? newTypeTabsHtml('rider') : ''}
             <h2>${contact ? 'Edit contact' : 'New rider or parent'}</h2>
-            <label>Name</label>
-            <input id="ct-name" value="${esc(contact ? contact.name : '')}">
-            <label>Phone (WhatsApp)</label>
-            ${phoneFieldHtml('ct-phone', contact ? contact.phone : '')}
-            <label>Email</label>
-            <input id="ct-email" type="email" value="${esc(contact ? contact.email : '')}">
-            <label>Address (optional)</label>
-            <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
-            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
-                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
-                🌱 Interested — not placed in a lesson yet
-            </label>
+            <!-- Roles come first: they decide which of the fields below are even
+                 asked for, so answering them last meant filling in details that
+                 then turned out to belong to the parent instead. -->
             <label>This contact is a…</label>
             <div class="role-checks">
                 <label class="role-check">
@@ -3488,6 +3906,8 @@
                     Parent
                 </label>
             </div>
+            <label>Name</label>
+            <input id="ct-name" value="${esc(contact ? contact.name : '')}">
             <div id="ct-pays-wrap">
                 <label>Invoicing</label>
                 <div class="role-checks">
@@ -3503,12 +3923,55 @@
             </div>
             <div id="ct-parent-wrap">
                 <label>Which parent pays</label>
-                <div class="pick-row" style="gap:6px">
+                <div class="pick-row" style="gap:6px" id="ct-parent-pick">
                     <select id="ct-parent" style="flex:1 1 auto;min-width:0">${parentOptions(contact ? contact.parent_id : null, contact ? contact.id : null)}</select>
                     <button type="button" class="secondary small" id="ct-add-parent"
                             style="flex:0 0 auto" title="Create a new parent">＋ New</button>
                 </div>
+                <!-- A new payer is captured here rather than in a dialog of its
+                     own: it is the same handful of fields, and a sub-dialog over
+                     a half-filled form is a lot of ceremony for four inputs.
+                     Saved together with the rider, so a cancelled rider cannot
+                     leave a stray parent behind. -->
+                <div id="ct-np-wrap" class="hidden np-inline">
+                    <div class="np-inline-head">
+                        <b>New parent</b>
+                        <button type="button" class="secondary small" id="ct-np-cancel">Cancel</button>
+                    </div>
+                    <label>Name <span class="req">*</span></label>
+                    <input id="np-name" autocomplete="off">
+                    <label>Phone (WhatsApp)</label>
+                    ${phoneFieldHtml('np-phone', '')}
+                    <label>Email</label>
+                    <input id="np-email" type="email">
+                    <label>Address (optional)</label>
+                    <textarea id="np-address"></textarea>
+                    <label>How they pay <span class="req">*</span></label>
+                    <select id="np-terms">
+                        <option value="">(not assigned)</option>
+                        ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
+                            `<option value="${k}">${label}</option>`).join('')}
+                    </select>
+                    <label class="role-check" style="margin-top:6px">
+                        <input type="checkbox" id="np-also-rides"> They ride as well
+                    </label>
+                </div>
             </div>
+            <!-- Hidden when a parent pays: the phone, email and address that
+                 matter then are the parent's, and asking twice invited a rider
+                 record carrying contact details nobody would ever use. -->
+            <div id="ct-contact-wrap">
+                <label>Phone (WhatsApp)</label>
+                ${phoneFieldHtml('ct-phone', contact ? contact.phone : '')}
+                <label>Email</label>
+                <input id="ct-email" type="email" value="${esc(contact ? contact.email : '')}">
+                <label>Address (optional)</label>
+                <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
+                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
+                🌱 Interested — not placed in a lesson yet
+            </label>
             <div id="ct-terms-wrap">
                 <label>How they pay <span class="req">*</span></label>
                 <select id="ct-terms">
@@ -3517,6 +3980,10 @@
                         `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
             </div>
+            <label class="role-check" style="margin:2px 0 10px">
+                <input type="checkbox" id="ct-arena" ${contact && contact.pays_arena_fee ? 'checked' : ''}>
+                Pays arena fees (charged once a quarter)
+            </label>
             <div id="ct-school-wrap">
                 <label>School <span class="req" id="ct-school-req">*</span></label>
                 <select id="ct-school">
@@ -3657,7 +4124,7 @@
                     <tr><th>Date</th><th>Time</th><th>Horse</th><th>Type</th><th class="num">Price</th><th></th></tr>
                     ${data.rides.map((r) => `
                         <tr>
-                            <td><a href="#/calendar/${r.date}">${r.date}</a></td>
+                            <td><a href="#/calendar/${r.date}">${esc(fmtDay(r.date))}</a></td>
                             <td>${hhmm(r.start_time)}</td>
                             <td>${esc(r.horse_name)}</td>
                             <td>${esc(r.ride_type_name || '')}</td>
@@ -3675,7 +4142,7 @@
                     <div class="list-item">
                         <div class="li-main">
                             <div class="li-title">${esc(inv.number)}</div>
-                            <div class="li-sub">${inv.period_start || ''} – ${inv.period_end || ''}</div>
+                            <div class="li-sub">${esc(fmtDay(inv.period_start))} – ${esc(fmtDay(inv.period_end))}</div>
                         </div>
                         <span class="chip ${inv.status}">${inv.status}</span>
                         <div class="li-right">${money(inv.total_cents)}</div>
@@ -3702,7 +4169,7 @@
         html += data.groups.map((g) => `
             <h3 style="margin:14px 0 4px">${esc(g.name)}
                 <span class="muted" style="font-weight:400">${g.no_dates
-                    ? '— Term ' + termNo + ' ' + year + ' dates not set'
+                    ? '— Term ' + termNo + ' ' + schoolYearLabel(g, year) + ' dates not set'
                     : shortDate(g.period_start) + ' – ' + shortDate(g.period_end)}</span></h3>
             <div id="term-g-${g.id}">${g.no_dates
                 ? `<p class="school-missing">Set this school's Term ${termNo} dates under Settings before invoicing.</p>`
@@ -3711,7 +4178,8 @@
         data.groups.filter((g) => !g.no_dates).forEach((g) => {
             renderOverviewTable(document.getElementById(`term-g-${g.id}`), g.rows,
                 'Nobody at this school has uninvoiced lessons this term.',
-                { from: g.period_start, to: g.period_end, label: `Term ${termNo} ${year}` });
+                { from: g.period_start, to: g.period_end,
+                  label: `Term ${termNo} ${schoolYearLabel(g, year)}` });
         });
     }
 
@@ -3740,27 +4208,73 @@
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count}${row.untyped_rides
-                        ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
+                    <td class="num">${row.ride_count}${row.carried_over
+                        ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
+                        ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}${row.older_unbilled
+                        ? ` <span class="older-flag" title="No invoice created for ${missedMonths(row).join(', ')}. ${row.older_unbilled} unbilled lesson${row.older_unbilled === 1 ? '' : 's'} there (earliest ${fmtDay(row.older_from)}) — older than the one-month carry-over, so not on this invoice. Bill these with a custom date range.">⏳${row.older_unbilled}</span>` : ''}</td>
                     <td class="num">${money(row.total_cents)}</td>
-                    <td class="num">${row.payment_terms
-                        ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button>`
-                        : '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'}</td>
+                    <td class="num">${!row.payment_terms
+                        ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
+                        : row.ride_count
+                        ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}"
+                                   data-inv-missed="${esc(missedMonths(row).join('|'))}">Create invoice</button>`
+                        : '<span class="muted">nothing due</span>'}</td>
                 </tr>`).join('')}
         </table></div>`;
         wireCreateInvoiceButtons($el, range);
     }
 
     // Shared by every uninvoiced-rides table on the page
+    // A school whose academic year starts mid-year spans two calendar years, so
+    // its year 2026 reads "2026/27". A January school's reads plainly "2026".
+    function schoolYearLabel(school, y) {
+        return (school.year_start_month || 1) > 1
+            ? `${y}/${String((y + 1) % 100).padStart(2, '0')}` : String(y);
+    }
+
+    // "2026-08" -> "August 2026". Months whose invoice was never raised are
+    // named in full: a parent asking "what is this charge" needs the month, and
+    // "2026-08" is not how anyone says it out loud.
+    const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+                         'July', 'August', 'September', 'October', 'November', 'December'];
+    function monthLabel(ym) {
+        const [y, m] = String(ym).split('-').map(Number);
+        return `${MONTH_NAMES[m - 1]} ${y}`;
+    }
+    // Join a list the way a person would: "August", "August and September",
+    // "August, September and October".
+    function joinWords(list) {
+        if (list.length <= 1) return list[0] || '';
+        return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+    }
+    // The months this payer has unbilled lessons in, outside the one-month
+    // carry-back — i.e. months whose invoice was never created.
+    function missedMonths(row) {
+        return (row.older_months || []).map((m) => monthLabel(m.month));
+    }
+
     function wireCreateInvoiceButtons($el, range) {
         $el.querySelectorAll('[data-inv-contact]').forEach((btn) => {
             btn.addEventListener('click', async () => {
+                // An invoice only reaches back one month. If this payer has
+                // unbilled lessons further back, that month's invoice was never
+                // raised and this one will not pick it up — say so by name
+                // before the invoice is created, not after.
+                const missed = (btn.getAttribute('data-inv-missed') || '').split('|').filter(Boolean);
+                const warn = missed.length
+                    ? ` ⚠ No invoice has been created for ${joinWords(missed)}. ` +
+                      `Lessons already ridden in ${missed.length === 1 ? 'that month' : 'those months'} ` +
+                      `will NOT be on this invoice — bill them separately with a custom date range.`
+                    : '';
                 if (!await askConfirm(`Invoice ${btn.getAttribute('data-inv-name')}?`,
-                    `For ${range.label}.`, 'Create the invoice')) return;
+                    `For ${range.label}.${range.note ? ' ⚠ ' + range.note : ''}${warn}`,
+                    'Create the invoice')) return;
                 btn.disabled = true;
                 try {
-                    const res = await api('POST', '/api/invoices',
-                        { contact_id: btn.getAttribute('data-inv-contact'), from: range.from, to: range.to });
+                    const res = await api('POST', '/api/invoices', {
+                        contact_id: btn.getAttribute('data-inv-contact'),
+                        from: range.from, to: range.to, mode: range.mode
+                    });
                     // Update in place rather than re-rendering — a full redraw
                     // loses your place in a long list, badly so on a phone.
                     const row = btn.closest('tr');
@@ -3797,7 +4311,7 @@
                 <div class="li-title">${esc(inv.number)} — ${esc(inv.contact_name)}
                     ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
                 <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${
-                    (inv.period_start || '').slice(0, 10)} – ${(inv.period_end || '').slice(0, 10)} · ${
+                    esc(fmtDay(inv.period_start))} – ${esc(fmtDay(inv.period_end))} · ${
                     inv.line_count} ride${inv.line_count === 1 ? '' : 's'} · ${money(inv.total_cents)}</div>
             </div>
             <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
@@ -3957,16 +4471,25 @@
         // so a month already under way (August, mid-August) is not missed just
         // because the run defaults to "next month".
         let advStatus = [];
+        let firstMonth = null;      // no rides before this, so no invoices either
         try {
-            advStatus = (await api('GET', '/api/invoices/advance-outstanding')).months;
+            const st = await api('GET', '/api/invoices/advance-outstanding');
+            advStatus = st.months;
+            firstMonth = st.first_ride_date ? st.first_ride_date.slice(0, 7) : null;
         } catch (err) { /* the section still works, just without the flags */ }
+        const inRange = (m) => !firstMonth || m >= firstMonth;
+        // a remembered month from before the data starts would select nothing
+        const shownMonths = monthPills.filter((m) => inRange(m.value));
+        const arrearsMonth = shownMonths.some((m) => m.value === month)
+            ? month : (shownMonths[0] ? shownMonths[0].value : month);
+        state.invoiceMonth = arrearsMonth;
         const outstanding = advStatus.filter((m) => m.riders > 0);
         const adv = state.invoiceAdvMonth ||
             (outstanding.length ? outstanding[0].month : (() => {
                 const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
                 return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             })());
-        const advPills = advStatus.map((m) => {
+        const advPills = advStatus.filter((m) => inRange(m.month)).map((m) => {
             const d = new Date(Number(m.month.slice(0, 4)), Number(m.month.slice(5, 7)) - 1, 1);
             return {
                 value: m.month,
@@ -3979,7 +4502,9 @@
             <div id="inv-untyped-warn" class="warn-bar hidden"></div>
             <h2>In advance — per month</h2>
             <p class="muted">Riders whose payer is set to <b>In advance, per month</b>.
-               Their fixed lessons for the month ahead are billed before it starts.</p>
+               Each invoice covers the <b>term lessons of the coming month</b> plus anything
+               still unbilled from before it. Holiday lessons are not billed ahead —
+               they appear on the following month's invoice once they have been ridden.</p>
             <div class="card">
                 <div class="month-pills">
                     ${advPills.map((m) => `
@@ -4004,16 +4529,18 @@
                         <button class="month-pill ${n === termNo ? 'active' : ''}" data-tn="${n}">Term ${n}</button>`).join('')}
                 </div>
                 <div id="inv-term" class="muted" style="margin-top:14px">Loading…</div>
+                <div id="inv-term-catchup"></div>
             </div>
             <h2>In arrears — monthly</h2>
             <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
                Reconcile them with the bank statement and set the status to <b>paid</b>.</p>
             <div class="card">
                 <div class="month-pills">
-                    ${monthPills.map((m) => `
-                        <button class="month-pill ${m.value === month ? 'active' : ''}" data-month="${m.value}">${esc(m.label)}</button>`).join('')}
+                    ${shownMonths.map((m) => `
+                        <button class="month-pill ${m.value === arrearsMonth ? 'active' : ''}" data-month="${m.value}">${esc(m.label)}</button>`).join('')}
                 </div>
                 <h2 style="margin-top:14px">Uninvoiced rides</h2>
+                <div id="inv-arrears-warn" class="warn-bar hidden"></div>
                 <div id="inv-overview" class="muted">Loading…</div>
             </div>
             <h2>Cash after lesson</h2>
@@ -4052,12 +4579,33 @@
         });
         try {
             const [ov, advOv, termOv, invs] = await Promise.all([
-                api('GET', `/api/invoices/overview?month=${month}`),
-                api('GET', `/api/invoices/overview?month=${adv}`),
+                api('GET', `/api/invoices/overview?month=${arrearsMonth}`),
+                api('GET', `/api/invoices/advance-overview?month=${adv}`),
                 api('GET', `/api/invoices/term-overview?year=${termYear}&term=${termNo}`),
                 api('GET', '/api/invoices')
             ]);
             renderTermRun(termOv, termYear, termNo);
+            // holiday and ad-hoc lessons that cannot sit on a term invoice
+            const $cu = document.getElementById('inv-term-catchup');
+            const cu = termOv.catchup || [];
+            if (!cu.length) $cu.innerHTML = '';
+            else {
+                $cu.innerHTML = `<h3 style="margin:18px 0 4px">Holiday &amp; ad-hoc lessons already ridden</h3>
+                    <p class="muted" style="margin:0 0 8px">Lessons these per-term riders have
+                       <b>already ridden</b> outside their term dates, within the last month. The term
+                       invoice is raised before the holidays so it cannot include them — it states that
+                       they will follow, and this is where they are billed.</p>
+                    <div id="inv-term-cu"></div>`;
+                // rows with no first_date have only out-of-reach lessons: they
+                // carry a ⏳ flag and no Create button, so they set no range
+                const dated = cu.filter((r) => r.first_date);
+                renderOverviewTable(document.getElementById('inv-term-cu'), cu, '',
+                    dated.length ? {
+                        from: dated.reduce((a, r) => (r.first_date < a ? r.first_date : a), dated[0].first_date),
+                        to: dated.reduce((a, r) => (r.last_date > a ? r.last_date : a), dated[0].last_date),
+                        label: 'holiday & ad-hoc lessons'
+                    } : null);
+            }
             // Everyone lands in exactly one bucket, decided by their payer's terms
             // A ride with no type prices at zero, which would be invoiced silently
             const untyped = [...ov.overview, ...advOv.overview]
@@ -4073,12 +4621,30 @@
                     Set the type on the ride (choose <b>“this day and the whole series”</b> for a
                     weekly slot) before creating these invoices.`;
             }
-            const advRange = { from: advOv.from, to: advOv.to, label: adv };
-            const arrRange = { from: ov.from, to: ov.to, label: month };
-            renderOverviewTable(document.getElementById('inv-advance'),
-                advOv.overview.filter((r) => r.payment_terms === 'advance_monthly'),
-                'Nobody is set to pay in advance per month yet.', advRange);
+            const advRange = { from: advOv.from, to: advOv.to, label: adv, mode: 'advance_month' };
+            const arrRange = { from: ov.from, to: ov.to, label: arrearsMonth };
+            arrRange.note = arrearsMonth < currentMonth() ? '' :
+                'This month is not over yet — rides still to come are included.';
+            // the endpoint already applies the month-ahead rule and the filter
+            renderOverviewTable(document.getElementById('inv-advance'), advOv.overview,
+                'Nothing to bill in advance for this month.', advRange);
             const arrears = ov.overview.filter((r) => r.payment_terms === 'arrears');
+            // In arrears means "after the month has ended". Billing a month that
+            // is still running silently leaves out the rides still to come.
+            const monthOver = arrearsMonth < currentMonth();
+            const toCome = arrears.reduce((n, r) => n + (r.ride_count - (r.past_rides || 0)), 0);
+            const $aw = document.getElementById('inv-arrears-warn');
+            $aw.classList.toggle('hidden', monthOver);
+            if (!monthOver) {
+                const label = new Date(Number(arrearsMonth.slice(0, 4)), Number(arrearsMonth.slice(5, 7)) - 1, 1)
+                    .toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+                $aw.innerHTML = `⚠ <b>${esc(label)} is not over yet.</b>
+                    In-arrears invoices are normally raised once the month has ended.
+                    ${toCome ? `<b>${toCome} ride${toCome === 1 ? '' : 's'}</b> in this month
+                        ${toCome === 1 ? 'has' : 'have'} not happened yet and would be billed in advance —
+                        or left off a later invoice if you bill now.`
+                    : 'Every ride below has already happened.'}`;
+            }
             const unset = ov.overview.filter((r) => !r.payment_terms);
             renderOverviewTable(document.getElementById('inv-unset'), unset, '', arrRange);
             document.getElementById('inv-unset-card').classList.toggle('hidden', !unset.length);
@@ -4089,7 +4655,7 @@
             const cashCutoff = todayStr();
             renderOverviewTable(document.getElementById('inv-cash'), cash,
                 'No lessons to settle in cash yet.',
-                { from: ov.from, to: ov.to < cashCutoff ? ov.to : cashCutoff, label: month });
+                { from: ov.from, to: ov.to < cashCutoff ? ov.to : cashCutoff, label: arrearsMonth });
 
             const $ov = document.getElementById('inv-overview');
             if (!arrears.length) {
@@ -4105,7 +4671,8 @@
                             <td>${row.payment_terms
                                 ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                                 : '<span class="no-parent">not set</span>'}</td>
-                            <td class="num">${row.ride_count}${row.untyped_rides
+                            <td class="num">${row.ride_count}${row.carried_over
+                        ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
                                 ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
                             <td class="num">${money(row.total_cents)}</td>
                             <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
@@ -4685,6 +5252,25 @@
                         <input type="time" id="biz-dayend" value="${esc(state.settings.day_end || '17:00')}">
                     </div>
                 </div>
+                <div class="form-row">
+                    <div>
+                        <label>Contact number (on invoices)</label>
+                        ${phoneFieldHtml('biz-phone', state.settings.business_phone || '')}
+                    </div>
+                    <div>
+                        <label>Contact email (on invoices)</label>
+                        <input id="biz-email" type="email" value="${esc(state.settings.business_email || '')}">
+                    </div>
+                </div>
+                <label>Arena fee per quarter (${esc(state.settings.currency || 'R')})</label>
+                <input id="biz-arena" type="number" inputmode="decimal" step="0.01" min="0"
+                       placeholder="leave blank for none"
+                       value="${state.settings.arena_fee_cents ? (Number(state.settings.arena_fee_cents) / 100).toFixed(2) : ''}">
+                <div class="muted" style="margin:-4px 0 10px">Added once a quarter, on the invoice
+                   covering January, April, July or October, for riders marked as paying it.</div>
+                <label>Arena fee explanation (printed on invoices that include the fee)</label>
+                <textarea id="biz-arena-note" rows="3"
+                    placeholder="e.g. The arena fee is charged once a quarter and covers the upkeep of the arena, jumps and footing. It is not a lesson fee and is payable by all riders using the arena.">${esc(state.settings.arena_fee_note || '')}</textarea>
                 <label>Banking details (shown on every invoice, under the rides)</label>
                 <textarea id="biz-bank" rows="5"
                     placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
@@ -4713,12 +5299,20 @@
                 <div class="form-actions"><button class="secondary" id="logout-btn">Log out</button></div>
             </div>`;
 
-        const schoolYear = () => state.schoolYear || new Date().getFullYear();
+        // Four years ahead, never behind: term dates are entered as schools
+        // publish them, and a year that has passed is only clutter. The window
+        // rolls forward on its own, so 2030 appears once 2027 arrives.
+        const SCHOOL_YEAR_FROM = Math.max(2026, new Date().getFullYear());
+        const schoolYears = [0, 1, 2, 3].map((i) => SCHOOL_YEAR_FROM + i);
+        const schoolYear = () => {
+            const y = state.schoolYear;
+            return schoolYears.includes(y) ? y : SCHOOL_YEAR_FROM;
+        };
         const drawSchools = () => {
             const y = schoolYear();
             document.getElementById('set-schools').innerHTML = `
                 <div class="month-pills" style="margin-bottom:10px">
-                    ${[y - 1, y, y + 1].map((yy) => `
+                    ${schoolYears.map((yy) => `
                         <button class="month-pill ${yy === y ? 'active' : ''}" data-sy="${yy}">${yy}</button>`).join('')}
                 </div>
                 ${state.schools.map((s) => {
@@ -4729,11 +5323,17 @@
                     return `<div class="school-row${s.active ? '' : ' inactive'}">
                         <div class="school-head">
                             <input class="sc-name" data-school="${s.id}" value="${esc(s.name)}">
+                            <select class="sc-ysm" data-school="${s.id}"
+                                    title="When this school's academic year starts. AISCT runs August to July, so its Terms 1–4 span two calendar years.">
+                                <option value="1"${(s.year_start_month || 1) === 1 ? ' selected' : ''}>Jan–Dec</option>
+                                <option value="8"${(s.year_start_month || 1) === 8 ? ' selected' : ''}>Aug–Jul</option>
+                            </select>
                             <span class="muted school-count">${s.rider_count}</span>
                             <button class="secondary small sc-toggle" data-school="${s.id}"
                                     data-active="${s.active}" title="${s.active ? 'Active' : 'Inactive'}">${s.active ? '✓' : '–'}</button>
                             <button class="danger small sc-del" data-school="${s.id}" data-name="${esc(s.name)}">${ICON_X}</button>
                         </div>
+                        <div class="term-year muted">Academic year ${schoolYearLabel(s, y)}</div>
                         <div class="term-grid">
                             ${[1, 2, 3, 4].map((n) => `
                                 <span class="term-cell${byNo[n] ? ' set' : ''}">
@@ -4760,6 +5360,22 @@
                     await api('PUT', `/api/schools/${inp.getAttribute('data-school')}`, { name: inp.value });
                     await reloadSchools();
                     toast('School renamed.');
+                } catch (e) { toast(e.message, true); }
+            }));
+            // Changing the academic year re-files which year a term belongs to, so
+            // the terms already captured are worth a second look afterwards.
+            document.querySelectorAll('.sc-ysm').forEach((sel) => sel.addEventListener('change', async () => {
+                const hasTerms = (state.schools.find((s) => String(s.id) === sel.getAttribute('data-school'))
+                                 || {}).terms || [];
+                if (hasTerms.length && !await askConfirm('Change the academic year?',
+                    `This school has ${hasTerms.length} term date${hasTerms.length === 1 ? '' : 's'} saved. ` +
+                    'Changing this does not move them — check they are still filed under the right year.',
+                    'Change it')) { renderSettings(); return; }
+                try {
+                    await api('PUT', `/api/schools/${sel.getAttribute('data-school')}`,
+                        { year_start_month: Number(sel.value) });
+                    await reloadSchools();
+                    toast('Academic year updated.');
                 } catch (e) { toast(e.message, true); }
             }));
             document.querySelectorAll('.sc-toggle').forEach((btn) => btn.addEventListener('click', async () => {
@@ -4902,6 +5518,10 @@
         });
         document.getElementById('logout-btn').addEventListener('click', async () => {
             await api('POST', '/api/auth/logout');
+            // the cache holds contact details; it must not outlive the session
+            if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({ type: 'clear-data' });
+            }
             state.user = null;
             renderLogin();
         });
@@ -4930,6 +5550,10 @@
                         currency: document.getElementById('biz-currency').value,
                         invoice_footer: document.getElementById('biz-footer').value,
                         bank_details: document.getElementById('biz-bank').value,
+                        arena_fee_cents: String(parseMoneyCents(document.getElementById('biz-arena').value) || ''),
+                        arena_fee_note: document.getElementById('biz-arena-note').value,
+                        business_phone: readPhoneField('biz-phone'),
+                        business_email: document.getElementById('biz-email').value,
                         day_start: document.getElementById('biz-daystart').value,
                         day_end: document.getElementById('biz-dayend').value
                     };
@@ -5251,7 +5875,86 @@
     }
 
     // ---------- Boot ----------
+    // Keep the device's copy of the days she is likely to open. The calendar
+    // asks for one day at a time, so warm exactly those URLs — and because
+    // /api/rides materializes the weekly templates, this also makes sure the
+    // rides EXIST server-side before she loses signal.
+    async function prewarmDays(days) {
+        if (!navigator.onLine) return;
+        const today = todayStr();
+        for (let i = -1; i < days; i++) {
+            const d = shiftDate(today, i);
+            try {
+                await fetch(`/api/rides?from=${d}&to=${d}`, { credentials: 'same-origin' });
+            } catch (err) {
+                return;   // signal went; the rest will warm next time
+            }
+        }
+    }
+
+    // The worker only starts intercepting AFTER it activates, so the requests the
+    // app made while booting were never cached. Re-fetch them once it is in
+    // charge, or the first offline reload has nothing to boot from.
+    const ESSENTIAL_GETS = ['/api/auth/me', '/api/users', '/api/horses', '/api/contacts',
+                            '/api/guides', '/api/ride-types', '/api/settings', '/api/schools'];
+    async function warmEssentials() {
+        // Pointless before login — every request would 401 and the worker only
+        // caches successful responses.
+        if (!state.user || !navigator.onLine) return;
+        if (navigator.serviceWorker) {
+            try { await navigator.serviceWorker.ready; } catch (err) { /* unsupported */ }
+        }
+        for (const url of ESSENTIAL_GETS) {
+            try {
+                await fetch(url, { credentials: 'same-origin' });
+            } catch (err) { return; }
+        }
+    }
+
+    // navigator.onLine only means "there is a network interface" — on a phone it
+    // goes true the moment it sees a tower, well before anything can be fetched.
+    // So confirm with a real request before telling her the connection is back.
+    async function confirmOnline() {
+        try {
+            const res = await fetch('/api/auth/me', { credentials: 'same-origin', cache: 'no-store' });
+            if (!res.ok && res.status !== 401) return false;
+            if (res.headers.get('X-Cached-At')) return false;   // still the cache
+            setOffline(false);
+            return true;
+        } catch (err) {
+            setOffline(true);
+            return false;
+        }
+    }
+
+    function wireOfflineSignals() {
+        window.addEventListener('online', async () => {
+            if (await confirmOnline()) {
+                await warmEssentials();
+                prewarmDays(21);
+            }
+        });
+        window.addEventListener('offline', () => setOffline(true));
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && document.body.classList.contains('is-offline')) confirmOnline();
+        });
+        // she is usually tapping something when the signal returns
+        let lastProbe = 0;
+        document.addEventListener('pointerdown', () => {
+            if (!document.body.classList.contains('is-offline')) return;
+            const now = Date.now();
+            if (now - lastProbe < 3000) return;
+            lastProbe = now;
+            confirmOnline();
+        }, true);
+        if (!navigator.onLine) setOffline(true);
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => { /* http, or blocked */ });
+        }
+    }
+
     async function boot() {
+        wireOfflineSignals();
         try {
             const me = await api('GET', '/api/auth/me');
             state.setupRequired = me.setup_required;
@@ -5259,6 +5962,8 @@
             if (state.user) {
                 await loadRefData();
                 showShell();
+                // in the background — never block the first paint on it
+                setTimeout(() => warmEssentials().then(() => prewarmDays(21)), 1500);
             }
             route();
         } catch (err) {

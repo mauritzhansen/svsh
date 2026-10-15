@@ -1,0 +1,141 @@
+{
+  "_README": "SVSH fleet settings — permissions as classes, hooks as refusals. Adapted 2026-09-18 from Timo's DBP fleet pack. Doctrine surfaces (.claude/**) sit in the ask tier so no agent can edit the rules it runs under. git push is denied for EVERYONE — pushing and deploying are Mauritz's, by hand, always.",
+  "permissions": {
+    "allow": [
+      "Bash(node *)",
+      "Bash(node)",
+      "Bash(npx *)",
+      "Bash(npm ci*)",
+      "Bash(npm run db:schema*)",
+      "Bash(npm run db:seed*)",
+      "Bash(npm run db:migrate*)",
+      "Bash(npm test*)",
+      "Bash(psql -U svsh svsh*)",
+      "Bash(psql svsh*)",
+      "Bash(pg_dump -U svsh svsh*)",
+      "Bash(pg_isready*)",
+      "Bash(curl http://localhost*)",
+      "Bash(curl -s http://localhost*)",
+      "Bash(curl -sS http://localhost*)",
+      "Bash(git fetch*)",
+      "Bash(git branch*)",
+      "Bash(git tag*)",
+      "Bash(git remote*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git blame*)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-files*)",
+      "Bash(git ls-tree*)",
+      "Bash(git cat-file*)",
+      "Bash(git range-diff*)",
+      "Bash(git merge-base*)",
+      "Bash(git config --get*)",
+      "Bash(git config --list*)",
+      "Bash(git worktree list*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git -C * fetch*)",
+      "Bash(git -C * branch*)",
+      "Bash(git -C * status*)",
+      "Bash(git -C * diff*)",
+      "Bash(git -C * log*)",
+      "Bash(git -C * show*)",
+      "Bash(git -C * rev-parse*)",
+      "Bash(git -C * ls-files*)",
+      "Bash(git -C * add *)",
+      "Bash(git -C * commit *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(mv *)",
+      "Bash(cp *)",
+      "Bash(ln -s *)",
+      "Bash(rm /tmp/*)",
+      "Bash(rm -f /tmp/*)",
+      "Bash(rm -rf /tmp/*)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(tee *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(jq *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(cut *)",
+      "Bash(tr *)",
+      "Bash(wc *)",
+      "Bash(diff *)",
+      "Bash(find *)",
+      "Bash(stat *)",
+      "Bash(date *)",
+      "Bash(echo *)",
+      "Bash(shasum *)",
+      "Bash(base64 *)",
+      "Bash(lsof *)",
+      "Bash(ps)",
+      "Bash(ps *)",
+      "Bash(kill *)",
+      "Read",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Skill"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git -C * push*)",
+      "Bash(git stash*)",
+      "Bash(git -C * stash*)"
+    ],
+    "ask": [
+      "Bash(ssh *)",
+      "Bash(scp *)",
+      "Bash(rsync *)",
+      "Bash(npm run db:reset*)",
+      "Bash(dropdb*)",
+      "Bash(createdb*)",
+      "Bash(npm install*)",
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(CLAUDE.md)",
+      "Edit(//Users/mauritzhansen/git_repos/svsh/.claude/**)"
+    ],
+    "defaultMode": "auto",
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-bad-shell.sh"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-stash.sh"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-bare-commit.sh"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/allow-safe-commands.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "worktree": {
+    "baseRef": "head"
+  }
+}
