@@ -525,12 +525,12 @@
     // one, and the change handler swaps it straight back out — it is never a
     // value that reaches a save.
     const NEW_RIDER = '__new';
-    const newRiderOption = () => `<option value="${NEW_RIDER}">＋ Add new rider…</option>`;
+    const newRiderOption = () => `<option value="${NEW_RIDER}">Add new rider…</option>`;
 
     function contactOptions(selectedId, emptyLabel, busy, ridersOnly, withNew) {
         const isSel = (c) => String(selectedId) === String(c.id);
         return (withNew ? newRiderOption() : '') +
-            `<option value="">${esc(emptyLabel || '')}</option>` +
+            `<option value=""${selectedId ? '' : ' selected'}>${esc(emptyLabel || '')}</option>` +
             state.contacts
                 .filter((c) => keepOption(c.id, selectedId, busy))
                 .filter((c) => !ridersOnly || c.is_rider || isSel(c))
@@ -1965,7 +1965,12 @@
             .filter((c) => c.is_rider || String(c.id) === String(selectedId));
         const ok = avail.filter((c) => contactAvailable(c, weekday, startMin, durMin));
         const flagged = avail.filter((c) => !contactAvailable(c, weekday, startMin, durMin));
-        let html = newRiderOption() + '<option value="">(open seat)</option>'
+        // The empty option must carry `selected` explicitly. "Add new rider" is
+        // first in the list, and a <select> with nothing selected falls back to
+        // its first option — which both showed the wrong placeholder and meant
+        // picking "Add new rider" was not a change, so it fired no event at all.
+        let html = newRiderOption()
+            + `<option value=""${selectedId ? '' : ' selected'}>(open seat)</option>`
             + ok.map((c) => opt(c, '')).join('');
         if (flagged.length) {
             html += `<optgroup label="⚠ Not usually available then">${flagged.map((c) => opt(c, '⚠ ')).join('')}</optgroup>`;
@@ -1984,7 +1989,6 @@
         return `
             <div class="pick-row" data-kind="part">
                 <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)', null, true, true)}</select>
-                <button type="button" class="secondary small pr-new" title="New rider — someone who has not ridden here before">＋</button>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
                 <select class="pr-alt ${p && p.alt_horse_id ? '' : 'hidden'}" title="Alternative horse — instructor picks on the day">
@@ -2015,60 +2019,23 @@
             </div>`;
     }
 
-    // A walk-in: someone riding today who is not in the book yet. Deliberately
-    // the smallest possible form — name, phone, level — because it is filled in
-    // with the person standing there. They default to paying cash on the day.
-    function openWalkInRiderDialog(row) {
-        const overlay = openSubDialog(`
-            <h3 style="margin:0 0 4px">New rider</h3>
-            <p class="muted" style="margin:0 0 10px">For a once-off or someone new.
-               You can fill in the rest later.</p>
-            <label>Name</label>
-            <input id="wi-name" autocomplete="off">
-            <label>Phone (WhatsApp)</label>
-            ${phoneFieldHtml('wi-phone', '')}
-            <label>Experience level</label>
-            <select id="wi-exp">
-                <option value="">(not set)</option>
-                ${LEVELS.map((l) => `<option value="${l}">${LEVEL_LABELS[l]}</option>`).join('')}
-            </select>
-            <label>How they pay</label>
-            <select id="wi-terms">
-                ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
-                    `<option value="${k}" ${k === 'cash_after' ? 'selected' : ''}>${label}</option>`).join('')}
-            </select>
-            <div class="form-error"></div>
-            <div class="form-actions">
-                <button class="secondary" id="wi-cancel">Cancel</button>
-                <button id="wi-save">Add rider</button>
-            </div>`);
-        overlay.querySelector('#wi-cancel').addEventListener('click', () => overlay.remove());
-        overlay.querySelector('#wi-save').addEventListener('click', async () => {
-            const name = overlay.querySelector('#wi-name').value.trim();
-            const err = overlay.querySelector('.form-error');
-            if (!name) { err.textContent = 'A name is required.'; return; }
-            try {
-                const res = await api('POST', '/api/contacts', {
-                    name,
-                    phone: readPhoneField('wi-phone'),
-                    experience: overlay.querySelector('#wi-exp').value || null,
-                    is_rider: true,
-                    is_parent: false,
-                    payment_terms: overlay.querySelector('#wi-terms').value
-                });
-                state.contacts = (await api('GET', '/api/contacts')).contacts;
-                overlay.remove();
-                // put them straight into the row that asked for them
+    // Adding a rider mid-ride opens the ordinary contact form, over the ride
+    // rather than instead of it, so the half-built ride survives. Same dialog
+    // as "New" on the contacts page: the cut-down version that used to live
+    // here meant riders created this way quietly skipped school, payer and
+    // payment terms, which then had to be chased down at invoicing time.
+    function openNewRiderForRow(row) {
+        openContactDialog(null, false, {
+            overlay: true,
+            onSaved: (saved) => {
                 const sel = row.querySelector('.pr-contact');
-                sel.innerHTML = contactOptions(res.contact.id, '(no rider — horse only)', null, true, true);
-                sel.value = res.contact.id;
+                if (!sel) return;
+                sel.innerHTML = contactOptions(saved.id, '(no rider — horse only)', null, true, true);
+                sel.value = saved.id;
+                sel.dataset.prev = String(saved.id);
                 sel.dispatchEvent(new Event('change', { bubbles: true }));
-                toast(`${name} added.`);
-            } catch (e2) {
-                err.textContent = e2.message;
             }
         });
-        overlay.querySelector('#wi-name').focus();
     }
 
     function openRideDialog(ride, defaults) {
@@ -2316,8 +2283,6 @@
             }
             const partSel = row.querySelector('.pr-contact');
             if (partSel) partSel.dataset.prev = partSel.value;
-            const newBtn = row.querySelector('.pr-new');
-            if (newBtn) newBtn.addEventListener('click', () => openWalkInRiderDialog(row));
             const altToggle = row.querySelector('.pr-alt-toggle');
             if (altToggle) altToggle.addEventListener('click', () => {
                 row.querySelector('.pr-alt').classList.toggle('hidden');
@@ -2437,7 +2402,7 @@
                 // exactly as it was, then open the form.
                 if (e.target.value === NEW_RIDER) {
                     e.target.value = e.target.dataset.prev || '';
-                    openWalkInRiderDialog(e.target.closest('.pick-row'));
+                    openNewRiderForRow(e.target.closest('.pick-row'));
                     return;
                 }
                 e.target.dataset.prev = e.target.value;
@@ -3821,19 +3786,19 @@
             collection_teacher: document.getElementById('ct-teacher').value,
             collection_class: document.getElementById('ct-class').value,
             notes: document.getElementById('ct-notes').value,
-            horse_prefs: [...$dialog.querySelectorAll('[data-kind="ctpref"]')].map((row) => ({
+            horse_prefs: [...(ctHost || $dialog).querySelectorAll('[data-kind="ctpref"]')].map((row) => ({
                 kind: row.querySelector('.cp-kind').value,
                 horse_id: row.querySelector('.cp-horse').value || null,
                 reason: row.querySelector('.cp-reason').value
             })).filter((p) => p.horse_id),
-            availability: collectAvailability($dialog)
+            availability: collectAvailability(ctHost || $dialog)
         };
         if (!body.is_rider && !body.is_parent) {
-            dialogError('Tick rider, parent, or both.');
+            ctError('Tick rider, parent, or both.');
             return null;
         }
         if (body.is_parent && !body.payment_terms) {
-            dialogError('Choose how this parent pays before saving.');
+            ctError('Choose how this parent pays before saving.');
             return null;
         }
         const paysParentEl0 = document.getElementById('ct-pays-parent');
@@ -3841,7 +3806,7 @@
         const effTerms = effectivePayerTerms(contact, body.payment_terms, body.is_parent,
             !parentWrapHidden && paysParentEl0 && paysParentEl0.checked);
         if (effTerms === 'advance_term' && !body.school_id) {
-            dialogError('Pick the school — per-term invoices need its term dates.');
+            ctError('Pick the school — per-term invoices need its term dates.');
             return null;
         }
         // A payer being typed in inline is created first, so the rider has a
@@ -3850,8 +3815,8 @@
         if (inlineParentOpen()) {
             const npName = document.getElementById('np-name').value.trim();
             const npTerms = document.getElementById('np-terms').value;
-            if (!npName) { dialogError('The new parent needs a name.'); return null; }
-            if (!npTerms) { dialogError('Choose how the new parent pays.'); return null; }
+            if (!npName) { ctError('The new parent needs a name.'); return null; }
+            if (!npTerms) { ctError('Choose how the new parent pays.'); return null; }
             try {
                 const made = await api('POST', '/api/contacts', {
                     name: npName,
@@ -3865,7 +3830,7 @@
                 state.contacts = (await api('GET', '/api/contacts')).contacts;
                 body.parent_id = made.contact.id;
             } catch (e) {
-                dialogError(e.message);
+                ctError(e.message);
                 return null;
             }
         }
@@ -3873,7 +3838,7 @@
         const paysParentEl = document.getElementById('ct-pays-parent');
         if (paysParentEl && paysParentEl.checked && !body.parent_id &&
             !document.getElementById('ct-parent-wrap').classList.contains('hidden')) {
-            dialogError('Pick the parent who pays, or switch to "Pays own invoices".');
+            ctError('Pick the parent who pays, or switch to "Pays own invoices".');
             return null;
         }
         try {
@@ -3883,13 +3848,31 @@
             state.contacts = (await api('GET', '/api/contacts')).contacts;
             return res.contact;
         } catch (err) {
-            dialogError(err.message);
+            ctError(err.message);
             return null;
         }
     }
 
-    function openContactDialog(contact, withTabs) {
-        openDialog(`
+    // The contact form normally fills the main dialog, but it also has to open
+    // *over* the ride dialog when a rider is added mid-ride — replacing the main
+    // dialog there would throw away the half-built ride. Everything inside is
+    // found by id, which stays unique because only one contact form is ever on
+    // screen; only the few container-scoped lookups need to know which host
+    // they are in, and that is what this points at.
+    let ctHost = null;
+
+    // msg into the contact form's own error line, not whichever dialog is behind it
+    function ctError(msg) {
+        const el = (ctHost || $dialog).querySelector('.form-error');
+        if (el) el.textContent = msg;
+    }
+
+    // opts.overlay  — render over the current dialog instead of replacing it
+    // opts.onSaved  — called with the saved contact instead of re-rendering a page
+    // opts.fixedRider — the roles are not up for debate: this is a rider
+    function openContactDialog(contact, withTabs, opts) {
+        const o = opts || {};
+        const html = (`
             ${withTabs ? newTypeTabsHtml('rider') : ''}
             <h2>${contact ? 'Edit contact' : 'New rider or parent'}</h2>
             <!-- Roles come first: they decide which of the fields below are even
@@ -4045,28 +4028,42 @@
                 <button class="secondary" id="ct-cancel">Cancel</button>
                 <button id="ct-save">Save</button>
             </div>`);
+        let overlay = null;
+        if (o.overlay) {
+            overlay = openSubDialog(html);
+            ctHost = overlay;
+        } else {
+            openDialog(html);
+            ctHost = $dialog;
+        }
+        const dismiss = () => {
+            ctHost = null;
+            if (overlay) overlay.remove(); else closeDialog();
+        };
         (contact && contact.horse_prefs || []).forEach((p) => {
             document.getElementById('ct-prefs').insertAdjacentHTML('beforeend', contactPrefRowHtml(p));
         });
-        $dialog.querySelectorAll('[data-kind="ctpref"] .row-x').forEach((btn) =>
+        ctHost.querySelectorAll('[data-kind="ctpref"] .row-x').forEach((btn) =>
             btn.addEventListener('click', () => btn.closest('.pick-row').remove()));
         document.getElementById('ct-pref-add').addEventListener('click', () => {
             document.getElementById('ct-prefs').insertAdjacentHTML('beforeend', contactPrefRowHtml(null));
             const row = document.getElementById('ct-prefs').lastElementChild;
             row.querySelector('.row-x').addEventListener('click', () => row.remove());
         });
-        wireAvailField($dialog);
+        wireAvailField(ctHost);
         wireContactRoles(contact);
         document.getElementById('ct-collect').addEventListener('change', (e) => {
             document.getElementById('ct-collect-details').style.display = e.target.checked ? 'flex' : 'none';
         });
-        wireNewTypeTabs();
-        document.getElementById('ct-cancel').addEventListener('click', closeDialog);
+        if (!o.overlay) wireNewTypeTabs();
+        document.getElementById('ct-cancel').addEventListener('click', dismiss);
         document.getElementById('ct-save').addEventListener('click', async () => {
             const saved = await saveContactForm(contact);
             if (!saved) return;
-            closeDialog();
+            dismiss();
             toast('Saved.');
+            // Opened from somewhere that wants the contact back (a ride row)
+            if (o.onSaved) { o.onSaved(saved); return; }
             if (contact && location.hash.startsWith('#/contacts/')) renderContactDetail(contact.id);
             else {
                 state.contactScroll = window.scrollY;
@@ -4079,7 +4076,7 @@
                 'They disappear from lists, but their rides and invoices are kept.', 'Archive')) return;
             try {
                 await api('PUT', `/api/contacts/${contact.id}`, { archived: true });
-                closeDialog();
+                dismiss();
                 toast('Archived.');
                 location.hash = '#/contacts';
             } catch (err) {

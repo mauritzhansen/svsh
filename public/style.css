@@ -1309,6 +1309,13 @@ table.rep-tree .rep-total td { border-top: 2px solid var(--border); }
     /* reads as a layer above the form rather than part of it */
     box-shadow: 0 14px 44px rgba(0, 0, 0, 0.30);
     border: 1px solid var(--border);
+    /* The full contact form opens in here when a rider is added mid-ride, and
+       it is far taller than the screen. Without a cap it overflows the overlay
+       in both directions with nothing to scroll. dvh tracks the visible height
+       on a phone; the vh line above it is the fallback. */
+    max-height: 88vh;
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
 }
 .subdialog h3 { margin-top: 0; }
 /* the primary action must be the obvious way out */
