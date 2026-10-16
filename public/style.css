@@ -1554,3 +1554,26 @@ body.is-offline .ride-box { opacity: 0.92; }
 .np-inline-head { display: flex; align-items: center; justify-content: space-between;
                   gap: 8px; margin-bottom: 4px; }
 .np-inline > label:first-of-type { margin-top: 0; }
+
+/* The money block on the contact form: arena fee, livery and expenses, set
+   apart so it reads as one section rather than loose fields. */
+.money-block {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg); padding: 4px 12px 12px; margin: 10px 0;
+}
+.money-block legend { font-size: 12px; font-weight: 700; color: var(--muted);
+                      text-transform: uppercase; letter-spacing: .04em; padding: 0 4px; }
+.charge-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px;
+              border-bottom: 1px solid var(--border); font-size: 13px; }
+.charge-row:last-child { border-bottom: 0; }
+.charge-date { flex: 0 0 auto; color: var(--muted); }
+.charge-desc { flex: 1 1 auto; min-width: 0; }
+.charge-amt { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.charge-state { flex: 0 0 auto; font-size: 11px; font-weight: 700; text-transform: uppercase;
+                padding: 1px 6px; border-radius: 999px; background: #fcf4e3; color: #8a6d3b; }
+.charge-row.invoiced .charge-state { background: var(--green-light); color: #3c5a34; }
+.charge-row.invoiced { opacity: .75; }
+
+/* A rider's school is their payer's, shown rather than editable */
+.inherited-school { padding: 9px 10px; border: 1px dashed var(--border);
+                    border-radius: 8px; background: var(--bg); font-size: 14px; }

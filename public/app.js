@@ -3272,25 +3272,30 @@
 
     function contactSubLine(c) {
         const bits = [];
-        if (isRider(c)) {
+        if (isRider(c) && !isParent(c)) {
             if (c.parent_name) bits.push(`👤 ${esc(c.parent_name)} pays`);
-            else if (isParent(c)) bits.push('pays own invoices');
             else bits.push('<span class="no-parent">no parent assigned</span>');
         }
         if (isParent(c)) {
-            const kids = c.children || [];
-            // Someone who is both parent and rider may simply pay for their own
-            // lessons and nobody else's — that is not a gap worth flagging.
-            if (kids.length) bits.push(`👥 ${kids.map((k) => esc(k.name)).join(', ')}`);
-            else if (!isRider(c)) bits.push('<span class="no-parent">no riders linked</span>');
+            // Who this payer's invoice covers. A parent who rides too is on
+            // their own invoice, so they belong in the list rather than being
+            // described separately as paying their own way.
+            const names = (c.children || []).map((k) => k.name);
+            if (isRider(c)) names.unshift(c.name);
+            if (names.length > (isRider(c) ? 1 : 0)) {
+                bits.push(`👥 ${names.map(esc).join(', ')}`);
+            } else if (!isRider(c)) {
+                bits.push('<span class="no-parent">no riders linked</span>');
+            }
         }
         // A rider with no school has no term dates, so the invoicing cannot tell
         // their term lessons from their holiday ones; no level leaves the ride
         // pickers guessing. Both are quick to miss and awkward to find later.
-        if (isRider(c)) {
-            if (!c.school_id) bits.push('<span class="no-parent">school not set</span>');
-            if (!c.experience) bits.push('<span class="no-parent">level not set</span>');
-        }
+        // The school sits on whoever pays, so only flag it there — a rider whose
+        // parent pays follows that parent's and has nothing of their own to set.
+        const paysOwnWay = !c.parent_id;
+        if (paysOwnWay && !c.school_id) bits.push('<span class="no-parent">school not set</span>');
+        if (isRider(c) && !c.experience) bits.push('<span class="no-parent">level not set</span>');
         if ((isParent(c) || (isRider(c) && !c.parent_id)) && !c.payment_terms) {
             bits.push('<span class="no-parent">payment terms not set</span>');
         } else if (c.payment_terms && isParent(c)) {
@@ -3559,6 +3564,50 @@
         return ownTerms || null;
     }
 
+    // Extra monthly charges for this one customer. Held in the form and saved
+    // with it, the same as horse preferences — they are part of the contact.
+    function monthlyRowHtml(m) {
+        return `<div class="pick-row" data-monthly-row>
+            <input class="mc-name" placeholder="e.g. Extra hay" value="${esc(m ? m.name : '')}"
+                   style="flex:1 1 auto;min-width:0">
+            <input class="mc-price" type="number" inputmode="decimal" step="0.01"
+                   style="flex:0 0 100px" value="${m ? (Number(m.price_cents) / 100).toFixed(2) : '0.00'}">
+            <button type="button" class="danger small row-x">${ICON_X}</button>
+        </div>`;
+    }
+
+    function wireMonthlyRow(row) {
+        row.querySelector('.row-x').addEventListener('click', () => row.remove());
+    }
+
+    // One-off expenses are saved the moment they are added, not with the form:
+    // they are a record of something that happened, and losing them to a stray
+    // navigation would lose money. Invoiced ones can no longer be removed.
+    function renderContactCharges(contact) {
+        const el = document.getElementById('ct-charges');
+        if (!el) return;
+        const list = (contact && contact.charges) || [];
+        if (!list.length) { el.innerHTML = '<div class="muted">None yet.</div>'; return; }
+        el.innerHTML = list.map((c) => `
+            <div class="charge-row${c.invoiced ? ' invoiced' : ''}" data-charge="${c.id}">
+                <span class="charge-date">${fmtDay(c.charge_date)}</span>
+                <span class="charge-desc">${esc(c.description)}</span>
+                <span class="charge-amt">${money(c.amount_cents)}</span>
+                <span class="charge-state">${c.invoiced ? 'invoiced' : 'pending'}</span>
+                ${c.invoiced ? '' : `<button type="button" class="danger small ch-del">${ICON_X}</button>`}
+            </div>`).join('');
+        el.querySelectorAll('.ch-del').forEach((btn) => btn.addEventListener('click', async () => {
+            const row = btn.closest('[data-charge]');
+            if (!await askConfirm('Remove this expense?', row.querySelector('.charge-desc').textContent,
+                'Remove')) return;
+            try {
+                await api('DELETE', `/api/charges/${row.getAttribute('data-charge')}`);
+                state.contacts = (await api('GET', '/api/contacts')).contacts;
+                renderContactCharges(contactById(contact.id));
+            } catch (e) { toast(e.message, true); }
+        }));
+    }
+
     // Show the inline new-parent fields in place of the picker. The picker is
     // hidden rather than disabled so there is one obvious answer on screen to
     // "who pays" — either a chosen contact or the one being typed in.
@@ -3643,14 +3692,33 @@
             // describe a rider; a contact who only pays is not asked any of it.
             const riderOnly = document.getElementById('ct-rider-only');
             if (riderOnly) riderOnly.classList.toggle('hidden', !rider.checked);
+            // The school belongs to whoever pays: one invoice covers all of a
+            // payer's children, so they all follow one term calendar. A rider
+            // whose parent pays is shown that school rather than setting one.
             const schoolWrap = document.getElementById('ct-school-wrap');
-            const needsSchool = rider.checked;
+            const inherited = document.getElementById('ct-school-inherited');
+            const followsPayer = rider.checked && !parent.checked && !hasKids && paysParent.checked;
+            schoolWrap.classList.toggle('hidden', followsPayer);
+            if (inherited) {
+                inherited.classList.toggle('hidden', !followsPayer);
+                if (followsPayer) {
+                    const payer = contactById(document.getElementById('ct-parent').value);
+                    const school = payer && state.schools.find(
+                        (s) => String(s.id) === String(payer.school_id));
+                    document.getElementById('ct-school-inherited-text').innerHTML = school
+                        ? `${esc(school.name)} <span class="muted">— from ${esc(payer.name)}</span>`
+                        : payer
+                        ? `<span class="no-parent">${esc(payer.name)} has no school set</span>`
+                        : '<span class="no-parent">pick the parent who pays first</span>';
+                }
+            }
+            const needsSchool = !followsPayer && (rider.checked || parent.checked);
             schoolWrap.classList.toggle('needs-school',
                 needsSchool && !document.getElementById('ct-school').value);
             document.getElementById('ct-school-req').classList.toggle('hidden', !needsSchool);
             const schNote = document.getElementById('ct-school-note');
             if (schNote) schNote.textContent = needsSchool
-                ? "Required — term dates decide which lessons are term-time and which are holidays."
+                ? "Required — term dates decide which lessons are term-time. Riders you pay for follow this school."
                 : "Optional for someone who does not ride.";
             // A brand-new rider paying their own way is almost always a walk-in
             // settling on the day — otherwise they land in "terms not set".
@@ -3664,6 +3732,7 @@
         termsSel.addEventListener('change', () => { termsTouched = true; sync(); });
         document.getElementById('ct-school').addEventListener('change', sync);
         paysParent.addEventListener('change', sync);
+        document.getElementById('ct-parent').addEventListener('change', sync);
         paysOwn.addEventListener('change', sync);
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
@@ -3812,8 +3881,11 @@
     async function saveContactForm(contact) {
         const body = {
             livery_share: document.getElementById('ct-livery').value || null,
-            livery_extra_ids: [...(ctHost || $dialog).querySelectorAll('.ct-lx')]
-                .filter((cb) => cb.checked).map((cb) => cb.value),
+            monthly_charges: [...(ctHost || $dialog).querySelectorAll('[data-monthly-row]')]
+                .map((r) => ({
+                    name: r.querySelector('.mc-name').value.trim(),
+                    price_cents: parseMoneyCents(r.querySelector('.mc-price').value) || 0
+                })).filter((m) => m.name),
             name: document.getElementById('ct-name').value,
             phone: readPhoneField('ct-phone'),
             email: document.getElementById('ct-email').value,
@@ -3938,6 +4010,10 @@
                     <input type="checkbox" id="ct-is-parent" ${contact && contact.is_parent ? 'checked' : ''}>
                     Parent
                 </label>
+                <label class="role-check">
+                    <input type="checkbox" id="ct-prospect" ${contact && contact.is_prospect ? 'checked' : ''}>
+                    🌱 Interested
+                </label>
             </div>
             <label>Name</label>
             <input id="ct-name" value="${esc(contact ? contact.name : '')}">
@@ -4001,10 +4077,6 @@
                 <label>Address (optional)</label>
                 <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
             </div>
-            <label style="display:flex;align-items:center;gap:8px;color:var(--text)">
-                <input type="checkbox" id="ct-prospect" style="width:auto" ${contact && contact.is_prospect ? 'checked' : ''}>
-                🌱 Interested — not placed in a lesson yet
-            </label>
             <div id="ct-terms-wrap">
                 <label>How they pay <span class="req">*</span></label>
                 <select id="ct-terms">
@@ -4013,30 +4085,40 @@
                         `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
                 </select>
             </div>
-            <label class="role-check" style="margin:2px 0 10px">
-                <input type="checkbox" id="ct-arena" ${contact && contact.pays_arena_fee ? 'checked' : ''}>
-                Pays arena fees (charged once a quarter)
-            </label>
-            <!-- Livery sits with the money questions because it is billed to the
-                 payer, not to a rider: it follows the horse, not the lessons. -->
-            <div id="ct-livery-wrap">
-                <label>Livery</label>
+            <!-- Everything billed on top of the lessons, kept in one block so it
+                 reads as the money section rather than stray tick-boxes: the
+                 arena fee, livery, and any expenses for this contact. -->
+            <fieldset class="money-block">
+                <legend>Additional expenses</legend>
+                <label class="role-check">
+                    <input type="checkbox" id="ct-arena" ${contact && contact.pays_arena_fee ? 'checked' : ''}>
+                    Pays arena fees (charged once a quarter)
+                </label>
+                <label style="margin-top:8px">Livery</label>
                 <select id="ct-livery">
                     <option value="" ${contact && contact.livery_share ? '' : 'selected'}>Not a livery customer</option>
                     <option value="100" ${contact && contact.livery_share === 100 ? 'selected' : ''}>Full livery (100%)</option>
                     <option value="50" ${contact && contact.livery_share === 50 ? 'selected' : ''}>Half share (50%)</option>
                 </select>
                 <div id="ct-livery-extras" class="${contact && contact.livery_share ? '' : 'hidden'}">
-                    <label>Additional livery costs</label>
-                    <div class="muted" style="margin:-4px 0 6px">Charged in full, on a half share too.</div>
-                    ${(state.liveryExtras || []).filter((e) => e.active).map((e) => `
-                        <label class="role-check">
-                            <input type="checkbox" class="ct-lx" value="${e.id}"
-                                ${contact && (contact.livery_extra_ids || []).map(String).includes(String(e.id)) ? 'checked' : ''}>
-                            ${esc(e.name)} — ${money(e.price_cents)}
-                        </label>`).join('') || '<div class="muted">None set up in Settings yet.</div>'}
+                    <div class="muted" style="margin:6px 0">Every livery customer is also charged
+                       the standard monthly items from Settings${(state.liveryExtras || []).filter((e) => e.active).length
+                        ? ': ' + (state.liveryExtras || []).filter((e) => e.active)
+                            .map((e) => `${esc(e.name)} ${money(e.price_cents)}`).join(', ')
+                        : ' (none set up yet)'}.</div>
+                    <label>Additional monthly livery charges for this customer</label>
+                    <div id="ct-monthly"></div>
+                    <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
                 </div>
-            </div>
+                <label style="margin-top:10px">One-off expenses</label>
+                <div class="muted" style="margin:-4px 0 6px">A vet call, a bag of feed, or a
+                   discount (enter a negative amount). Added to the next invoice.</div>
+                <div id="ct-charges"></div>
+                ${contact ? '<button type="button" class="secondary small" id="ct-charge-add">＋ Add an expense</button>'
+                    : '<div class="muted">Save the contact first, then expenses can be added.</div>'}
+            </fieldset>
+            <!-- Shown only to whoever pays. A rider with a payer above them
+                 follows that payer's school; see ct-school-inherited. -->
             <div id="ct-school-wrap">
                 <label>School <span class="req" id="ct-school-req">*</span></label>
                 <select id="ct-school">
@@ -4047,6 +4129,10 @@
                 <div class="muted" id="ct-school-note" style="margin:-4px 0 10px">
                     Per-term invoices use this school's term dates.
                 </div>
+            </div>
+            <div id="ct-school-inherited" class="hidden" style="margin-bottom:10px">
+                <label>School</label>
+                <div class="inherited-school" id="ct-school-inherited-text"></div>
             </div>
             <div id="ct-parent-note" class="muted hidden" style="margin-bottom:10px">
                 Riders are linked to this contact, so they pay their own invoices —
@@ -4132,6 +4218,51 @@
         if (liverySel) liverySel.addEventListener('change', () => {
             document.getElementById('ct-livery-extras')
                 .classList.toggle('hidden', !liverySel.value);
+        });
+        // per-customer monthly charges
+        const monthlyBox = document.getElementById('ct-monthly');
+        ((contact && contact.monthly_charges) || []).forEach((m) => {
+            monthlyBox.insertAdjacentHTML('beforeend', monthlyRowHtml(m));
+            wireMonthlyRow(monthlyBox.lastElementChild);
+        });
+        document.getElementById('ct-monthly-add').addEventListener('click', () => {
+            monthlyBox.insertAdjacentHTML('beforeend', monthlyRowHtml(null));
+            wireMonthlyRow(monthlyBox.lastElementChild);
+        });
+        // one-off expenses, saved as they are added
+        renderContactCharges(contact);
+        const chargeBtn = document.getElementById('ct-charge-add');
+        if (chargeBtn) chargeBtn.addEventListener('click', () => {
+            const overlay = openSubDialog(`
+                <h3 style="margin:0 0 10px">Add an expense</h3>
+                <label>Date</label>
+                <input type="date" id="ce-date" value="${todayStr()}">
+                <label>What it is</label>
+                <input id="ce-desc" autocomplete="off" placeholder="e.g. Vet call-out">
+                <label>Amount (${esc(state.settings.currency || 'R')})</label>
+                <input id="ce-amt" type="number" inputmode="decimal" step="0.01"
+                       placeholder="negative for a discount">
+                <div class="form-error"></div>
+                <div class="form-actions">
+                    <button class="secondary" id="ce-cancel">Cancel</button>
+                    <button id="ce-save">Add</button>
+                </div>`);
+            overlay.querySelector('#ce-cancel').addEventListener('click', () => overlay.remove());
+            overlay.querySelector('#ce-save').addEventListener('click', async () => {
+                const err = overlay.querySelector('.form-error');
+                try {
+                    await api('POST', `/api/contacts/${contact.id}/charges`, {
+                        charge_date: overlay.querySelector('#ce-date').value,
+                        description: overlay.querySelector('#ce-desc').value,
+                        amount_cents: parseMoneyCents(overlay.querySelector('#ce-amt').value) || 0
+                    });
+                    state.contacts = (await api('GET', '/api/contacts')).contacts;
+                    overlay.remove();
+                    renderContactCharges(contactById(contact.id));
+                    toast('Expense added.');
+                } catch (e) { err.textContent = e.message; }
+            });
+            overlay.querySelector('#ce-desc').focus();
         });
         document.getElementById('ct-collect').addEventListener('change', (e) => {
             document.getElementById('ct-collect-details').style.display = e.target.checked ? 'flex' : 'none';
@@ -5381,6 +5512,17 @@
                         <input id="biz-email" type="email" value="${esc(state.settings.business_email || '')}">
                     </div>
                 </div>
+                <label>Banking details (shown on every invoice, under the rides)</label>
+                <textarea id="biz-bank" rows="5"
+                    placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
+                <label>Invoice footer text</label>
+                <input id="biz-footer" value="${esc(state.settings.invoice_footer || '')}">
+                <div class="form-actions"><button id="biz-save">Save</button></div>
+            </div>` : ''}
+
+            ${admin ? `
+            <h2>Livery &amp; arena fees</h2>
+            <div class="card">
                 <label>Arena fee per quarter (${esc(state.settings.currency || 'R')})</label>
                 <input id="biz-arena" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
@@ -5396,21 +5538,16 @@
                        value="${state.settings.livery_price_cents ? (Number(state.settings.livery_price_cents) / 100).toFixed(2) : ''}">
                 <div class="muted" style="margin:-4px 0 10px">Charged monthly to contacts marked as
                    livery customers, scaled to their 50% or 100% share.</div>
-                <label>Additional livery costs</label>
-                <div class="muted" style="margin:-4px 0 6px">Bedding, feed and the like. Each is
-                   ticked per customer on their profile and charged at the full price, on a half
-                   share too.</div>
+                <label>Standard monthly livery charges</label>
+                <div class="muted" style="margin:-4px 0 6px">Bedding, feed and the like. Every
+                   livery customer is charged all of these, at the full price on a half share too.
+                   Charges for one customer only go on their own profile.</div>
                 <div id="livery-extras"></div>
                 <button type="button" class="secondary small" id="livery-extra-add">＋ Add a livery cost</button>
                 <label style="margin-top:10px">Livery explanation (printed on invoices that include livery)</label>
                 <textarea id="biz-livery-note" rows="2"
                     placeholder="e.g. Livery is charged monthly in advance and covers stabling, turnout and daily care.">${esc(state.settings.livery_note || '')}</textarea>
-                <label>Banking details (shown on every invoice, under the rides)</label>
-                <textarea id="biz-bank" rows="5"
-                    placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
-                <label>Invoice footer text</label>
-                <input id="biz-footer" value="${esc(state.settings.invoice_footer || '')}">
-                <div class="form-actions"><button id="biz-save">Save</button></div>
+                <div class="form-actions"><button id="fees-save">Save</button></div>
             </div>` : ''}
 
             ${admin ? `
@@ -5705,30 +5842,34 @@
                 });
             });
             document.getElementById('user-add').addEventListener('click', () => openUserDialog(null));
-            document.getElementById('biz-save').addEventListener('click', async () => {
+            // Each card saves its own fields, so the Save button next to a
+            // section does what it looks like it does.
+            const saveSettings = async (body) => {
                 try {
-                    const body = {
-                        business_name: document.getElementById('biz-name').value,
-                        business_address: document.getElementById('biz-address').value,
-                        currency: document.getElementById('biz-currency').value,
-                        invoice_footer: document.getElementById('biz-footer').value,
-                        bank_details: document.getElementById('biz-bank').value,
-                        arena_fee_cents: String(parseMoneyCents(document.getElementById('biz-arena').value) || ''),
-                        arena_fee_note: document.getElementById('biz-arena-note').value,
-                        livery_price_cents: String(parseMoneyCents(document.getElementById('biz-livery').value) || ''),
-                        livery_note: document.getElementById('biz-livery-note').value,
-                        business_phone: readPhoneField('biz-phone'),
-                        business_email: document.getElementById('biz-email').value,
-                        day_start: document.getElementById('biz-daystart').value,
-                        day_end: document.getElementById('biz-dayend').value
-                    };
                     await api('PUT', '/api/settings', body);
                     Object.assign(state.settings, body);
                     toast('Saved.');
                 } catch (err) {
                     toast(err.message, true);
                 }
-            });
+            };
+            document.getElementById('biz-save').addEventListener('click', () => saveSettings({
+                business_name: document.getElementById('biz-name').value,
+                business_address: document.getElementById('biz-address').value,
+                currency: document.getElementById('biz-currency').value,
+                invoice_footer: document.getElementById('biz-footer').value,
+                bank_details: document.getElementById('biz-bank').value,
+                business_phone: readPhoneField('biz-phone'),
+                business_email: document.getElementById('biz-email').value,
+                day_start: document.getElementById('biz-daystart').value,
+                day_end: document.getElementById('biz-dayend').value
+            }));
+            document.getElementById('fees-save').addEventListener('click', () => saveSettings({
+                arena_fee_cents: String(parseMoneyCents(document.getElementById('biz-arena').value) || ''),
+                arena_fee_note: document.getElementById('biz-arena-note').value,
+                livery_price_cents: String(parseMoneyCents(document.getElementById('biz-livery').value) || ''),
+                livery_note: document.getElementById('biz-livery-note').value
+            }));
         }
     }
 

@@ -363,8 +363,16 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                             'weekday', av.weekday, 'start_time', av.start_time::text,
                             'end_time', av.end_time::text) ORDER BY av.weekday, av.start_time), '[]'::json)
                        FROM contact_availability av WHERE av.contact_id = c.id) AS availability,
-                    (SELECT COALESCE(json_agg(le.extra_id::text), '[]'::json)
-                       FROM contact_livery_extras le WHERE le.contact_id = c.id) AS livery_extra_ids
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'id', mc.id::text, 'name', mc.name, 'price_cents', mc.price_cents)
+                            ORDER BY mc.sort_order, mc.name), '[]'::json)
+                       FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'id', ch.id::text, 'charge_date', ch.charge_date::text,
+                            'description', ch.description, 'amount_cents', ch.amount_cents,
+                            'invoiced', EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id))
+                            ORDER BY ch.charge_date DESC, ch.id DESC), '[]'::json)
+                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges
                FROM contacts c
                LEFT JOIN contacts p ON p.id = c.parent_id
                LEFT JOIN schools sc ON sc.id = c.school_id
@@ -391,8 +399,16 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
                             'weekday', av.weekday, 'start_time', av.start_time::text,
                             'end_time', av.end_time::text) ORDER BY av.weekday, av.start_time), '[]'::json)
                        FROM contact_availability av WHERE av.contact_id = c.id) AS availability,
-                    (SELECT COALESCE(json_agg(le.extra_id::text), '[]'::json)
-                       FROM contact_livery_extras le WHERE le.contact_id = c.id) AS livery_extra_ids
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'id', mc.id::text, 'name', mc.name, 'price_cents', mc.price_cents)
+                            ORDER BY mc.sort_order, mc.name), '[]'::json)
+                       FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'id', ch.id::text, 'charge_date', ch.charge_date::text,
+                            'description', ch.description, 'amount_cents', ch.amount_cents,
+                            'invoiced', EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id))
+                            ORDER BY ch.charge_date DESC, ch.id DESC), '[]'::json)
+                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges
                FROM contacts c LEFT JOIN contacts p ON p.id = c.parent_id
               WHERE c.id = $1`, [req.params.id]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
@@ -441,15 +457,19 @@ async function validateParent(parentId, contactId) {
 // Replace-all save of a contact's horse preferences and availability windows.
 // Returns an error string, or null on success.
 async function saveContactExtras(contactId, body) {
-    // Which livery extras this contact pays for. Sent as a full list, so an
-    // empty array genuinely means "none" rather than "no change".
-    if (Array.isArray(body.livery_extra_ids)) {
-        const ids = [...new Set(body.livery_extra_ids.map(String).filter(Boolean))];
-        await pool.query('DELETE FROM contact_livery_extras WHERE contact_id = $1', [contactId]);
-        for (const id of ids) {
+    // Extra monthly charges for this one customer, on top of the standard ones
+    // every livery customer gets. Sent as a full list, so an empty array really
+    // does mean "none" rather than "no change".
+    if (Array.isArray(body.monthly_charges)) {
+        await pool.query('DELETE FROM contact_monthly_charges WHERE contact_id = $1', [contactId]);
+        let i = 0;
+        for (const m of body.monthly_charges) {
+            const name = String((m || {}).name || '').trim();
+            if (!name) continue;
             await pool.query(
-                `INSERT INTO contact_livery_extras (contact_id, extra_id) VALUES ($1, $2)
-                 ON CONFLICT DO NOTHING`, [contactId, id]);
+                `INSERT INTO contact_monthly_charges (contact_id, name, price_cents, sort_order)
+                 VALUES ($1, $2, $3, $4)`,
+                [contactId, name, Math.round(Number(m.price_cents) || 0), i++]);
         }
     }
     if (Array.isArray(body.horse_prefs)) {
@@ -505,11 +525,15 @@ function paymentTermsError(body) {
     return null;
 }
 
-// Term dates decide which of a rider's lessons are term-time and which fall in
-// the holidays, and that drives what is invoiced — so every rider needs one.
+// Term dates decide which lessons are term-time and which fall in the holidays,
+// and that drives what is invoiced. The school belongs to whoever PAYS, not to
+// each rider: one invoice covers all of a payer's children, so two term
+// calendars on one invoice would have to be split down the middle. A rider with
+// a payer above them simply follows that payer's school.
 function schoolError(body) {
     const b = body || {};
-    if (b.is_rider === true && b.school_id === null) {
+    const paysOwnWay = b.is_rider === true && !b.parent_id;
+    if ((paysOwnWay || b.is_parent === true) && b.school_id === null) {
         return 'Pick the school — term dates decide which lessons are term-time.';
     }
     return null;
@@ -705,6 +729,47 @@ app.get('/api/schools', requireAuth, async (req, res) => {
         res.json({ schools: rows });
     } catch (err) {
         handleError(res, err, 'Loading schools');
+    }
+});
+
+// One-off expenses against a contact: a vet call, a bag of feed, or a discount
+// (negative). They sit as "pending" until an invoice picks them up, after which
+// they show as invoiced and can no longer be edited away from under it.
+app.post('/api/contacts/:id/charges', requireRole('helper'), async (req, res) => {
+    try {
+        const { charge_date, description, amount_cents } = req.body || {};
+        if (!DATE_RE.test(String(charge_date || ''))) {
+            return res.status(400).json({ error: 'A valid date is required.' });
+        }
+        if (!String(description || '').trim()) {
+            return res.status(400).json({ error: 'A description is required.' });
+        }
+        const cents = Math.round(Number(amount_cents));
+        if (!Number.isFinite(cents) || cents === 0) {
+            return res.status(400).json({ error: 'An amount is required.' });
+        }
+        const { rows } = await pool.query(
+            `INSERT INTO contact_charges (contact_id, charge_date, description, amount_cents)
+             VALUES ($1, $2, $3, $4) RETURNING *`,
+            [req.params.id, charge_date, String(description).trim(), cents]);
+        res.json({ charge: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Adding the expense');
+    }
+});
+
+app.delete('/api/charges/:id', requireRole('helper'), async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            'SELECT 1 FROM invoice_lines WHERE charge_id = $1', [req.params.id]);
+        if (rows[0]) {
+            return res.status(400).json({
+                error: 'That expense is already on an invoice. Delete the invoice first.' });
+        }
+        await pool.query('DELETE FROM contact_charges WHERE id = $1', [req.params.id]);
+        res.json({ ok: true });
+    } catch (err) {
+        handleError(res, err, 'Deleting the expense');
     }
 });
 
@@ -2493,7 +2558,7 @@ const NOT_PASS_COVERED_SQL = `TRUE`;   // term passes were removed; nothing is p
 // Requires aliases r (rides), rider and payer (contacts).
 const IN_TERM_SQL = `EXISTS (
     SELECT 1 FROM school_terms st
-     WHERE st.school_id = COALESCE(rider.school_id, payer.school_id)
+     WHERE st.school_id = payer.school_id
        AND r.date BETWEEN st.period_start AND st.period_end)`;
 
 // How far back an advance invoice reaches for lessons that were ridden but
@@ -2587,7 +2652,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                        JOIN contacts p2 ON p2.id = COALESCE(rider.parent_id, rider.id)
                        LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
                       WHERE r.date BETWEEN $1 AND $2
-                        AND COALESCE(rider.school_id, p2.school_id) = $3
+                        AND p2.school_id = $3
                         AND p2.payment_terms = 'advance_term'
                         AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                  )
@@ -2619,7 +2684,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
               WHERE NOT rider.archived AND rider.is_rider
                 AND payer.payment_terms = 'advance_term'
-                AND rider.school_id IS NULL AND payer.school_id IS NULL
+                AND payer.school_id IS NULL
               ORDER BY rider.name`);
         // Per-term payers still ride in the holidays and still take ad-hoc
         // lessons. Those cannot be in the term invoice, so they are collected
@@ -2925,11 +2990,15 @@ async function liveryLines(client, payerId, from, to) {
     const priceRow = await client.query(
         "SELECT value FROM settings WHERE key = 'livery_price_cents'");
     const base = parseInt((priceRow.rows[0] || {}).value, 10) || 0;
+    // Two sources, both at full price: the standard charges every livery
+    // customer gets, and anything extra recorded against this one.
     const { rows: extras } = await client.query(
-        `SELECT e.name, e.price_cents FROM contact_livery_extras ce
-           JOIN livery_extras e ON e.id = ce.extra_id
-          WHERE ce.contact_id = $1 AND e.active
-          ORDER BY e.sort_order, e.name`, [payerId]);
+        `SELECT name, price_cents FROM livery_extras WHERE active
+          ORDER BY sort_order, name`);
+    const { rows: mine } = await client.query(
+        `SELECT name, price_cents FROM contact_monthly_charges WHERE contact_id = $1
+          ORDER BY sort_order, name`, [payerId]);
+    extras.push(...mine);
     if (!base && !extras.length) return [];
     // Rides cannot be double-billed because an invoiced seat is skipped, but a
     // livery charge has no seat to mark. Guard on the description instead, so
@@ -2959,6 +3028,24 @@ async function liveryLines(client, payerId, from, to) {
         }
     }
     return lines;
+}
+
+// One-off expenses not yet billed. Swept up to the end of the period rather
+// than only within it, so an expense entered late for an already-invoiced month
+// lands on the next invoice instead of being stranded forever.
+async function chargeLines(client, payerId, to) {
+    const { rows } = await client.query(
+        `SELECT ch.id, ch.charge_date, ch.description, ch.amount_cents
+           FROM contact_charges ch
+          WHERE ch.contact_id = $1 AND ch.charge_date <= $2
+            AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id)
+          ORDER BY ch.charge_date, ch.id`, [payerId, to]);
+    return rows.map((r) => ({
+        charge_id: r.id,
+        description: r.description,
+        ride_date: String(r.charge_date).slice(0, 10),
+        amount_cents: r.amount_cents
+    }));
 }
 
 async function arenaFeeLines(client, riderIds, from, to, soleRider) {
@@ -3025,14 +3112,16 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         // Livery is charged to the payer, not to a seat, so a livery customer
         // with no lessons this period still has something to invoice.
         const livery = await liveryLines(client, payerId, from, to);
-        if (!rides.length && !livery.length) {
+        const charges = await chargeLines(client, payerId, to);
+        if (!rides.length && !livery.length && !charges.length) {
             await client.query('ROLLBACK');
             return null;
         }
         // rider_contact_id only means something on a single-rider invoice
         const riderIds = [...new Set(rides.map((r) => String(r.contact_id)))];
         const soleRider = riderIds.length === 1 ? riderIds[0] : null;
-        const fees = (await arenaFeeLines(client, riderIds, from, to, soleRider)).concat(livery);
+        const fees = (await arenaFeeLines(client, riderIds, from, to, soleRider))
+            .concat(livery).concat(charges);
         const year = from.slice(0, 4);
         const { rows: numRows } = await client.query(
             `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
@@ -3056,9 +3145,9 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         }
         for (const f of fees) {
             await client.query(
-                `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
-                 VALUES ($1, NULL, $2, $3, $4)`,
-                [invRows[0].id, f.description, f.ride_date, f.amount_cents]);
+                `INSERT INTO invoice_lines (invoice_id, participant_id, charge_id, description, ride_date, amount_cents)
+                 VALUES ($1, NULL, $2, $3, $4, $5)`,
+                [invRows[0].id, f.charge_id || null, f.description, f.ride_date, f.amount_cents]);
         }
         await client.query('COMMIT');
         // Return the invoice the way the list shows it — with the payer's name
@@ -3438,7 +3527,7 @@ async function invoiceHolidayNote(inv) {
            JOIN ride_participants rp ON rp.id = il.participant_id
            JOIN contacts rider ON rider.id = rp.contact_id
            JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-           JOIN schools s ON s.id = COALESCE(rider.school_id, payer.school_id)
+           JOIN schools s ON s.id = payer.school_id
           WHERE il.invoice_id = $1`, [inv.id]);
     const from = String(inv.period_start).slice(0, 10);
     const to = String(inv.period_end).slice(0, 10);

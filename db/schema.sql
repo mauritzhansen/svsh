@@ -21,6 +21,29 @@ CREATE TABLE settings (
     value TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE schools (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    active BOOLEAN NOT NULL DEFAULT true,
+    sort_order INT NOT NULL DEFAULT 0,
+    -- Month the ACADEMIC year starts in: 1 for a Jan-Dec school, 8 for AISCT
+    -- (Aug-Jul). school_terms.year is the year that academic year starts in.
+    year_start_month INT NOT NULL DEFAULT 1 CHECK (year_start_month BETWEEN 1 AND 12)
+);
+
+-- year = the year the school's ACADEMIC year starts in (see schools.year_start_month),
+-- so AISCT's year 2026 spans Aug 2026 - Jul 2027 and holds its terms 1-4 in order.
+CREATE TABLE school_terms (
+    id BIGSERIAL PRIMARY KEY,
+    school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    year INT NOT NULL CHECK (year BETWEEN 2000 AND 2100),
+    term_no INT NOT NULL CHECK (term_no BETWEEN 1 AND 4),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    UNIQUE (school_id, year, term_no),
+    CHECK (period_start <= period_end)
+);
+
 CREATE TABLE contacts (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
@@ -224,6 +247,8 @@ CREATE TABLE invoice_lines (
     id BIGSERIAL PRIMARY KEY,
     invoice_id BIGINT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
     participant_id BIGINT UNIQUE REFERENCES ride_participants(id) ON DELETE SET NULL, -- UNIQUE: a seat can only be invoiced once
+    charge_id BIGINT UNIQUE, -- a one-off expense; FK added at the end of this file
+                             -- because contact_charges is declared further down
     description TEXT NOT NULL,
     ride_date DATE,
     amount_cents INT NOT NULL DEFAULT 0
@@ -285,9 +310,9 @@ CREATE TABLE push_subscriptions (
 
 -- Schools and their term dates (see migration 019). Per-term invoicing bills a
 -- rider for their own school's term, and the schools do not share dates.
--- Livery: a paying contact stabling a horse here, billed monthly alongside the
--- lessons. share is 50 or 100 percent and scales the base price only; extras
--- are a fixed cost per horse and are always charged in full. NULL = not livery.
+-- Standard monthly livery charges: every livery customer gets all of these.
+-- The share (50 or 100 percent) scales the base price in settings only; these
+-- are a fixed cost per horse and are always charged in full.
 CREATE TABLE livery_extras (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
@@ -296,34 +321,27 @@ CREATE TABLE livery_extras (
     sort_order INT NOT NULL DEFAULT 0
 );
 
-CREATE TABLE contact_livery_extras (
+-- Extra monthly charges for ONE customer, on top of the standard livery_extras
+-- that every livery customer gets. Full price, never scaled by the share.
+CREATE TABLE contact_monthly_charges (
+    id BIGSERIAL PRIMARY KEY,
     contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-    extra_id BIGINT NOT NULL REFERENCES livery_extras(id) ON DELETE CASCADE,
-    PRIMARY KEY (contact_id, extra_id)
+    name TEXT NOT NULL,
+    price_cents INT NOT NULL DEFAULT 0,
+    sort_order INT NOT NULL DEFAULT 0
 );
 
-CREATE TABLE schools (
+-- One-off expenses for any contact, livery or not: a vet call, a bag of feed,
+-- or (with a negative amount) a discount. Billed once, then shown as invoiced.
+CREATE TABLE contact_charges (
     id BIGSERIAL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    active BOOLEAN NOT NULL DEFAULT true,
-    sort_order INT NOT NULL DEFAULT 0,
-    -- Month the ACADEMIC year starts in: 1 for a Jan-Dec school, 8 for AISCT
-    -- (Aug-Jul). school_terms.year is the year that academic year starts in.
-    year_start_month INT NOT NULL DEFAULT 1 CHECK (year_start_month BETWEEN 1 AND 12)
+    contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    charge_date DATE NOT NULL,
+    description TEXT NOT NULL,
+    amount_cents INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- year = the year the school's ACADEMIC year starts in (see schools.year_start_month),
--- so AISCT's year 2026 spans Aug 2026 - Jul 2027 and holds its terms 1-4 in order.
-CREATE TABLE school_terms (
-    id BIGSERIAL PRIMARY KEY,
-    school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
-    year INT NOT NULL CHECK (year BETWEEN 2000 AND 2100),
-    term_no INT NOT NULL CHECK (term_no BETWEEN 1 AND 4),
-    period_start DATE NOT NULL,
-    period_end DATE NOT NULL,
-    UNIQUE (school_id, year, term_no),
-    CHECK (period_start <= period_end)
-);
 
 -- Riders taken off a ride, kept rather than deleted so the day still shows what
 -- happened and they can be put back (see migration 021).
@@ -336,3 +354,9 @@ CREATE TABLE ride_cancellations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (ride_id, contact_id)
 );
+
+-- Declared here rather than inline: invoice_lines is defined before
+-- contact_charges, and a fresh build of this file runs top to bottom.
+ALTER TABLE invoice_lines
+    ADD CONSTRAINT invoice_lines_charge_fk
+    FOREIGN KEY (charge_id) REFERENCES contact_charges(id) ON DELETE SET NULL;
