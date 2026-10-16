@@ -1499,7 +1499,10 @@ body.is-offline .ride-box { opacity: 0.92; }
     opacity: 0.45;
     text-decoration: line-through;
 }
-.pick-row.removed { background: #fbf4f2; border-radius: 8px; }
+/* The tag asks for a whole line (flex 0 0 100%), but .pick-row does not wrap —
+   so it sat on the same line as the controls and squeezed every select to zero
+   width, leaving a row of empty boxes with no way to tell who was removed. */
+.pick-row.removed { background: #fbf4f2; border-radius: 8px; flex-wrap: wrap; }
 .removed-tag {
     flex: 0 0 100%;
     padding: 2px 4px 0;

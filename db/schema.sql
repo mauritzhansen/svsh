@@ -40,6 +40,8 @@ CREATE TABLE contacts (
     payment_terms TEXT CHECK (payment_terms IN ('advance_monthly', 'advance_term', 'arrears', 'cash_after')),
     school_id BIGINT REFERENCES schools(id) ON DELETE SET NULL, -- term dates come from the school
     pays_arena_fee BOOLEAN NOT NULL DEFAULT false, -- charged once a quarter (see migration 022)
+    -- 50 or 100 percent livery, NULL when the contact is not a livery customer
+    livery_share INT CHECK (livery_share IN (50, 100)),
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
@@ -283,6 +285,23 @@ CREATE TABLE push_subscriptions (
 
 -- Schools and their term dates (see migration 019). Per-term invoicing bills a
 -- rider for their own school's term, and the schools do not share dates.
+-- Livery: a paying contact stabling a horse here, billed monthly alongside the
+-- lessons. share is 50 or 100 percent and scales the base price only; extras
+-- are a fixed cost per horse and are always charged in full. NULL = not livery.
+CREATE TABLE livery_extras (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    price_cents INT NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+    active BOOLEAN NOT NULL DEFAULT true,
+    sort_order INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE contact_livery_extras (
+    contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    extra_id BIGINT NOT NULL REFERENCES livery_extras(id) ON DELETE CASCADE,
+    PRIMARY KEY (contact_id, extra_id)
+);
+
 CREATE TABLE schools (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,

@@ -340,14 +340,15 @@
 
     // ---------- Reference data ----------
     async function loadRefData() {
-        const [horses, rideTypes, contacts, users, guides, settings, schools] = await Promise.all([
+        const [horses, rideTypes, contacts, users, guides, settings, schools, livery] = await Promise.all([
             api('GET', '/api/horses'),
             api('GET', '/api/ride-types'),
             api('GET', '/api/contacts'),
             api('GET', '/api/users'),
             api('GET', '/api/guides'),
             api('GET', '/api/settings'),
-            api('GET', '/api/schools')
+            api('GET', '/api/schools'),
+            api('GET', '/api/livery-extras')
         ]);
         state.horses = horses.horses;
         state.rideTypes = rideTypes.ride_types;
@@ -356,6 +357,7 @@
         state.guides = guides.guides;
         state.settings = settings.settings;
         state.schools = schools.schools;
+        state.liveryExtras = livery.extras;
     }
 
     function activeHorses() { return state.horses.filter((h) => h.active); }
@@ -2223,9 +2225,13 @@
                 tag.className = 'removed-tag';
                 row.appendChild(tag);
             }
+            // Name it. Several removed riders stack up as near-identical rows,
+            // and "Undo" on its own gives no way to tell which is which.
+            const who = contactById((row.querySelector('.pr-contact') || {}).value);
+            const name = who ? `${who.name} — ` : '';
             tag.textContent = kind === 'rescheduled'
-                ? '⟳ rescheduled — gets a credit'
-                : (scope === 'series' ? '✕ removed from the weekly schedule' : '✕ not riding this week');
+                ? `⟳ ${name}rescheduled, gets a credit`
+                : `✕ ${name}${scope === 'series' ? 'removed from the weekly schedule' : 'not riding this week'}`;
         }
 
         function unmarkRemoved(row) {
@@ -3273,9 +3279,17 @@
         }
         if (isParent(c)) {
             const kids = c.children || [];
-            bits.push(kids.length
-                ? `👥 ${kids.map((k) => esc(k.name)).join(', ')}`
-                : '<span class="no-parent">no riders linked</span>');
+            // Someone who is both parent and rider may simply pay for their own
+            // lessons and nobody else's — that is not a gap worth flagging.
+            if (kids.length) bits.push(`👥 ${kids.map((k) => esc(k.name)).join(', ')}`);
+            else if (!isRider(c)) bits.push('<span class="no-parent">no riders linked</span>');
+        }
+        // A rider with no school has no term dates, so the invoicing cannot tell
+        // their term lessons from their holiday ones; no level leaves the ride
+        // pickers guessing. Both are quick to miss and awkward to find later.
+        if (isRider(c)) {
+            if (!c.school_id) bits.push('<span class="no-parent">school not set</span>');
+            if (!c.experience) bits.push('<span class="no-parent">level not set</span>');
         }
         if ((isParent(c) || (isRider(c) && !c.parent_id)) && !c.payment_terms) {
             bits.push('<span class="no-parent">payment terms not set</span>');
@@ -3625,6 +3639,10 @@
             // Every rider needs a school: term dates decide which of their rides
             // are term-time and which fall in the holidays, and that drives what
             // gets invoiced — not only the per-term payers.
+            // Experience, age, pick-up, horse preferences and availability all
+            // describe a rider; a contact who only pays is not asked any of it.
+            const riderOnly = document.getElementById('ct-rider-only');
+            if (riderOnly) riderOnly.classList.toggle('hidden', !rider.checked);
             const schoolWrap = document.getElementById('ct-school-wrap');
             const needsSchool = rider.checked;
             schoolWrap.classList.toggle('needs-school',
@@ -3793,6 +3811,9 @@
     // Shared by Save and by "add a rider" — returns the saved contact or null
     async function saveContactForm(contact) {
         const body = {
+            livery_share: document.getElementById('ct-livery').value || null,
+            livery_extra_ids: [...(ctHost || $dialog).querySelectorAll('.ct-lx')]
+                .filter((cb) => cb.checked).map((cb) => cb.value),
             name: document.getElementById('ct-name').value,
             phone: readPhoneField('ct-phone'),
             email: document.getElementById('ct-email').value,
@@ -3996,6 +4017,26 @@
                 <input type="checkbox" id="ct-arena" ${contact && contact.pays_arena_fee ? 'checked' : ''}>
                 Pays arena fees (charged once a quarter)
             </label>
+            <!-- Livery sits with the money questions because it is billed to the
+                 payer, not to a rider: it follows the horse, not the lessons. -->
+            <div id="ct-livery-wrap">
+                <label>Livery</label>
+                <select id="ct-livery">
+                    <option value="" ${contact && contact.livery_share ? '' : 'selected'}>Not a livery customer</option>
+                    <option value="100" ${contact && contact.livery_share === 100 ? 'selected' : ''}>Full livery (100%)</option>
+                    <option value="50" ${contact && contact.livery_share === 50 ? 'selected' : ''}>Half share (50%)</option>
+                </select>
+                <div id="ct-livery-extras" class="${contact && contact.livery_share ? '' : 'hidden'}">
+                    <label>Additional livery costs</label>
+                    <div class="muted" style="margin:-4px 0 6px">Charged in full, on a half share too.</div>
+                    ${(state.liveryExtras || []).filter((e) => e.active).map((e) => `
+                        <label class="role-check">
+                            <input type="checkbox" class="ct-lx" value="${e.id}"
+                                ${contact && (contact.livery_extra_ids || []).map(String).includes(String(e.id)) ? 'checked' : ''}>
+                            ${esc(e.name)} — ${money(e.price_cents)}
+                        </label>`).join('') || '<div class="muted">None set up in Settings yet.</div>'}
+                </div>
+            </div>
             <div id="ct-school-wrap">
                 <label>School <span class="req" id="ct-school-req">*</span></label>
                 <select id="ct-school">
@@ -4016,6 +4057,11 @@
                 <div id="ct-kids" class="muted"></div>
                 <button type="button" class="secondary small" id="ct-add-kid">＋ Add a rider under this contact</button>
             </div>
+            <!-- Everything from here to Notes describes a RIDER. A contact who
+                 only pays is asked none of it: experience, age, school pick-up,
+                 horse preferences and availability are meaningless for them and
+                 made the form twice as long as it needed to be. -->
+            <div id="ct-rider-only">
             <div class="form-row">
                 <div>
                     <label>Experience level</label>
@@ -4049,6 +4095,7 @@
             <button type="button" class="secondary small" id="ct-pref-add">＋ Add horse preference</button>
             <label>Availability</label>
             ${availFieldHtml(contact ? contact.availability : [])}
+            </div>
             <label>Notes</label>
             <textarea id="ct-notes">${esc(contact ? contact.notes : '')}</textarea>
             <div class="form-error"></div>
@@ -4081,6 +4128,11 @@
         });
         wireAvailField(ctHost);
         wireContactRoles(contact);
+        const liverySel = document.getElementById('ct-livery');
+        if (liverySel) liverySel.addEventListener('change', () => {
+            document.getElementById('ct-livery-extras')
+                .classList.toggle('hidden', !liverySel.value);
+        });
         document.getElementById('ct-collect').addEventListener('change', (e) => {
             document.getElementById('ct-collect-details').style.display = e.target.checked ? 'flex' : 'none';
         });
@@ -5230,6 +5282,47 @@
     }
 
     // ---------- Settings ----------
+    // One row per livery cost: rename, re-price, or remove. Prices are per month
+    // and are charged in full whatever share the customer is on.
+    function renderLiveryExtras() {
+        const el = document.getElementById('livery-extras');
+        if (!el) return;
+        const list = state.liveryExtras || [];
+        if (!list.length) { el.innerHTML = '<div class="muted">None yet.</div>'; return; }
+        el.innerHTML = list.map((e) => `
+            <div class="pick-row" data-livery-extra="${e.id}">
+                <input class="lx-name" value="${esc(e.name)}" style="flex:1 1 auto;min-width:0">
+                <input class="lx-price" type="number" inputmode="decimal" step="0.01" min="0"
+                       style="flex:0 0 100px" value="${(Number(e.price_cents) / 100).toFixed(2)}">
+                <button type="button" class="danger small lx-del">${ICON_X}</button>
+            </div>`).join('');
+        el.querySelectorAll('[data-livery-extra]').forEach((row) => {
+            const id = row.getAttribute('data-livery-extra');
+            const save = async () => {
+                try {
+                    await api('PUT', `/api/livery-extras/${id}`, {
+                        name: row.querySelector('.lx-name').value,
+                        price_cents: parseMoneyCents(row.querySelector('.lx-price').value) || 0
+                    });
+                    state.liveryExtras = (await api('GET', '/api/livery-extras')).extras;
+                    toast('Saved.');
+                } catch (e) { toast(e.message, true); }
+            };
+            row.querySelector('.lx-name').addEventListener('change', save);
+            row.querySelector('.lx-price').addEventListener('change', save);
+            row.querySelector('.lx-del').addEventListener('click', async () => {
+                if (!await askConfirm(`Remove "${row.querySelector('.lx-name').value}"?`,
+                    'It is unticked for every customer. Invoices already raised keep their lines.',
+                    'Remove')) return;
+                try {
+                    await api('DELETE', `/api/livery-extras/${id}`);
+                    state.liveryExtras = (await api('GET', '/api/livery-extras')).extras;
+                    renderLiveryExtras();
+                } catch (e) { toast(e.message, true); }
+            });
+        });
+    }
+
     async function renderSettings() {
         const admin = isAdmin();
         $view.innerHTML = `
@@ -5297,6 +5390,21 @@
                 <label>Arena fee explanation (printed on invoices that include the fee)</label>
                 <textarea id="biz-arena-note" rows="3"
                     placeholder="e.g. The arena fee is charged once a quarter and covers the upkeep of the arena, jumps and footing. It is not a lesson fee and is payable by all riders using the arena.">${esc(state.settings.arena_fee_note || '')}</textarea>
+                <label>Livery per month (${esc(state.settings.currency || 'R')})</label>
+                <input id="biz-livery" type="number" inputmode="decimal" step="0.01" min="0"
+                       placeholder="leave blank for none"
+                       value="${state.settings.livery_price_cents ? (Number(state.settings.livery_price_cents) / 100).toFixed(2) : ''}">
+                <div class="muted" style="margin:-4px 0 10px">Charged monthly to contacts marked as
+                   livery customers, scaled to their 50% or 100% share.</div>
+                <label>Additional livery costs</label>
+                <div class="muted" style="margin:-4px 0 6px">Bedding, feed and the like. Each is
+                   ticked per customer on their profile and charged at the full price, on a half
+                   share too.</div>
+                <div id="livery-extras"></div>
+                <button type="button" class="secondary small" id="livery-extra-add">＋ Add a livery cost</button>
+                <label style="margin-top:10px">Livery explanation (printed on invoices that include livery)</label>
+                <textarea id="biz-livery-note" rows="2"
+                    placeholder="e.g. Livery is charged monthly in advance and covers stabling, turnout and daily care.">${esc(state.settings.livery_note || '')}</textarea>
                 <label>Banking details (shown on every invoice, under the rides)</label>
                 <textarea id="biz-bank" rows="5"
                     placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
@@ -5411,6 +5519,35 @@
                     await reloadSchools();
                 } catch (e) { toast(e.message, true); }
             }));
+            renderLiveryExtras();
+            document.getElementById('livery-extra-add').addEventListener('click', () => {
+                const overlay = openSubDialog(`
+                    <h3 style="margin:0 0 10px">New livery cost</h3>
+                    <label>Name</label>
+                    <input id="nl-name" autocomplete="off" placeholder="e.g. Bedding">
+                    <label>Price per month (${esc(state.settings.currency || 'R')})</label>
+                    <input id="nl-price" type="number" inputmode="decimal" step="0.01" min="0" value="0.00">
+                    <div class="form-error"></div>
+                    <div class="form-actions">
+                        <button class="secondary" id="nl-cancel">Cancel</button>
+                        <button id="nl-save">Add</button>
+                    </div>`);
+                overlay.querySelector('#nl-cancel').addEventListener('click', () => overlay.remove());
+                overlay.querySelector('#nl-save').addEventListener('click', async () => {
+                    const v = overlay.querySelector('#nl-name').value.trim();
+                    if (!v) { overlay.querySelector('.form-error').textContent = 'A name is required.'; return; }
+                    try {
+                        await api('POST', '/api/livery-extras', {
+                            name: v,
+                            price_cents: parseMoneyCents(overlay.querySelector('#nl-price').value) || 0
+                        });
+                        state.liveryExtras = (await api('GET', '/api/livery-extras')).extras;
+                        overlay.remove();
+                        renderLiveryExtras();
+                    } catch (e) { overlay.querySelector('.form-error').textContent = e.message; }
+                });
+                overlay.querySelector('#nl-name').focus();
+            });
             document.querySelectorAll('.sc-del').forEach((btn) => btn.addEventListener('click', async () => {
                 if (!await askConfirm(`Delete ${btn.getAttribute('data-name')}?`,
                     'Only possible if no rider is at this school.', 'Delete')) return;
@@ -5578,6 +5715,8 @@
                         bank_details: document.getElementById('biz-bank').value,
                         arena_fee_cents: String(parseMoneyCents(document.getElementById('biz-arena').value) || ''),
                         arena_fee_note: document.getElementById('biz-arena-note').value,
+                        livery_price_cents: String(parseMoneyCents(document.getElementById('biz-livery').value) || ''),
+                        livery_note: document.getElementById('biz-livery-note').value,
                         business_phone: readPhoneField('biz-phone'),
                         business_email: document.getElementById('biz-email').value,
                         day_start: document.getElementById('biz-daystart').value,
