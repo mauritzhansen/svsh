@@ -4022,7 +4022,7 @@
             <label>Name</label>
             <input id="ct-name" value="${esc(contact ? contact.name : '')}">
             <div id="ct-pays-wrap">
-                <label>Invoicing</label>
+                <label>Who pays</label>
                 <div class="role-checks">
                     <label class="role-check">
                         <input type="radio" name="ct-pays" id="ct-pays-parent"
@@ -4081,14 +4081,35 @@
                 <label>Address (optional)</label>
                 <textarea id="ct-address">${esc(contact ? contact.address || '' : '')}</textarea>
             </div>
-            <div id="ct-terms-wrap">
-                <label>How they pay <span class="req">*</span></label>
-                <select id="ct-terms">
-                    <option value="">(not assigned)</option>
-                    ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
-                        `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
+            <!-- How they pay and which school's terms they are billed against:
+                 two halves of the same question, so they sit together in a box
+                 like the expenses below. -->
+            <fieldset class="money-block">
+                <legend>Invoicing</legend>
+                <div id="ct-terms-wrap">
+                    <label>How they pay <span class="req">*</span></label>
+                    <select id="ct-terms">
+                        <option value="">(not assigned)</option>
+                        ${Object.entries(PAYMENT_TERMS).map(([k, label]) =>
+                            `<option value="${k}" ${contact && contact.payment_terms === k ? 'selected' : ''}>${label}</option>`).join('')}
+                    </select>
+                </div>
+            <div id="ct-school-wrap">
+                <label>School <span class="req" id="ct-school-req">*</span></label>
+                <select id="ct-school">
+                    <option value="">(not set)</option>
+                    ${state.schools.filter((s) => s.active || (contact && String(contact.school_id) === String(s.id)))
+                        .map((s) => `<option value="${s.id}" ${contact && String(contact.school_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
                 </select>
+                <div class="muted" id="ct-school-note" style="margin:-4px 0 10px">
+                    Per-term invoices use this school's term dates.
+                </div>
             </div>
+            <div id="ct-school-inherited" class="hidden" style="margin-bottom:10px">
+                <label>School</label>
+                <div class="inherited-school" id="ct-school-inherited-text"></div>
+            </div>
+            </fieldset>
             <!-- Everything billed on top of the lessons, kept in one block so it
                  reads as the money section rather than stray tick-boxes: the
                  arena fee, livery, and any expenses for this contact. -->
@@ -4123,21 +4144,6 @@
             </fieldset>
             <!-- Shown only to whoever pays. A rider with a payer above them
                  follows that payer's school; see ct-school-inherited. -->
-            <div id="ct-school-wrap">
-                <label>School <span class="req" id="ct-school-req">*</span></label>
-                <select id="ct-school">
-                    <option value="">(not set)</option>
-                    ${state.schools.filter((s) => s.active || (contact && String(contact.school_id) === String(s.id)))
-                        .map((s) => `<option value="${s.id}" ${contact && String(contact.school_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
-                </select>
-                <div class="muted" id="ct-school-note" style="margin:-4px 0 10px">
-                    Per-term invoices use this school's term dates.
-                </div>
-            </div>
-            <div id="ct-school-inherited" class="hidden" style="margin-bottom:10px">
-                <label>School</label>
-                <div class="inherited-school" id="ct-school-inherited-text"></div>
-            </div>
             <div id="ct-parent-note" class="muted hidden" style="margin-bottom:10px">
                 Riders are linked to this contact, so they pay their own invoices —
                 a payer can't have a payer of their own.
