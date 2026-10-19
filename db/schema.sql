@@ -256,6 +256,8 @@ CREATE TABLE invoice_lines (
     participant_id BIGINT UNIQUE REFERENCES ride_participants(id) ON DELETE SET NULL, -- UNIQUE: a seat can only be invoiced once
     charge_id BIGINT UNIQUE, -- a one-off expense; FK added at the end of this file
                              -- because contact_charges is declared further down
+    cancellation_id BIGINT UNIQUE, -- a late cancellation that is still charged;
+                                   -- FK added at the end, same reason
     description TEXT NOT NULL,
     ride_date DATE,
     amount_cents INT NOT NULL DEFAULT 0
@@ -359,7 +361,9 @@ CREATE TABLE ride_cancellations (
     kind TEXT NOT NULL CHECK (kind IN ('cancelled', 'rescheduled')),
     from_series BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (ride_id, contact_id)
+    UNIQUE (ride_id, contact_id),
+    -- a late cancellation that is still charged for
+    billed BOOLEAN NOT NULL DEFAULT false
 );
 
 -- Declared here rather than inline: invoice_lines is defined before
@@ -367,3 +371,7 @@ CREATE TABLE ride_cancellations (
 ALTER TABLE invoice_lines
     ADD CONSTRAINT invoice_lines_charge_fk
     FOREIGN KEY (charge_id) REFERENCES contact_charges(id) ON DELETE SET NULL;
+
+ALTER TABLE invoice_lines
+    ADD CONSTRAINT invoice_lines_cancellation_fk
+    FOREIGN KEY (cancellation_id) REFERENCES ride_cancellations(id) ON DELETE SET NULL;

@@ -1651,7 +1651,9 @@ function parseRideBody(body) {
         .map((c) => ({
             contact_id: c.contact_id,
             kind: c.kind === 'rescheduled' ? 'rescheduled' : 'cancelled',
-            from_series: !!c.from_series
+            from_series: !!c.from_series,
+            // a late cancellation is still owed for; see migration 031
+            billed: !!c.billed
         }));
     // A lesson where everyone called off is still a real record of the day, so
     // cancellations count as content even when no seat is left.
@@ -1673,14 +1675,21 @@ function parseRideBody(body) {
 }
 
 async function replaceCancellations(client, rideId, cancellations) {
-    await client.query('DELETE FROM ride_cancellations WHERE ride_id = $1', [rideId]);
+    // A cancellation already billed must survive: deleting it would orphan the
+    // invoice line and let the same lesson be charged again.
+    await client.query(
+        `DELETE FROM ride_cancellations rc
+          WHERE rc.ride_id = $1
+            AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)`,
+        [rideId]);
     for (const c of cancellations || []) {
         await client.query(
-            `INSERT INTO ride_cancellations (ride_id, contact_id, kind, from_series)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO ride_cancellations (ride_id, contact_id, kind, from_series, billed)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (ride_id, contact_id) DO UPDATE
-                 SET kind = EXCLUDED.kind, from_series = EXCLUDED.from_series`,
-            [rideId, c.contact_id, c.kind, c.from_series]);
+                 SET kind = EXCLUDED.kind, from_series = EXCLUDED.from_series,
+                     billed = EXCLUDED.billed`,
+            [rideId, c.contact_id, c.kind, c.from_series, !!c.billed]);
     }
 }
 
@@ -1819,7 +1828,9 @@ async function fetchRides(from, to) {
 
     // Riders taken off these rides — kept so the day still shows what happened
     const { rows: cancels } = ids.length ? await pool.query(
-        `SELECT rc.ride_id, rc.contact_id::text, rc.kind, rc.from_series, c.name AS contact_name
+        `SELECT rc.ride_id, rc.contact_id::text, rc.kind, rc.from_series, rc.billed,
+                EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id) AS invoiced,
+                c.name AS contact_name
            FROM ride_cancellations rc JOIN contacts c ON c.id = rc.contact_id
           WHERE rc.ride_id = ANY($1::bigint[])
           ORDER BY c.name`, [ids]) : { rows: [] };
@@ -3162,6 +3173,30 @@ async function monthlyChargeLines(client, payerId, from, to) {
     return lines;
 }
 
+// Lessons a rider called off too late to be let off paying. The seat is gone,
+// so there is nothing for the ride query to find — these are billed from the
+// cancellation record instead, at what the lesson would have cost.
+async function cancelledLines(client, payerId, from, to, soleRider) {
+    const { rows } = await client.query(
+        `SELECT rc.id, r.date, c.name AS rider_name,
+                COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
+                COALESCE(rt.price_cents, 0)::int AS amount_cents
+           FROM ride_cancellations rc
+           JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
+           JOIN contacts c ON c.id = rc.contact_id
+           LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+          WHERE rc.billed AND COALESCE(c.parent_id, c.id) = $1
+            AND r.date BETWEEN $2 AND $3
+            AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
+          ORDER BY r.date`, [payerId, from, to]);
+    return rows.map((r) => ({
+        cancellation_id: r.id,
+        description: `${soleRider ? '' : r.rider_name + ' — '}${r.ride_type_name} (cancelled late)`,
+        ride_date: String(r.date).slice(0, 10),
+        amount_cents: r.amount_cents
+    }));
+}
+
 async function arenaFeeLines(client, riderIds, from, to, soleRider) {
     const feeRow = await client.query(
         "SELECT value FROM settings WHERE key = 'arena_fee_cents'");
@@ -3237,9 +3272,11 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         // with no lessons this period still has something to invoice.
         const livery = (await liveryLines(client, payerId, from, to))
             .concat(await monthlyChargeLines(client, payerId, from, to));
-        const charges = await chargeLines(client, payerId, to,
-            rides.length && new Set(rides.map((r) => String(r.contact_id))).size === 1);
-        if (!rides.length && !livery.length && !charges.length) {
+        const soleRiderGuess = rides.length
+            && new Set(rides.map((r) => String(r.contact_id))).size === 1;
+        const charges = await chargeLines(client, payerId, to, soleRiderGuess);
+        const lateCancels = await cancelledLines(client, payerId, from, to, soleRiderGuess);
+        if (!rides.length && !livery.length && !charges.length && !lateCancels.length) {
             await client.query('ROLLBACK');
             return null;
         }
@@ -3247,7 +3284,7 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         const riderIds = [...new Set(rides.map((r) => String(r.contact_id)))];
         const soleRider = riderIds.length === 1 ? riderIds[0] : null;
         const fees = (await arenaFeeLines(client, riderIds, from, to, soleRider))
-            .concat(livery).concat(charges);
+            .concat(livery).concat(charges).concat(lateCancels);
         const year = from.slice(0, 4);
         const { rows: numRows } = await client.query(
             `SELECT COALESCE(MAX(SUBSTRING(number FROM '\\d+$')::int), 0) + 1 AS next
@@ -3271,9 +3308,11 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         }
         for (const f of fees) {
             await client.query(
-                `INSERT INTO invoice_lines (invoice_id, participant_id, charge_id, description, ride_date, amount_cents)
-                 VALUES ($1, NULL, $2, $3, $4, $5)`,
-                [invRows[0].id, f.charge_id || null, f.description, f.ride_date, f.amount_cents]);
+                `INSERT INTO invoice_lines (invoice_id, participant_id, charge_id, cancellation_id,
+                                            description, ride_date, amount_cents)
+                 VALUES ($1, NULL, $2, $3, $4, $5, $6)`,
+                [invRows[0].id, f.charge_id || null, f.cancellation_id || null,
+                 f.description, f.ride_date, f.amount_cents]);
         }
         await client.query('COMMIT');
         // Return the invoice the way the list shows it — with the payer's name

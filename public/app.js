@@ -2215,10 +2215,12 @@
         // A marked row stays visible, struck through, so she can see what she
         // has done and undo it. kind: 'cancelled' (not riding) or 'rescheduled'
         // (not riding, gets a credit). scope: 'week' or 'series'.
-        function markRemoved(row, scope, kind) {
+        function markRemoved(row, scope, kind, billed) {
             row.classList.add('removed');
             row.dataset.removeScope = scope;
             row.dataset.removeKind = kind;
+            if (billed) row.dataset.removeBilled = '1';
+            else delete row.dataset.removeBilled;
             row.querySelectorAll('select').forEach((s) => { s.disabled = true; });
             const x = row.querySelector('.row-x');
             x.textContent = 'Undo';
@@ -2243,13 +2245,18 @@
             const name = who ? `${who.name} — ` : '';
             tag.textContent = kind === 'rescheduled'
                 ? `⟳ ${name}rescheduled, gets a credit`
-                : `✕ ${name}${scope === 'series' ? 'removed from the weekly schedule' : 'not riding this week'}`;
+                : scope === 'series'
+                ? `✕ ${name}removed from the weekly schedule`
+                : row.dataset.removeBilled === '1'
+                ? `✕ ${name}cancelled late — still charged`
+                : `✕ ${name}not riding this week — not charged`;
         }
 
         function unmarkRemoved(row) {
             row.classList.remove('removed');
             delete row.dataset.removeScope;
             delete row.dataset.removeKind;
+            delete row.dataset.removeBilled;
             row.querySelectorAll('select').forEach((s) => { s.disabled = false; });
             const x = row.querySelector('.row-x');
             x.innerHTML = ICON_X;
@@ -2286,20 +2293,27 @@
                     refreshOptions();
                     return;
                 }
-                let scope = 'week';
+                // Taking a rider off differs only in what it costs them, so ask
+                // that rather than assume. Reschedule-with-credit is the ⟳
+                // button; these two are the ways a lesson simply does not happen.
+                const name = (contactById(cid) || {}).name || 'this rider';
+                const options = [
+                    { key: 'billed', label: 'Cancelled — still charge for it',
+                      hint: 'they called off too late to be let off' },
+                    { key: 'free', label: 'Cancelled — do not charge',
+                      hint: 'taken off the day, nothing owed' }
+                ];
                 if (isEdit && ride.recurring_id) {
-                    const name = (contactById(cid) || {}).name || 'this rider';
-                    const choice = await askChoice(`Remove ${name}`,
-                        'They are on the weekly fixed ride.', [
-                            { key: 'week', label: 'Just this week', hint: 'stays on the weekly schedule' },
-                            { key: 'series', label: 'Remove from the weekly schedule', hint: 'this week and from now on' }
-                        ]);
-                    if (!choice) return;
-                    scope = choice;
+                    options.push({ key: 'series', label: 'Remove from the weekly schedule',
+                                   hint: 'this week and from now on, not charged' });
                 }
+                const choice = await askChoice(`Remove ${name}`,
+                    isEdit && ride.recurring_id ? 'They are on the weekly fixed ride.' : '', options);
+                if (!choice) return;
+                const scope = choice === 'series' ? 'series' : 'week';
                 // Nothing is saved yet — it is shown struck through so it can be
                 // undone before saving, and so she can see what she has done.
-                markRemoved(row, scope, 'cancelled');
+                markRemoved(row, scope, 'cancelled', choice === 'billed');
                 markDirty();
                 refreshOptions();
             });
@@ -2425,7 +2439,7 @@
                     seriesFreq[String(c.contact_id)]));
                 const row = document.getElementById('ride-parts').lastElementChild;
                 // the row's own X is already the undo (see wireRow)
-                markRemoved(row, c.from_series ? 'series' : 'week', c.kind);
+                markRemoved(row, c.from_series ? 'series' : 'week', c.kind, c.billed);
             });
         }
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
@@ -2501,7 +2515,8 @@
                     .map((row) => ({
                         contact_id: row.querySelector('.pr-contact').value,
                         kind: row.dataset.removeKind || 'cancelled',
-                        from_series: row.dataset.removeScope === 'series'
+                        from_series: row.dataset.removeScope === 'series',
+                        billed: row.dataset.removeBilled === '1'
                     })).filter((c) => c.contact_id),
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('removed'))
@@ -5633,7 +5648,7 @@
                 <textarea id="biz-bank" rows="5"
                     placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
                 <label>Invoice footer text</label>
-                <input id="biz-footer" value="${esc(state.settings.invoice_footer || '')}">
+                <textarea id="biz-footer" rows="3">${esc(state.settings.invoice_footer || '')}</textarea>
                 <div class="form-actions"><button id="biz-save">Save</button></div>
             </div>` : ''}
 
