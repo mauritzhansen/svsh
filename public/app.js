@@ -3564,11 +3564,31 @@
         return ownTerms || null;
     }
 
+    // One row per horse on livery: which horse, and whether it is a full or a
+    // half share. The share scales the base price only — the standard monthly
+    // charges are a cost per horse and are billed in full for each one.
+    function liveryRowHtml(h) {
+        const mine = String(h ? h.horse_id : '');
+        return `<div class="pick-row" data-livery-row>
+            <select class="lh-horse" style="flex:1 1 auto;min-width:0">
+                <option value="">(choose a horse)</option>
+                ${state.horses.filter((x) => x.active || String(x.id) === mine)
+                    .map((x) => `<option value="${x.id}" ${String(x.id) === mine ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+            </select>
+            <select class="lh-share" style="flex:0 0 140px">
+                <option value="100" ${!h || h.share === 100 ? 'selected' : ''}>Full (100%)</option>
+                <option value="50" ${h && h.share === 50 ? 'selected' : ''}>Half (50%)</option>
+                <option value="25" ${h && h.share === 25 ? 'selected' : ''}>Quarter (25%)</option>
+            </select>
+            <button type="button" class="danger small row-x">${ICON_X}</button>
+        </div>`;
+    }
+
     // Extra monthly charges for this one customer. Held in the form and saved
     // with it, the same as horse preferences — they are part of the contact.
     function monthlyRowHtml(m) {
         return `<div class="pick-row" data-monthly-row>
-            <input class="mc-name" placeholder="e.g. Extra hay" value="${esc(m ? m.name : '')}"
+            <input class="mc-name" placeholder="e.g. Extra hay, Monthly donation" value="${esc(m ? m.name : '')}"
                    style="flex:1 1 auto;min-width:0">
             <input class="mc-price" type="number" inputmode="decimal" step="0.01"
                    style="flex:0 0 100px" value="${m ? (Number(m.price_cents) / 100).toFixed(2) : '0.00'}">
@@ -3699,6 +3719,11 @@
             const inherited = document.getElementById('ct-school-inherited');
             const followsPayer = rider.checked && !parent.checked && !hasKids && paysParent.checked;
             schoolWrap.classList.toggle('hidden', followsPayer);
+            // Livery is billed to whoever pays, so a rider whose parent pays is
+            // not asked about it. Arena fees and one-off expenses stay visible,
+            // because those genuinely belong to the rider.
+            const liveryWrap = document.getElementById('ct-livery-wrap');
+            if (liveryWrap) liveryWrap.classList.toggle('hidden', followsPayer);
             if (inherited) {
                 inherited.classList.toggle('hidden', !followsPayer);
                 if (followsPayer) {
@@ -3880,7 +3905,10 @@
     // Shared by Save and by "add a rider" — returns the saved contact or null
     async function saveContactForm(contact) {
         const body = {
-            livery_share: document.getElementById('ct-livery').value || null,
+            livery_horses: [...(ctHost || $dialog).querySelectorAll('[data-livery-row]')]
+                .map((r) => ({ horse_id: r.querySelector('.lh-horse').value,
+                               share: Number(r.querySelector('.lh-share').value) }))
+                .filter((h) => h.horse_id),
             monthly_charges: [...(ctHost || $dialog).querySelectorAll('[data-monthly-row]')]
                 .map((r) => ({
                     name: r.querySelector('.mc-name').value.trim(),
@@ -4119,22 +4147,32 @@
                     <input type="checkbox" id="ct-arena" ${contact && contact.pays_arena_fee ? 'checked' : ''}>
                     Pays arena fees (charged once a quarter)
                 </label>
-                <label style="margin-top:8px">Livery</label>
-                <select id="ct-livery">
-                    <option value="" ${contact && contact.livery_share ? '' : 'selected'}>Not a livery customer</option>
-                    <option value="100" ${contact && contact.livery_share === 100 ? 'selected' : ''}>Full livery (100%)</option>
-                    <option value="50" ${contact && contact.livery_share === 50 ? 'selected' : ''}>Half share (50%)</option>
-                </select>
-                <div id="ct-livery-extras" class="${contact && contact.livery_share ? '' : 'hidden'}">
+                <!-- Livery is billed to whoever pays, so a rider with a parent
+                     above them is not asked about it. Arena fees and one-off
+                     expenses stay, because those do belong to the rider. -->
+                <div id="ct-livery-wrap">
+                <label style="margin-top:8px">Livery horses</label>
+                <div class="muted" style="margin:-4px 0 6px">A customer can stable more than one,
+                   each on its own share.</div>
+                <div id="ct-livery-horses"></div>
+                <button type="button" class="secondary small" id="ct-livery-add">＋ Add a livery horse</button>
+                <div id="ct-livery-extras" class="${contact && (contact.livery_horses || []).length ? '' : 'hidden'}">
                     <div class="muted" style="margin:6px 0">Every livery customer is also charged
                        the standard monthly items from Settings${(state.liveryExtras || []).filter((e) => e.active).length
                         ? ': ' + (state.liveryExtras || []).filter((e) => e.active)
                             .map((e) => `${esc(e.name)} ${money(e.price_cents)}`).join(', ')
                         : ' (none set up yet)'}.</div>
-                    <label>Additional monthly livery charges for this customer</label>
-                    <div id="ct-monthly"></div>
-                    <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
                 </div>
+                </div>
+                <!-- Not part of livery: a standing charge can be a livery extra,
+                     a donation, anything billed every month, so it is offered to
+                     every payer rather than only to livery customers. -->
+                <label style="margin-top:10px">Standard monthly charges</label>
+                <div class="muted" style="margin:-4px 0 6px">Billed every month, whether or not
+                   they have a horse on livery — a livery extra, a donation, a standing
+                   arrangement. Name it so the invoice line reads sensibly.</div>
+                <div id="ct-monthly"></div>
+                <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
                 <label style="margin-top:10px">One-off expenses</label>
                 <div class="muted" style="margin:-4px 0 6px">A vet call, a bag of feed, or a
                    discount (enter a negative amount). Added to the next invoice.</div>
@@ -4224,11 +4262,18 @@
         });
         wireAvailField(ctHost);
         wireContactRoles(contact);
-        const liverySel = document.getElementById('ct-livery');
-        if (liverySel) liverySel.addEventListener('change', () => {
-            document.getElementById('ct-livery-extras')
-                .classList.toggle('hidden', !liverySel.value);
-        });
+        const liveryBox = document.getElementById('ct-livery-horses');
+        const syncLivery = () => document.getElementById('ct-livery-extras')
+            .classList.toggle('hidden', !liveryBox.querySelector('[data-livery-row]'));
+        const addLiveryRow = (h) => {
+            liveryBox.insertAdjacentHTML('beforeend', liveryRowHtml(h));
+            const row = liveryBox.lastElementChild;
+            row.querySelector('.row-x').addEventListener('click', () => { row.remove(); syncLivery(); });
+            syncLivery();
+        };
+        ((contact && contact.livery_horses) || []).forEach(addLiveryRow);
+        syncLivery();
+        document.getElementById('ct-livery-add').addEventListener('click', () => addLiveryRow(null));
         // per-customer monthly charges
         const monthlyBox = document.getElementById('ct-monthly');
         ((contact && contact.monthly_charges) || []).forEach((m) => {
@@ -5414,7 +5459,7 @@
 
     // ---------- Settings ----------
     // One row per livery cost: rename, re-price, or remove. Prices are per month
-    // and are charged in full whatever share the customer is on.
+    // in full, except on a quarter share where they are split 50/50.
     function renderLiveryExtras() {
         const el = document.getElementById('livery-extras');
         if (!el) return;
@@ -5536,12 +5581,12 @@
                 <input id="biz-livery" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
                        value="${state.settings.livery_price_cents ? (Number(state.settings.livery_price_cents) / 100).toFixed(2) : ''}">
-                <div class="muted" style="margin:-4px 0 10px">Charged monthly to contacts marked as
-                   livery customers, scaled to their 50% or 100% share.</div>
+                <div class="muted" style="margin:-4px 0 10px">Charged monthly per livery horse,
+                   scaled to its full, half or quarter share.</div>
                 <label>Standard monthly livery charges</label>
                 <div class="muted" style="margin:-4px 0 6px">Bedding, feed and the like. Every
-                   livery customer is charged all of these, at the full price on a half share too.
-                   Charges for one customer only go on their own profile.</div>
+                   livery horse is charged all of these in full — except a quarter share, which
+                   splits them 50/50. Charges for one customer only go on their own profile.</div>
                 <div id="livery-extras"></div>
                 <button type="button" class="secondary small" id="livery-extra-add">＋ Add a livery cost</button>
                 <label style="margin-top:10px">Livery explanation (printed on invoices that include livery)</label>

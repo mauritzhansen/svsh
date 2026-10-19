@@ -320,13 +320,32 @@ app.post('/api/settings/rotate-schedule-token', requireRole('admin'), async (req
 });
 
 // ---------- Contacts ----------
-// 50 or 100 percent, or null for "not a livery customer". Anything else is a
-// typo rather than an intention, so it is rejected instead of silently dropped.
-function parseLiveryShare(v) {
-    if (v === undefined || v === null || v === '') return { value: null };
-    const n = Number(v);
-    if (n !== 50 && n !== 100) return { error: 'Livery must be 50% or 100%.' };
-    return { value: n };
+// Which horses this contact has on livery, and at what share. Replaces the
+// whole set, so an empty list means they are no longer a livery customer. A
+// share that is not full, half or quarter is a typo, not an intention.
+async function saveLiveryHorses(contactId, list) {
+    if (!Array.isArray(list)) return null;
+    const clean = [];
+    for (const h of list) {
+        if (!h || !h.horse_id) continue;
+        const share = Number(h.share);
+        if (![25, 50, 100].includes(share)) {
+            return 'Livery must be a full, half or quarter share.';
+        }
+        clean.push({ horse_id: h.horse_id, share });
+    }
+    // anything dropped from the list stops being a livery horse of theirs
+    await pool.query(
+        `UPDATE horses SET livery_share = NULL
+          WHERE owner_contact_id = $1 AND livery_share IS NOT NULL
+            AND NOT (id = ANY($2::bigint[]))`,
+        [contactId, clean.map((c) => c.horse_id)]);
+    for (const c of clean) {
+        await pool.query(
+            'UPDATE horses SET owner_contact_id = $1, livery_share = $2 WHERE id = $3',
+            [contactId, c.share, c.horse_id]);
+    }
+    return null;
 }
 
 app.get('/api/contacts', requireAuth, async (req, res) => {
@@ -368,6 +387,11 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                             ORDER BY mc.sort_order, mc.name), '[]'::json)
                        FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
                     (SELECT COALESCE(json_agg(json_build_object(
+                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share)
+                            ORDER BY h.sort_order, h.name), '[]'::json)
+                       FROM horses h
+                      WHERE h.owner_contact_id = c.id AND h.livery_share IS NOT NULL) AS livery_horses,
+                    (SELECT COALESCE(json_agg(json_build_object(
                             'id', ch.id::text, 'charge_date', ch.charge_date::text,
                             'description', ch.description, 'amount_cents', ch.amount_cents,
                             'invoiced', EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id))
@@ -403,6 +427,11 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
                             'id', mc.id::text, 'name', mc.name, 'price_cents', mc.price_cents)
                             ORDER BY mc.sort_order, mc.name), '[]'::json)
                        FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
+                    (SELECT COALESCE(json_agg(json_build_object(
+                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share)
+                            ORDER BY h.sort_order, h.name), '[]'::json)
+                       FROM horses h
+                      WHERE h.owner_contact_id = c.id AND h.livery_share IS NOT NULL) AS livery_horses,
                     (SELECT COALESCE(json_agg(json_build_object(
                             'id', ch.id::text, 'charge_date', ch.charge_date::text,
                             'description', ch.description, 'amount_cents', ch.amount_cents,
@@ -460,6 +489,8 @@ async function saveContactExtras(contactId, body) {
     // Extra monthly charges for this one customer, on top of the standard ones
     // every livery customer gets. Sent as a full list, so an empty array really
     // does mean "none" rather than "no change".
+    const liveryError = await saveLiveryHorses(contactId, body.livery_horses);
+    if (liveryError) return liveryError;
     if (Array.isArray(body.monthly_charges)) {
         await pool.query('DELETE FROM contact_monthly_charges WHERE contact_id = $1', [contactId]);
         let i = 0;
@@ -544,7 +575,7 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
         const { name, phone, email, address, parent_id, experience, notes,
                 needs_collection, collection_teacher, collection_class,
                 is_prospect, birth_year, is_rider, is_parent, payment_terms,
-                school_id, pays_arena_fee, livery_share } = req.body || {};
+                school_id, pays_arena_fee } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
@@ -555,20 +586,18 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
         if (schErr) return res.status(400).json({ error: schErr });
         const parentError = await validateParent(parent_id, null);
         if (parentError) return res.status(400).json({ error: parentError });
-        const liveryShare = parseLiveryShare(livery_share);
-        if (liveryShare.error) return res.status(400).json({ error: liveryShare.error });
         const { rows } = await pool.query(
             `INSERT INTO contacts (name, phone, email, address, parent_id, experience,
                                    needs_collection, collection_teacher, collection_class,
                                    is_prospect, birth_year, notes, is_rider, is_parent, payment_terms,
-                                   school_id, pays_arena_fee, livery_share)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
+                                   school_id, pays_arena_fee)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
              !!is_prospect, Number.isInteger(birth_year) ? birth_year : null, notes || '',
              is_rider !== false, !!is_parent, payment_terms || null, school_id || null,
-             !!pays_arena_fee, liveryShare.value]);
+             !!pays_arena_fee]);
         const extrasError = await saveContactExtras(rows[0].id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
         res.json({ contact: rows[0] });
@@ -582,7 +611,7 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
         const { name, phone, email, address, parent_id, experience, notes, archived,
                 needs_collection, collection_teacher, collection_class,
                 is_prospect, birth_year, is_rider, is_parent, payment_terms,
-                school_id, pays_arena_fee, livery_share } = req.body || {};
+                school_id, pays_arena_fee } = req.body || {};
         if (is_rider === false && is_parent === false) {
             return res.status(400).json({ error: 'Tick rider, parent, or both.' });
         }
@@ -594,8 +623,6 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
             const parentError = await validateParent(parent_id, req.params.id);
             if (parentError) return res.status(400).json({ error: parentError });
         }
-        const liveryShare = parseLiveryShare(livery_share);
-        if (liveryShare.error) return res.status(400).json({ error: liveryShare.error });
         const { rows } = await pool.query(
             `UPDATE contacts SET
                 name = COALESCE($2, name),
@@ -615,8 +642,7 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
                 is_parent = COALESCE($19, is_parent),
                 payment_terms = CASE WHEN $20 THEN $21 ELSE payment_terms END,
                 school_id = CASE WHEN $22 THEN $23::bigint ELSE school_id END,
-                pays_arena_fee = COALESCE($24, pays_arena_fee),
-                livery_share = CASE WHEN $25 THEN $26::int ELSE livery_share END
+                pays_arena_fee = COALESCE($24, pays_arena_fee)
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, phone, email, address,
              parent_id !== undefined, parent_id || null,
@@ -629,8 +655,7 @@ app.put('/api/contacts/:id', requireAuth, async (req, res) => {
              typeof is_parent === 'boolean' ? is_parent : null,
              payment_terms !== undefined, payment_terms || null,
              school_id !== undefined, school_id || null,
-             typeof pays_arena_fee === 'boolean' ? pays_arena_fee : null,
-             livery_share !== undefined, liveryShare.value]);
+             typeof pays_arena_fee === 'boolean' ? pays_arena_fee : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
         const extrasError = await saveContactExtras(req.params.id, req.body || {});
         if (extrasError) return res.status(400).json({ error: extrasError });
@@ -2981,28 +3006,30 @@ function liveryMonths(from, to) {
 const MONTH_NAMES_FULL = ['January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'];
 
-// Livery for the payer: the base price scaled by their share, plus whichever
-// extras they take. The extras are a fixed cost per horse — bedding, feed and
-// the like — so they are charged in full on a half share too, which is why
-// only the base line is scaled.
+// Livery for the payer. The share scales the base price. The standard monthly
+// charges do NOT follow it, with one exception: a quarter share splits them
+// 50/50 with the other quarter-share owner. Full and half shares pay them in
+// full. The customer's own standing charges are separate — theirs, not the
+// horse's — and are never scaled.
 async function liveryLines(client, payerId, from, to) {
-    const { rows: who } = await client.query(
-        'SELECT livery_share FROM contacts WHERE id = $1', [payerId]);
-    const share = who[0] && who[0].livery_share;
-    if (!share) return [];
+    // A customer can stable several horses, each on its own share.
+    const { rows: horses } = await client.query(
+        `SELECT name, livery_share FROM horses
+          WHERE owner_contact_id = $1 AND livery_share IS NOT NULL
+          ORDER BY sort_order, name`, [payerId]);
+    if (!horses.length) return [];
     const priceRow = await client.query(
         "SELECT value FROM settings WHERE key = 'livery_price_cents'");
     const base = parseInt((priceRow.rows[0] || {}).value, 10) || 0;
     // Two sources, both at full price: the standard charges every livery
     // customer gets, and anything extra recorded against this one.
+    // Standard charges are per horse: two horses means two lots of bedding.
     const { rows: extras } = await client.query(
         `SELECT name, price_cents FROM livery_extras WHERE active
           ORDER BY sort_order, name`);
-    const { rows: mine } = await client.query(
-        `SELECT name, price_cents FROM contact_monthly_charges WHERE contact_id = $1
-          ORDER BY sort_order, name`, [payerId]);
-    extras.push(...mine);
+
     if (!base && !extras.length) return [];
+    const many = horses.length > 1;   // name the horse only when it matters
     // Rides cannot be double-billed because an invoiced seat is skipped, but a
     // livery charge has no seat to mark. Guard on the description instead, so
     // re-running a month (or an overlapping term invoice) cannot charge twice.
@@ -3014,20 +3041,25 @@ async function liveryLines(client, payerId, from, to) {
     const lines = [];
     const add = (l) => { if (!billed.has(l.description)) lines.push(l); };
     for (const month of liveryMonths(from, to)) {
-        if (base) {
-            add({
-                description: `Livery — ${month.label}${share === 100 ? '' : ` (${share}% share)`}`,
-                ride_date: month.on,
-                amount_cents: Math.round(base * share / 100)
-            });
-        }
-        for (const e of extras) {
-            if (!e.price_cents) continue;
-            add({
-                description: `${e.name} — ${month.label}`,
-                ride_date: month.on,
-                amount_cents: e.price_cents
-            });
+        for (const h of horses) {
+            const who = many ? `${h.name} — ` : '';
+            if (base) {
+                add({
+                    description: `Livery — ${who}${month.label}`
+                        + (h.livery_share === 100 ? '' : ` (${h.livery_share}% share)`),
+                    ride_date: month.on,
+                    amount_cents: Math.round(base * h.livery_share / 100)
+                });
+            }
+            // Only a quarter share splits the standard charges, and it splits
+            // them in half — not to a quarter. Full and half pay them whole.
+            const split = h.livery_share === 25;
+            for (const e of extras) {
+                if (!e.price_cents) continue;
+                add({ description: `${e.name} — ${who}${month.label}${split ? ' (shared 50/50)' : ''}`,
+                      ride_date: month.on,
+                      amount_cents: split ? Math.round(e.price_cents / 2) : e.price_cents });
+            }
         }
     }
     return lines;
@@ -3056,6 +3088,33 @@ async function chargeLines(client, payerId, to, soleRider) {
         ride_date: String(r.charge_date).slice(0, 10),
         amount_cents: r.amount_cents
     }));
+}
+
+// Standing monthly charges for a customer: a livery extra, a donation, a
+// standing arrangement of any kind. Deliberately independent of livery — these
+// used to be billed only inside the livery lines, so a customer with no horse
+// stabled here could be given one and never be charged for it.
+async function monthlyChargeLines(client, payerId, from, to) {
+    const { rows } = await client.query(
+        `SELECT name, price_cents FROM contact_monthly_charges
+          WHERE contact_id = $1 ORDER BY sort_order, name`, [payerId]);
+    if (!rows.length) return [];
+    const { rows: already } = await client.query(
+        `SELECT il.description FROM invoice_lines il
+           JOIN invoices i ON i.id = il.invoice_id
+          WHERE i.contact_id = $1 AND il.participant_id IS NULL`, [payerId]);
+    const billed = new Set(already.map((r) => r.description));
+    const lines = [];
+    for (const month of liveryMonths(from, to)) {
+        for (const c of rows) {
+            if (!c.price_cents) continue;
+            const description = `${c.name} — ${month.label}`;
+            if (!billed.has(description)) {
+                lines.push({ description, ride_date: month.on, amount_cents: c.price_cents });
+            }
+        }
+    }
+    return lines;
 }
 
 async function arenaFeeLines(client, riderIds, from, to, soleRider) {
@@ -3131,7 +3190,8 @@ async function createInvoiceForContact(contactId, from, to, mode) {
             [payerId, from, to]);
         // Livery is charged to the payer, not to a seat, so a livery customer
         // with no lessons this period still has something to invoice.
-        const livery = await liveryLines(client, payerId, from, to);
+        const livery = (await liveryLines(client, payerId, from, to))
+            .concat(await monthlyChargeLines(client, payerId, from, to));
         const charges = await chargeLines(client, payerId, to,
             rides.length && new Set(rides.map((r) => String(r.contact_id))).size === 1);
         if (!rides.length && !livery.length && !charges.length) {

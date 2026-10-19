@@ -63,8 +63,6 @@ CREATE TABLE contacts (
     payment_terms TEXT CHECK (payment_terms IN ('advance_monthly', 'advance_term', 'arrears', 'cash_after')),
     school_id BIGINT REFERENCES schools(id) ON DELETE SET NULL, -- term dates come from the school
     pays_arena_fee BOOLEAN NOT NULL DEFAULT false, -- charged once a quarter (see migration 022)
-    -- 50 or 100 percent livery, NULL when the contact is not a livery customer
-    livery_share INT CHECK (livery_share IN (50, 100)),
     birth_year INT, -- approximate age tracking; UI captures an age and stores the year
     experience TEXT CHECK (experience IN ('beginner', 'beginner-intermediate', 'intermediate', 'intermediate-advanced', 'advanced')),
     -- Kid riders that must be collected (from school) before their ride
@@ -98,6 +96,9 @@ CREATE TABLE horses (
     -- Set when the horse belongs to a contact (livery) rather than the stable;
     -- pickers float it to the top for the owner and warn for anyone else
     owner_contact_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL,
+    -- Full, half or quarter livery for this horse; NULL = not on livery. A
+    -- customer can have several horses here, each on its own share.
+    livery_share INT CHECK (livery_share IN (25, 50, 100)),
     notes TEXT,
     active BOOLEAN NOT NULL DEFAULT true,
     sort_order INT NOT NULL DEFAULT 0
@@ -310,9 +311,9 @@ CREATE TABLE push_subscriptions (
 
 -- Schools and their term dates (see migration 019). Per-term invoicing bills a
 -- rider for their own school's term, and the schools do not share dates.
--- Standard monthly livery charges: every livery customer gets all of these.
--- The share (50 or 100 percent) scales the base price in settings only; these
--- are a fixed cost per horse and are always charged in full.
+-- Standard monthly livery charges: every livery horse is charged all of these
+-- in full, whatever its share — except a quarter share, which splits them 50/50
+-- with the other quarter-share owner. Only the base price follows the share.
 CREATE TABLE livery_extras (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
