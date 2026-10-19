@@ -3308,6 +3308,13 @@
         const paysOwnWay = !c.parent_id;
         if (paysOwnWay && !c.school_id) bits.push('<span class="no-parent">school not set</span>');
         if (isRider(c) && !c.experience) bits.push('<span class="no-parent">level not set</span>');
+        // Livery is a standing arrangement worth seeing at a glance, and naming
+        // the horses saves opening the contact to find out which they are.
+        const livery = c.livery_horses || [];
+        if (livery.length) {
+            bits.push(`🐴 Livery: ${livery.map((h) =>
+                esc(h.name) + (h.share === 100 ? '' : ` (${h.share}%)`)).join(', ')}`);
+        }
         if ((isParent(c) || (isRider(c) && !c.parent_id)) && !c.payment_terms) {
             bits.push('<span class="no-parent">payment terms not set</span>');
         } else if (c.payment_terms && isParent(c)) {
@@ -3593,6 +3600,10 @@
                 <option value="50" ${h && h.share === 50 ? 'selected' : ''}>Half (50%)</option>
                 <option value="25" ${h && h.share === 25 ? 'selected' : ''}>Quarter (25%)</option>
             </select>
+            <input class="lh-discount" type="number" inputmode="decimal" step="0.01" min="0"
+                   style="flex:0 0 110px" placeholder="discount"
+                   title="Monthly discount off this horse's livery fee"
+                   value="${h && h.discount_cents ? (Number(h.discount_cents) / 100).toFixed(2) : ''}">
             <button type="button" class="danger small row-x">${ICON_X}</button>
         </div>`;
     }
@@ -3920,7 +3931,8 @@
         const body = {
             livery_horses: [...(ctHost || $dialog).querySelectorAll('[data-livery-row]')]
                 .map((r) => ({ horse_id: r.querySelector('.lh-horse').value,
-                               share: Number(r.querySelector('.lh-share').value) }))
+                               share: Number(r.querySelector('.lh-share').value),
+                               discount_cents: parseMoneyCents(r.querySelector('.lh-discount').value) || 0 }))
                 .filter((h) => h.horse_id),
             monthly_charges: [...(ctHost || $dialog).querySelectorAll('[data-monthly-row]')]
                 .map((r) => ({
@@ -4166,7 +4178,8 @@
                 <div id="ct-livery-wrap">
                 <label style="margin-top:8px">Livery horses</label>
                 <div class="muted" style="margin:-4px 0 6px">A customer can stable more than one,
-                   each on its own share.</div>
+                   each on its own share. The discount is a monthly amount off that horse's
+                   livery fee — leave it blank for none.</div>
                 <div id="ct-livery-horses"></div>
                 <button type="button" class="secondary small" id="ct-livery-add">＋ Add a livery horse</button>
                 <div id="ct-livery-extras" class="${contact && (contact.livery_horses || []).length ? '' : 'hidden'}">
@@ -4485,14 +4498,17 @@
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count}${row.carried_over
+                    <td class="num">${row.ride_count || (hasStanding(row)
+                        ? '<span class="standing-tag" title="No lessons — billed for livery or a standing monthly charge">standing</span>'
+                        : 0)}${row.carried_over
                         ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
                         ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}${row.older_unbilled
                         ? ` <span class="older-flag" title="No invoice created for ${missedMonths(row).join(', ')}. ${row.older_unbilled} unbilled lesson${row.older_unbilled === 1 ? '' : 's'} there (earliest ${fmtDay(row.older_from)}) — older than the one-month carry-over, so not on this invoice. Bill these with a custom date range.">⏳${row.older_unbilled}</span>` : ''}</td>
                     <td class="num">${money(row.total_cents)}</td>
                     <td class="num">${!row.payment_terms
                         ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
-                        : row.ride_count
+                        // A livery-only customer has no lessons but is still billable
+                        : (row.ride_count || hasStanding(row))
                         ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}"
                                    data-inv-missed="${esc(missedMonths(row).join('|'))}"
                                    ${row.first_date ? `data-inv-from="${row.first_date}"` : ''}
@@ -4528,6 +4544,14 @@
     }
     // The months this payer has unbilled lessons in, outside the one-month
     // carry-back — i.e. months whose invoice was never created.
+    // A row with no lessons that is on the list anyway: livery, or a standing
+    // monthly charge. The amount is not previewed — it comes from their profile
+    // and is worked out when the invoice is created.
+    function hasStanding(row) {
+        const c = contactById(row.contact_id) || {};
+        return ((c.livery_horses || []).length > 0) || ((c.monthly_charges || []).length > 0);
+    }
+
     function missedMonths(row) {
         return (row.older_months || []).map((m) => monthLabel(m.month));
     }

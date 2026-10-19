@@ -1577,3 +1577,8 @@ body.is-offline .ride-box { opacity: 0.92; }
 /* A rider's school is their payer's, shown rather than editable */
 .inherited-school { padding: 9px 10px; border: 1px dashed var(--border);
                     border-radius: 8px; background: var(--bg); font-size: 14px; }
+
+/* A payer on an invoice run with no lessons — livery or a standing charge */
+.standing-tag { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                padding: 1px 6px; border-radius: 999px;
+                background: var(--green-light); color: #3c5a34; cursor: help; }

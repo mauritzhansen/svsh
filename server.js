@@ -332,7 +332,8 @@ async function saveLiveryHorses(contactId, list) {
         if (![25, 50, 100].includes(share)) {
             return 'Livery must be a full, half or quarter share.';
         }
-        clean.push({ horse_id: h.horse_id, share });
+        clean.push({ horse_id: h.horse_id, share,
+                     discount: Math.max(0, Math.round(Number(h.discount_cents) || 0)) });
     }
     // anything dropped from the list stops being a livery horse of theirs
     await pool.query(
@@ -342,8 +343,9 @@ async function saveLiveryHorses(contactId, list) {
         [contactId, clean.map((c) => c.horse_id)]);
     for (const c of clean) {
         await pool.query(
-            'UPDATE horses SET owner_contact_id = $1, livery_share = $2 WHERE id = $3',
-            [contactId, c.share, c.horse_id]);
+            `UPDATE horses SET owner_contact_id = $1, livery_share = $2,
+                    livery_discount_cents = $3 WHERE id = $4`,
+            [contactId, c.share, c.discount, c.horse_id]);
     }
     return null;
 }
@@ -387,7 +389,8 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                             ORDER BY mc.sort_order, mc.name), '[]'::json)
                        FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
                     (SELECT COALESCE(json_agg(json_build_object(
-                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share)
+                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share,
+                            'discount_cents', h.livery_discount_cents)
                             ORDER BY h.sort_order, h.name), '[]'::json)
                        FROM horses h
                       WHERE h.owner_contact_id = c.id AND h.livery_share IS NOT NULL) AS livery_horses,
@@ -428,7 +431,8 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
                             ORDER BY mc.sort_order, mc.name), '[]'::json)
                        FROM contact_monthly_charges mc WHERE mc.contact_id = c.id) AS monthly_charges,
                     (SELECT COALESCE(json_agg(json_build_object(
-                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share)
+                            'horse_id', h.id::text, 'name', h.name, 'share', h.livery_share,
+                            'discount_cents', h.livery_discount_cents)
                             ORDER BY h.sort_order, h.name), '[]'::json)
                        FROM horses h
                       WHERE h.owner_contact_id = c.id AND h.livery_share IS NOT NULL) AS livery_horses,
@@ -591,7 +595,7 @@ app.post('/api/contacts', requireAuth, async (req, res) => {
                                    needs_collection, collection_teacher, collection_class,
                                    is_prospect, birth_year, notes, is_rider, is_parent, payment_terms,
                                    school_id, pays_arena_fee)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
             [String(name).trim(), phone || '', email || '', address || '', parent_id || null,
              EXPERIENCE_LEVELS.includes(experience) ? experience : null,
              !!needs_collection, collection_teacher || '', collection_class || '',
@@ -2603,6 +2607,15 @@ const IN_TERM_SQL = `EXISTS (
 // billed deliberately with a custom date range.
 const CARRY_BACK = `INTERVAL '1 month'`;
 
+// A customer can be billable without riding at all — livery, or a standing
+// monthly charge. They have no seats, so every overview built on seats alone
+// misses them entirely and there is no way to reach a Create invoice button.
+// Requires the alias payer.
+const HAS_STANDING_SQL = `(
+    EXISTS (SELECT 1 FROM horses h
+             WHERE h.owner_contact_id = payer.id AND h.livery_share IS NOT NULL)
+    OR EXISTS (SELECT 1 FROM contact_monthly_charges mc WHERE mc.contact_id = payer.id))`;
+
 // The previous calendar month relative to a date — the window an advance
 // invoice reaches back over. Written once so the term run and the monthly run
 // cannot drift apart on what "last month" means.
@@ -2877,6 +2890,17 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
               WHERE NOT s.in_reach
                 AND NOT EXISTS (SELECT 1 FROM billable b WHERE b.payer_id = s.payer_id)
               GROUP BY payer.id, payer.name, payer.payment_terms
+             UNION ALL
+             -- Livery or a standing monthly charge with no lessons at all. A
+             -- per-term payer is left out in the month their term starts, since
+             -- the term run invoices them once for everything that month.
+             SELECT payer.id, payer.name, payer.name, payer.payment_terms,
+                    0, 0, 0, 0, 0, NULL::text, NULL::json, 0, NULL::json
+               FROM contacts payer
+              WHERE NOT payer.archived AND ${HAS_STANDING_SQL}
+                AND payer.payment_terms IN ('advance_monthly', 'advance_term')
+                AND NOT (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL})
+                AND NOT EXISTS (SELECT 1 FROM seats s WHERE s.payer_id = payer.id)
               ORDER BY 2`,
             [from, to]);
         res.json({ overview: rows, from, to, month });
@@ -2940,7 +2964,14 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
                FROM seats s
                JOIN contacts payer ON payer.id = s.payer_id
               GROUP BY payer.id, payer.name, payer.payment_terms, payer.school_id
-              ORDER BY payer.name`,
+             UNION ALL
+             -- livery and standing charges with no lessons behind them
+             SELECT payer.id, payer.name, payer.name, payer.payment_terms, payer.school_id,
+                    0, 0, 0, 0, 0, NULL::json
+               FROM contacts payer
+              WHERE NOT payer.archived AND ${HAS_STANDING_SQL}
+                AND NOT EXISTS (SELECT 1 FROM seats s WHERE s.payer_id = payer.id)
+              ORDER BY 2`,
             [from, to]);
         res.json({ overview: rows, from, to });
     } catch (err) {
@@ -3020,7 +3051,7 @@ const MONTH_NAMES_FULL = ['January', 'February', 'March', 'April', 'May', 'June'
 async function liveryLines(client, payerId, from, to) {
     // A customer can stable several horses, each on its own share.
     const { rows: horses } = await client.query(
-        `SELECT name, livery_share FROM horses
+        `SELECT name, livery_share, livery_discount_cents FROM horses
           WHERE owner_contact_id = $1 AND livery_share IS NOT NULL
           ORDER BY sort_order, name`, [payerId]);
     if (!horses.length) return [];
@@ -3036,6 +3067,7 @@ async function liveryLines(client, payerId, from, to) {
 
     if (!base && !extras.length) return [];
     const many = horses.length > 1;   // name the horse only when it matters
+
     // Rides cannot be double-billed because an invoiced seat is skipped, but a
     // livery charge has no seat to mark. Guard on the description instead, so
     // re-running a month (or an overlapping term invoice) cannot charge twice.
@@ -3066,7 +3098,14 @@ async function liveryLines(client, payerId, from, to) {
                       ride_date: month.on,
                       amount_cents: split ? Math.round(e.price_cents / 2) : e.price_cents });
             }
+            // Shown as its own line rather than folded into the livery charge,
+            // so the full price and the deal are both visible on the invoice.
+            if (h.livery_discount_cents) {
+                add({ description: `Livery discount — ${who}${month.label}`,
+                      ride_date: month.on, amount_cents: -h.livery_discount_cents });
+            }
         }
+
     }
     return lines;
 }

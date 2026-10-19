@@ -102,6 +102,9 @@ CREATE TABLE horses (
     -- An owned horse is private to its owner (and the riders they pay for)
     -- unless this says the school may use it in anyone's lessons.
     shared_with_school BOOLEAN NOT NULL DEFAULT false,
+    -- A negotiated discount off this horse's livery fee. Positive amount,
+    -- subtracted when the invoice is built.
+    livery_discount_cents INT NOT NULL DEFAULT 0 CHECK (livery_discount_cents >= 0),
     notes TEXT,
     active BOOLEAN NOT NULL DEFAULT true,
     sort_order INT NOT NULL DEFAULT 0
