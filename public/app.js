@@ -4498,13 +4498,12 @@
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count || (hasStanding(row)
-                        ? '<span class="standing-tag" title="No lessons — billed for livery or a standing monthly charge">standing</span>'
-                        : 0)}${row.carried_over
+                    <td class="num">${row.ride_count || (hasStanding(row) ? standingCell(row) : 0)}${row.carried_over
                         ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
                         ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}${row.older_unbilled
                         ? ` <span class="older-flag" title="No invoice created for ${missedMonths(row).join(', ')}. ${row.older_unbilled} unbilled lesson${row.older_unbilled === 1 ? '' : 's'} there (earliest ${fmtDay(row.older_from)}) — older than the one-month carry-over, so not on this invoice. Bill these with a custom date range.">⏳${row.older_unbilled}</span>` : ''}</td>
-                    <td class="num">${money(row.total_cents)}</td>
+                    <td class="num">${row.ride_count || !hasStanding(row)
+                        ? money(row.total_cents) : '<span class="muted">—</span>'}</td>
                     <td class="num">${!row.payment_terms
                         ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
                         // A livery-only customer has no lessons but is still billable
@@ -4532,6 +4531,13 @@
     // "2026-08" is not how anyone says it out loud.
     const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
                          'July', 'August', 'September', 'October', 'November', 'December'];
+    // "2026-10" -> "2026-09". An arrears run bills the month before it.
+    function prevMonthOf(ym) {
+        const [y, m] = String(ym).split('-').map(Number);
+        const d = new Date(Date.UTC(y, m - 2, 1));
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
+
     function monthLabel(ym) {
         const [y, m] = String(ym).split('-').map(Number);
         return `${MONTH_NAMES[m - 1]} ${y}`;
@@ -4551,6 +4557,22 @@
         const c = contactById(row.contact_id) || {};
         return ((c.livery_horses || []).length > 0) || ((c.monthly_charges || []).length > 0);
     }
+
+    // What a no-lesson row is actually for, named so the row explains itself
+    // rather than reading as an empty R0.00 invoice.
+    function standingLabel(row) {
+        const c = contactById(row.contact_id) || {};
+        const bits = [];
+        if ((c.livery_horses || []).length) {
+            bits.push(`livery for ${c.livery_horses.map((h) => h.name).join(', ')}`);
+        }
+        if ((c.monthly_charges || []).length) {
+            bits.push(c.monthly_charges.map((m) => m.name).join(', '));
+        }
+        return `No lessons — billed for ${bits.join(' and ')}. The amount is worked out when the invoice is created.`;
+    }
+
+    const standingCell = (row) => `<span class="standing-tag" title="${esc(standingLabel(row))}">standing</span>`;
 
     function missedMonths(row) {
         return (row.older_months || []).map((m) => monthLabel(m.month));
@@ -4843,14 +4865,15 @@
                 <div id="inv-term" class="muted" style="margin-top:14px">Loading…</div>
             </div>
             <h2>In arrears — monthly</h2>
-            <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
+            <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has
+               ended — so the run for a month covers the <b>month before it</b>.
                Reconcile them with the bank statement and set the status to <b>paid</b>.</p>
             <div class="card">
                 <div class="month-pills">
                     ${shownMonths.map((m) => `
                         <button class="month-pill ${m.value === arrearsMonth ? 'active' : ''}" data-month="${m.value}">${esc(m.label)}</button>`).join('')}
                 </div>
-                <h2 style="margin-top:14px">Uninvoiced rides</h2>
+                <h2 style="margin-top:14px" id="inv-arrears-head">Uninvoiced rides</h2>
                 <div id="inv-arrears-warn" class="warn-bar hidden"></div>
                 <div id="inv-overview" class="muted">Loading…</div>
             </div>
@@ -4891,7 +4914,7 @@
         });
         try {
             const [ov, advOv, termOv, cashOv, invs] = await Promise.all([
-                api('GET', `/api/invoices/overview?month=${arrearsMonth}`),
+                api('GET', `/api/invoices/overview?month=${prevMonthOf(arrearsMonth)}`),
                 api('GET', `/api/invoices/advance-overview?month=${adv}`),
                 api('GET', `/api/invoices/term-overview?year=${termYear}&term=${termNo}`),
                 api('GET', '/api/invoices/cash-overview'),
@@ -4914,29 +4937,19 @@
                     weekly slot) before creating these invoices.`;
             }
             const advRange = { from: advOv.from, to: advOv.to, label: adv, mode: 'advance_month' };
-            const arrRange = { from: ov.from, to: ov.to, label: arrearsMonth };
-            arrRange.note = arrearsMonth < currentMonth() ? '' :
-                'This month is not over yet — rides still to come are included.';
+            // ov already covers the month BEFORE the pill, so the range is right
+            const arrRange = { from: ov.from, to: ov.to,
+                               label: monthLabel(prevMonthOf(arrearsMonth)) };
             // the endpoint already applies the month-ahead rule and the filter
             renderOverviewTable(document.getElementById('inv-advance'), advOv.overview,
                 'Nothing to bill in advance for this month.', advRange);
             const arrears = ov.overview.filter((r) => r.payment_terms === 'arrears');
-            // In arrears means "after the month has ended". Billing a month that
-            // is still running silently leaves out the rides still to come.
-            const monthOver = arrearsMonth < currentMonth();
-            const toCome = arrears.reduce((n, r) => n + (r.ride_count - (r.past_rides || 0)), 0);
+            // The month being billed has always ended, so there is nothing to
+            // warn about; the heading says which month the lessons are from.
             const $aw = document.getElementById('inv-arrears-warn');
-            $aw.classList.toggle('hidden', monthOver);
-            if (!monthOver) {
-                const label = new Date(Number(arrearsMonth.slice(0, 4)), Number(arrearsMonth.slice(5, 7)) - 1, 1)
-                    .toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-                $aw.innerHTML = `⚠ <b>${esc(label)} is not over yet.</b>
-                    In-arrears invoices are normally raised once the month has ended.
-                    ${toCome ? `<b>${toCome} ride${toCome === 1 ? '' : 's'}</b> in this month
-                        ${toCome === 1 ? 'has' : 'have'} not happened yet and would be billed in advance —
-                        or left off a later invoice if you bill now.`
-                    : 'Every ride below has already happened.'}`;
-            }
+            $aw.classList.add('hidden');
+            document.getElementById('inv-arrears-head').textContent =
+                `Uninvoiced rides from ${monthLabel(prevMonthOf(arrearsMonth))}`;
             const unset = ov.overview.filter((r) => !r.payment_terms);
             renderOverviewTable(document.getElementById('inv-unset'), unset, '', arrRange);
             document.getElementById('inv-unset-card').classList.toggle('hidden', !unset.length);
@@ -4962,10 +4975,10 @@
                             <td>${row.payment_terms
                                 ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                                 : '<span class="no-parent">not set</span>'}</td>
-                            <td class="num">${row.ride_count}${row.carried_over
-                        ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
+                            <td class="num">${row.ride_count || (hasStanding(row) ? standingCell(row) : 0)}${row.untyped_rides
                                 ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
-                            <td class="num">${money(row.total_cents)}</td>
+                            <td class="num">${row.ride_count || !hasStanding(row)
+                                ? money(row.total_cents) : '<span class="muted">—</span>'}</td>
                             <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
                         </tr>`).join('')}
                 </table></div>`;
