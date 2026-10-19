@@ -4387,8 +4387,8 @@
         data.groups.filter((g) => !g.no_dates).forEach((g) => {
             renderOverviewTable(document.getElementById(`term-g-${g.id}`), g.rows,
                 'Nobody at this school has uninvoiced lessons this term.',
-                { from: g.period_start, to: g.period_end,
-                  label: `Term ${termNo} ${schoolYearLabel(g, year)}` });
+                { from: g.period_start, to: g.period_end, mode: 'term',
+                  label: `Term ${termNo} ${schoolYearLabel(g, year)}, plus any unbilled lessons from the month before it` });
         });
     }
 
@@ -4426,7 +4426,9 @@
                         ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
                         : row.ride_count
                         ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}"
-                                   data-inv-missed="${esc(missedMonths(row).join('|'))}">Create invoice</button>`
+                                   data-inv-missed="${esc(missedMonths(row).join('|'))}"
+                                   ${row.first_date ? `data-inv-from="${row.first_date}"` : ''}
+                                   ${row.last_date ? `data-inv-to="${row.last_date}"` : ''}>Create invoice</button>`
                         : '<span class="muted">nothing due</span>'}</td>
                 </tr>`).join('')}
         </table></div>`;
@@ -4482,7 +4484,12 @@
                 try {
                     const res = await api('POST', '/api/invoices', {
                         contact_id: btn.getAttribute('data-inv-contact'),
-                        from: range.from, to: range.to, mode: range.mode
+                        // A row's own dates win over the table's: the catch-up
+                        // table spans every payer, and billing one of them for
+                        // that whole span sweeps up other people's weeks.
+                        from: btn.getAttribute('data-inv-from') || range.from,
+                        to: btn.getAttribute('data-inv-to') || range.to,
+                        mode: range.mode
                     });
                     // Update in place rather than re-rendering — a full redraw
                     // loses your place in a long list, badly so on a phone.
@@ -4738,7 +4745,6 @@
                         <button class="month-pill ${n === termNo ? 'active' : ''}" data-tn="${n}">Term ${n}</button>`).join('')}
                 </div>
                 <div id="inv-term" class="muted" style="margin-top:14px">Loading…</div>
-                <div id="inv-term-catchup"></div>
             </div>
             <h2>In arrears — monthly</h2>
             <p class="muted">Riders whose payer is set to <b>In arrears</b>, billed once the month has ended.
@@ -4754,7 +4760,8 @@
             </div>
             <h2>Cash after lesson</h2>
             <p class="muted">Billed once the lesson has happened, so the rider can pay on the day.
-               Rides still to come this month are not listed yet.</p>
+               Not tied to a month — everything ridden and not yet invoiced stays here,
+               whichever month it falls in.</p>
             <div class="card">
                 <div id="inv-cash" class="muted">Loading…</div>
             </div>
@@ -4787,34 +4794,14 @@
             });
         });
         try {
-            const [ov, advOv, termOv, invs] = await Promise.all([
+            const [ov, advOv, termOv, cashOv, invs] = await Promise.all([
                 api('GET', `/api/invoices/overview?month=${arrearsMonth}`),
                 api('GET', `/api/invoices/advance-overview?month=${adv}`),
                 api('GET', `/api/invoices/term-overview?year=${termYear}&term=${termNo}`),
+                api('GET', '/api/invoices/cash-overview'),
                 api('GET', '/api/invoices')
             ]);
             renderTermRun(termOv, termYear, termNo);
-            // holiday and ad-hoc lessons that cannot sit on a term invoice
-            const $cu = document.getElementById('inv-term-catchup');
-            const cu = termOv.catchup || [];
-            if (!cu.length) $cu.innerHTML = '';
-            else {
-                $cu.innerHTML = `<h3 style="margin:18px 0 4px">Holiday &amp; ad-hoc lessons already ridden</h3>
-                    <p class="muted" style="margin:0 0 8px">Lessons these per-term riders have
-                       <b>already ridden</b> outside their term dates, within the last month. The term
-                       invoice is raised before the holidays so it cannot include them — it states that
-                       they will follow, and this is where they are billed.</p>
-                    <div id="inv-term-cu"></div>`;
-                // rows with no first_date have only out-of-reach lessons: they
-                // carry a ⏳ flag and no Create button, so they set no range
-                const dated = cu.filter((r) => r.first_date);
-                renderOverviewTable(document.getElementById('inv-term-cu'), cu, '',
-                    dated.length ? {
-                        from: dated.reduce((a, r) => (r.first_date < a ? r.first_date : a), dated[0].first_date),
-                        to: dated.reduce((a, r) => (r.last_date > a ? r.last_date : a), dated[0].last_date),
-                        label: 'holiday & ad-hoc lessons'
-                    } : null);
-            }
             // Everyone lands in exactly one bucket, decided by their payer's terms
             // A ride with no type prices at zero, which would be invoiced silently
             const untyped = [...ov.overview, ...advOv.overview]
@@ -4857,14 +4844,13 @@
             const unset = ov.overview.filter((r) => !r.payment_terms);
             renderOverviewTable(document.getElementById('inv-unset'), unset, '', arrRange);
             document.getElementById('inv-unset-card').classList.toggle('hidden', !unset.length);
-            // Only lessons already ridden can be settled in cash; bill up to today
-            const cash = ov.overview
-                .filter((r) => r.payment_terms === 'cash_after' && r.past_rides > 0)
-                .map((r) => ({ ...r, ride_count: r.past_rides, total_cents: r.past_cents }));
-            const cashCutoff = todayStr();
-            renderOverviewTable(document.getElementById('inv-cash'), cash,
+            // Cash lessons accumulate regardless of month, so this list comes
+            // from its own query rather than a slice of the chosen month. Each
+            // row carries its own first/last date, so the invoice covers exactly
+            // that payer's outstanding lessons.
+            renderOverviewTable(document.getElementById('inv-cash'), cashOv.cash,
                 'No lessons to settle in cash yet.',
-                { from: ov.from, to: ov.to < cashCutoff ? ov.to : cashCutoff, label: arrearsMonth });
+                { from: todayStr(), to: todayStr(), label: 'lessons settled in cash' });
 
             const $ov = document.getElementById('inv-overview');
             if (!arrears.length) {

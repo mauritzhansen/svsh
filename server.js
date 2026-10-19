@@ -2572,6 +2572,21 @@ const IN_TERM_SQL = `EXISTS (
 // billed deliberately with a custom date range.
 const CARRY_BACK = `INTERVAL '1 month'`;
 
+// The previous calendar month relative to a date — the window an advance
+// invoice reaches back over. Written once so the term run and the monthly run
+// cannot drift apart on what "last month" means.
+const PREV_MONTH_SQL = (d) => `(r.date >= date_trunc('month', ${d}::date) - INTERVAL '1 month'
+                                AND r.date < date_trunc('month', ${d}::date))`;
+
+// Does one of this payer's school terms START inside the invoice month? In
+// those months the per-term customer gets a single combined invoice (term
+// ahead + last month's leftovers) rather than two, so the monthly run leaves
+// them alone. Requires the alias payer.
+const TERM_STARTS_SQL = `EXISTS (
+    SELECT 1 FROM school_terms st
+     WHERE st.school_id = payer.school_id
+       AND st.period_start BETWEEN $1 AND $2)`;
+
 // Per-contact summary of booked, not-yet-invoiced rides in a month
 // Which advance months still owe invoices? An advance run is only "done" when
 // every rider on that arrangement has been invoiced for the period, so the page
@@ -2651,7 +2666,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                        JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
                        JOIN contacts p2 ON p2.id = COALESCE(rider.parent_id, rider.id)
                        LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                      WHERE r.date BETWEEN $1 AND $2
+                      WHERE (r.date BETWEEN $1 AND $2 OR ${PREV_MONTH_SQL('$1')})
                         AND p2.school_id = $3
                         AND p2.payment_terms = 'advance_term'
                         AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
@@ -2686,73 +2701,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                 AND payer.payment_terms = 'advance_term'
                 AND payer.school_id IS NULL
               ORDER BY rider.name`);
-        // Per-term payers still ride in the holidays and still take ad-hoc
-        // lessons. Those cannot be in the term invoice, so they are collected
-        // here month by month once they have happened.
-        const { rows: catchup } = await pool.query(
-            `WITH seats AS (
-                 SELECT rp.id, rider.name AS rider_name,
-                        COALESCE(rider.parent_id, rider.id) AS payer_id,
-                        r.date, COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
-                   FROM ride_participants rp
-                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-                   JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
-                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                  WHERE payer.payment_terms = 'advance_term'
-                    AND r.date < CURRENT_DATE
-                    AND NOT ${IN_TERM_SQL}
-                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
-             ), reach AS (
-                 -- same one-month cap as the month-ahead run, so a catch-up
-                 -- invoice covers one month of holiday lessons and no more
-                 SELECT *, (date >= date_trunc('month', CURRENT_DATE) - ${CARRY_BACK}) AS in_reach
-                   FROM seats
-             )
-             SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
-                    payer.payment_terms,
-                    count(*)::int AS ride_count,
-                    SUM(s.cents)::int AS total_cents,
-                    min(s.date)::text AS first_date, max(s.date)::text AS last_date,
-                    (SELECT count(*)::int FROM reach o
-                      WHERE o.payer_id = payer.id AND NOT o.in_reach) AS older_unbilled,
-                    (SELECT min(o.date)::text FROM reach o
-                      WHERE o.payer_id = payer.id AND NOT o.in_reach) AS older_from,
-                    (SELECT json_agg(x ORDER BY x->>'month')
-                       FROM (SELECT json_build_object('month', to_char(o.date, 'YYYY-MM'),
-                                                      'count', count(*)) AS x
-                               FROM reach o
-                              WHERE o.payer_id = payer.id AND NOT o.in_reach
-                              GROUP BY to_char(o.date, 'YYYY-MM')) q) AS older_months,
-                    (SELECT json_agg(x ORDER BY x->>'name')
-                       FROM (SELECT json_build_object(
-                                    'name', s2.rider_name, 'count', count(*),
-                                    'dates', json_agg(s2.date::text ORDER BY s2.date)) AS x
-                               FROM reach s2 WHERE s2.payer_id = payer.id AND s2.in_reach
-                              GROUP BY s2.rider_name) q) AS riders
-               FROM reach s JOIN contacts payer ON payer.id = s.payer_id
-              WHERE s.in_reach
-              GROUP BY payer.id, payer.name, payer.payment_terms
-             UNION ALL
-             -- holiday lessons older than the cap still have to be billed; they
-             -- are shown with no total so they are chased deliberately
-             SELECT payer.id, payer.name, payer.name, payer.payment_terms,
-                    0, 0, NULL::text, NULL::text,
-                    count(*)::int, min(o.date)::text,
-                    (SELECT json_agg(x ORDER BY x->>'month')
-                       FROM (SELECT json_build_object('month', to_char(o2.date, 'YYYY-MM'),
-                                                      'count', count(*)) AS x
-                               FROM reach o2
-                              WHERE o2.payer_id = payer.id AND NOT o2.in_reach
-                              GROUP BY to_char(o2.date, 'YYYY-MM')) q),
-                    NULL::json
-               FROM reach o JOIN contacts payer ON payer.id = o.payer_id
-              WHERE NOT o.in_reach
-                AND NOT EXISTS (SELECT 1 FROM reach b
-                                 WHERE b.payer_id = o.payer_id AND b.in_reach)
-              GROUP BY payer.id, payer.name, payer.payment_terms
-              ORDER BY 2`);
-        res.json({ year, term, groups, no_school: noSchool, catchup });
+        res.json({ year, term, groups, no_school: noSchool });
     } catch (err) {
         handleError(res, err, 'Loading term overview');
     }
@@ -2765,6 +2714,48 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
 //     which are only knowable once they have been ridden.
 // Holiday lessons in the coming month are deliberately NOT billed now; they
 // land on next month's invoice once it is known who actually rode.
+// Cash after the lesson is not a monthly run: the rider pays on the day, so
+// these accumulate until someone settles them. No month bound — everything
+// ridden and not yet invoiced shows here, however long ago.
+app.get('/api/invoices/cash-overview', requireRole('helper'), async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `WITH seats AS (
+                 SELECT rp.id, rider.name AS rider_name,
+                        COALESCE(rider.parent_id, rider.id) AS payer_id,
+                        r.date, r.ride_type_id, r.ride_type_name,
+                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
+                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                  WHERE payer.payment_terms = 'cash_after'
+                    AND r.date <= CURRENT_DATE
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+             )
+             SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
+                    payer.payment_terms,
+                    count(*)::int AS ride_count,
+                    SUM(s.cents)::int AS total_cents,
+                    min(s.date)::text AS first_date, max(s.date)::text AS last_date,
+                    count(*) FILTER (WHERE s.ride_type_id IS NULL
+                                       AND s.ride_type_name IS NULL)::int AS untyped_rides,
+                    (SELECT json_agg(x ORDER BY x->>'name')
+                       FROM (SELECT json_build_object(
+                                    'name', s2.rider_name, 'count', count(*),
+                                    'dates', json_agg(s2.date::text ORDER BY s2.date)) AS x
+                               FROM seats s2 WHERE s2.payer_id = payer.id
+                              GROUP BY s2.rider_name) q) AS riders
+               FROM seats s JOIN contacts payer ON payer.id = s.payer_id
+              GROUP BY payer.id, payer.name, payer.payment_terms
+              ORDER BY payer.name`);
+        res.json({ cash: rows });
+    } catch (err) {
+        handleError(res, err, 'Loading cash lessons');
+    }
+});
+
 app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res) => {
     try {
         const month = String(req.query.month || '');
@@ -2781,6 +2772,10 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
                         COALESCE(rp.price_cents, rt.price_cents, 0) AS cents,
                         (r.date BETWEEN $1 AND $2) AS in_month,
                         (r.date >= $1::date - ${CARRY_BACK}) AS in_reach,
+                        payer.payment_terms AS terms,
+                        -- a per-term payer whose term starts this month is
+                        -- invoiced once, by the term run, leftovers included
+                        (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
                         ${IN_TERM_SQL} AS in_term
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
@@ -2788,12 +2783,20 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
                    JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
                    LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
                   WHERE r.date <= $2
-                    AND payer.payment_terms = 'advance_monthly'
+                    AND payer.payment_terms IN ('advance_monthly', 'advance_term')
                     AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
              ), billable AS (
-                 -- term lessons of the coming month, plus the previous month's leftovers
+                 -- Everyone on advance billing gets last month's leftovers here:
+                 -- the lessons the advance invoice could not have known about,
+                 -- ridden in the holidays or booked ad hoc.
+                 --
+                 -- Monthly payers additionally get the coming month's term
+                 -- lessons. Per-term payers do not: those are on their term
+                 -- invoice already, so for them this is the leftovers alone.
                  SELECT * FROM seats
-                  WHERE (in_month AND in_term) OR (NOT in_month AND in_reach)
+                  WHERE NOT term_month
+                    AND ((NOT in_month AND in_reach)
+                         OR (in_month AND in_term AND terms = 'advance_monthly'))
              )
              SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
                     payer.payment_terms,
@@ -3101,8 +3104,18 @@ async function createInvoiceForContact(contactId, from, to, mode) {
               WHERE COALESCE(c.parent_id, c.id) = $1
                 AND NOT c.archived
                 AND ${mode === 'advance_month'
-                    ? `(r.date <= $3 AND ((r.date >= $2 AND ${IN_TERM_SQL})
-                         OR (r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})))`
+                    // Last month's unbilled lessons for anyone on advance
+                    // billing, plus the coming month's term lessons for the
+                    // monthly payers only — a per-term payer has those on their
+                    // term invoice, so taking them here would bill them twice.
+                    ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})
+                        OR (r.date >= $2 AND r.date <= $3 AND ${IN_TERM_SQL}
+                            AND payer.payment_terms = 'advance_monthly'))`
+                    : mode === 'term'
+                    // The term ahead, plus anything left unbilled from the month
+                    // before it started — so a per-term customer gets one
+                    // invoice in a term month, not a term one and a monthly one.
+                    ? `(r.date BETWEEN $2 AND $3 OR ${PREV_MONTH_SQL('$2')})`
                     : 'r.date BETWEEN $2 AND $3'}
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_PASS_COVERED_SQL}
