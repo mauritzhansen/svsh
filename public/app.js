@@ -4703,7 +4703,11 @@
         const arrearsMonth = shownMonths.some((m) => m.value === month)
             ? month : (shownMonths[0] ? shownMonths[0].value : month);
         state.invoiceMonth = arrearsMonth;
-        const outstanding = advStatus.filter((m) => m.riders > 0);
+        // Monthly invoices are raised one month at a time, so a month that has
+        // not arrived yet is not outstanding — it is simply not its turn. Only
+        // this month and any that were missed count as still to do.
+        const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        const outstanding = advStatus.filter((m) => m.riders > 0 && m.month <= thisMonth);
         const adv = state.invoiceAdvMonth ||
             (outstanding.length ? outstanding[0].month : (() => {
                 const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -4731,9 +4735,9 @@
                         <button class="month-pill adv-pill ${m.value === adv ? 'active' : ''}" data-adv="${m.value}">${esc(m.label)}${
                             m.riders ? ` <span class="pill-badge">${m.riders}</span>` : ' ✓'}</button>`).join('')}
                 </div>
-                ${outstanding.length > 1 ? `<p class="muted" style="margin:10px 0 0">
-                    <b>${outstanding.length} months</b> still have advance invoices to create:
-                    ${outstanding.map((m) => esc(m.month)).join(', ')}.</p>` : ''}
+                ${outstanding.length > 1 ? `<p class="warn-inline" style="margin:10px 0 0">
+                    ⚠ <b>${outstanding.length - 1} earlier month${outstanding.length > 2 ? 's were' : ' was'}</b>
+                    never invoiced: ${outstanding.slice(0, -1).map((m) => esc(monthLabel(m.month))).join(', ')}.</p>` : ''}
                 <div id="inv-advance" class="muted" style="margin-top:14px">Loading…</div>
             </div>
             <h2>In advance — per term</h2>

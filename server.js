@@ -3036,16 +3036,23 @@ async function liveryLines(client, payerId, from, to) {
 // One-off expenses not yet billed. Swept up to the end of the period rather
 // than only within it, so an expense entered late for an already-invoiced month
 // lands on the next invoice instead of being stranded forever.
-async function chargeLines(client, payerId, to) {
+async function chargeLines(client, payerId, to, soleRider) {
+    // An expense is recorded against whoever it concerns — a vet call for one
+    // child, a bag of feed for another — but the invoice belongs to the payer.
+    // So sweep the payer's own charges AND those of everyone they pay for;
+    // recording one against a child used to mean it was never billed at all.
     const { rows } = await client.query(
-        `SELECT ch.id, ch.charge_date, ch.description, ch.amount_cents
+        `SELECT ch.id, ch.charge_date, ch.description, ch.amount_cents, c.name AS who,
+                (c.id <> $1) AS is_child
            FROM contact_charges ch
-          WHERE ch.contact_id = $1 AND ch.charge_date <= $2
+           JOIN contacts c ON c.id = ch.contact_id
+          WHERE COALESCE(c.parent_id, c.id) = $1 AND ch.charge_date <= $2
             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id)
           ORDER BY ch.charge_date, ch.id`, [payerId, to]);
     return rows.map((r) => ({
         charge_id: r.id,
-        description: r.description,
+        // name the rider when the invoice covers more than one, as ride lines do
+        description: (!soleRider && r.is_child ? `${r.who} — ` : '') + r.description,
         ride_date: String(r.charge_date).slice(0, 10),
         amount_cents: r.amount_cents
     }));
@@ -3125,7 +3132,8 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         // Livery is charged to the payer, not to a seat, so a livery customer
         // with no lessons this period still has something to invoice.
         const livery = await liveryLines(client, payerId, from, to);
-        const charges = await chargeLines(client, payerId, to);
+        const charges = await chargeLines(client, payerId, to,
+            rides.length && new Set(rides.map((r) => String(r.contact_id))).size === 1);
         if (!rides.length && !livery.length && !charges.length) {
             await client.query('ROLLBACK');
             return null;
