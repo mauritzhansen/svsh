@@ -3925,9 +3925,13 @@
         }
         const paysParentEl0 = document.getElementById('ct-pays-parent');
         const parentWrapHidden = document.getElementById('ct-parent-wrap').classList.contains('hidden');
-        const effTerms = effectivePayerTerms(contact, body.payment_terms, body.is_parent,
-            !parentWrapHidden && paysParentEl0 && paysParentEl0.checked);
-        if (effTerms === 'advance_term' && !body.school_id) {
+        // The school sits on whoever pays. A rider whose parent pays follows that
+        // parent's school and has none of their own, so demanding one here was
+        // a leftover from when every rider carried one — it made such a rider
+        // impossible to save at all.
+        const followsPayer = !parentWrapHidden && paysParentEl0 && paysParentEl0.checked;
+        const effTerms = effectivePayerTerms(contact, body.payment_terms, body.is_parent, followsPayer);
+        if (!followsPayer && effTerms === 'advance_term' && !body.school_id) {
             ctError('Pick the school — per-term invoices need its term dates.');
             return null;
         }
