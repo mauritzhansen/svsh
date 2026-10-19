@@ -3636,7 +3636,7 @@
             <div class="charge-row${c.invoiced ? ' invoiced' : ''}" data-charge="${c.id}">
                 <span class="charge-date">${fmtDay(c.charge_date)}</span>
                 <span class="charge-desc">${esc(c.description)}</span>
-                <span class="charge-amt">${money(c.amount_cents)}</span>
+                <span class="charge-amt${c.amount_cents < 0 ? ' is-discount' : ''}">${money(c.amount_cents)}</span>
                 <span class="charge-state">${c.invoiced ? 'invoiced' : 'pending'}</span>
                 ${c.invoiced ? '' : `<button type="button" class="danger small ch-del">${ICON_X}</button>`}
             </div>`).join('');
@@ -4199,11 +4199,11 @@
                    arrangement. Name it so the invoice line reads sensibly.</div>
                 <div id="ct-monthly"></div>
                 <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
-                <label style="margin-top:10px">One-off expenses</label>
+                <label style="margin-top:10px">One-off expenses &amp; discounts</label>
                 <div class="muted" style="margin:-4px 0 6px">A vet call, a bag of feed, or a
-                   discount (enter a negative amount). Added to the next invoice.</div>
+                   discount off a month's lessons. Dated, and settled on the next invoice.</div>
                 <div id="ct-charges"></div>
-                ${contact ? '<button type="button" class="secondary small" id="ct-charge-add">＋ Add an expense</button>'
+                ${contact ? '<button type="button" class="secondary small" id="ct-charge-add">＋ Add an expense or discount</button>'
                     : '<div class="muted">Save the contact first, then expenses can be added.</div>'}
             </fieldset>
             <!-- Shown only to whoever pays. A rider with a payer above them
@@ -4314,33 +4314,55 @@
         renderContactCharges(contact);
         const chargeBtn = document.getElementById('ct-charge-add');
         if (chargeBtn) chargeBtn.addEventListener('click', () => {
+            // Expense or discount is a choice rather than a minus sign: a
+            // mistyped sign turns a R1000 credit into a R1000 charge, and the
+            // amount field gives no hint which way round it should be.
             const overlay = openSubDialog(`
-                <h3 style="margin:0 0 10px">Add an expense</h3>
+                <h3 style="margin:0 0 10px">Add an expense or discount</h3>
+                <div class="role-checks" style="margin-bottom:8px">
+                    <label class="role-check">
+                        <input type="radio" name="ce-kind" id="ce-kind-exp" checked> Expense
+                    </label>
+                    <label class="role-check">
+                        <input type="radio" name="ce-kind" id="ce-kind-disc"> Discount
+                    </label>
+                </div>
                 <label>Date</label>
                 <input type="date" id="ce-date" value="${todayStr()}">
                 <label>What it is</label>
                 <input id="ce-desc" autocomplete="off" placeholder="e.g. Vet call-out">
-                <label>Amount (${esc(state.settings.currency || 'R')})</label>
-                <input id="ce-amt" type="number" inputmode="decimal" step="0.01"
-                       placeholder="negative for a discount">
+                <label id="ce-amt-label">Amount (${esc(state.settings.currency || 'R')})</label>
+                <input id="ce-amt" type="number" inputmode="decimal" step="0.01" min="0">
+                <div class="muted" id="ce-hint" style="margin:-4px 0 4px"></div>
                 <div class="form-error"></div>
                 <div class="form-actions">
                     <button class="secondary" id="ce-cancel">Cancel</button>
                     <button id="ce-save">Add</button>
                 </div>`);
+            const isDiscount = () => overlay.querySelector('#ce-kind-disc').checked;
+            const syncKind = () => {
+                overlay.querySelector('#ce-desc').placeholder = isDiscount()
+                    ? 'e.g. Goodwill discount' : 'e.g. Vet call-out';
+                overlay.querySelector('#ce-hint').textContent = isDiscount()
+                    ? 'Taken off the next invoice.' : 'Added to the next invoice.';
+            };
+            overlay.querySelectorAll('[name="ce-kind"]').forEach((r) =>
+                r.addEventListener('change', syncKind));
+            syncKind();
             overlay.querySelector('#ce-cancel').addEventListener('click', () => overlay.remove());
             overlay.querySelector('#ce-save').addEventListener('click', async () => {
                 const err = overlay.querySelector('.form-error');
                 try {
+                    const amount = Math.abs(parseMoneyCents(overlay.querySelector('#ce-amt').value) || 0);
                     await api('POST', `/api/contacts/${contact.id}/charges`, {
                         charge_date: overlay.querySelector('#ce-date').value,
                         description: overlay.querySelector('#ce-desc').value,
-                        amount_cents: parseMoneyCents(overlay.querySelector('#ce-amt').value) || 0
+                        amount_cents: isDiscount() ? -amount : amount
                     });
                     state.contacts = (await api('GET', '/api/contacts')).contacts;
                     overlay.remove();
                     renderContactCharges(contactById(contact.id));
-                    toast('Expense added.');
+                    toast(isDiscount() ? 'Discount added.' : 'Expense added.');
                 } catch (e) { err.textContent = e.message; }
             });
             overlay.querySelector('#ce-desc').focus();
