@@ -1953,18 +1953,30 @@
         let head = `<option value="">${opts.placeholder || '(no horse yet)'}</option>`;
         const avail = activeHorses().filter((h) => opts.markInUse || keepOption(h.id, selectedId, busy))
             .sort((a, b) => a.name.localeCompare(b.name));
-        const isOwn = (h) => contactId && String(h.owner_contact_id) === String(contactId);
+        // "Theirs" covers the rider and anyone their payer pays for, so a parent's
+        // horse is offered to their children as well as to themselves.
+        const rider = contactById(contactId);
+        const household = rider ? String(rider.parent_id || rider.id) : null;
+        const isOwn = (h) => h.owner_contact_id && household
+            && (String(h.owner_contact_id) === String(contactId)
+                || String(h.owner_contact_id) === household);
         const ownedByOther = (h) => h.owner_contact_id && !isOwn(h);
         // Rider's own horse first, then ⭐ preferred, then the standard list;
         // other people's horses and caution horses drop into flagged groups.
         let html = head + avail.filter(isOwn).map((h) => opt(h, '🏠 ')).join('') +
                    avail.filter((h) => !isOwn(h) && !ownedByOther(h) && prefs.preferred.has(String(h.id))).map((h) => opt(h, '⭐ ')).join('') +
                    avail.filter((h) => !isOwn(h) && !ownedByOther(h) && !prefs.preferred.has(String(h.id)) && !prefs.caution.has(String(h.id))).map((h) => opt(h, '')).join('');
-        const others = avail.filter((h) => ownedByOther(h) && !prefs.caution.has(String(h.id)));
+        // Someone else's horse is only offered when its owner has shared it with
+        // the school. An unshared one is left off the list entirely rather than
+        // flagged, so it cannot be picked by mistake. The one exception is a
+        // horse already sitting on this seat, which must stay selectable.
+        const others = avail.filter((h) => ownedByOther(h) && !prefs.caution.has(String(h.id))
+            && (h.shared_with_school || String(h.id) === String(selectedId)));
         if (others.length) {
             html += `<optgroup label="🏠 Owned by another rider">${others.map((h) => opt(h, '')).join('')}</optgroup>`;
         }
-        const caution = avail.filter((h) => !isOwn(h) && prefs.caution.has(String(h.id)));
+        const caution = avail.filter((h) => !isOwn(h) && prefs.caution.has(String(h.id))
+            && (!ownedByOther(h) || h.shared_with_school || String(h.id) === String(selectedId)));
         if (caution.length) {
             html += `<optgroup label="⚠ Caution for this rider">${caution.map((h) => opt(h, '⚠ ')).join('')}</optgroup>`;
         }
@@ -3573,6 +3585,7 @@
             <select class="lh-horse" style="flex:1 1 auto;min-width:0">
                 <option value="">(choose a horse)</option>
                 ${state.horses.filter((x) => x.active || String(x.id) === mine)
+                    .sort((a, b) => a.name.localeCompare(b.name))
                     .map((x) => `<option value="${x.id}" ${String(x.id) === mine ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
             </select>
             <select class="lh-share" style="flex:0 0 140px">
@@ -5930,11 +5943,18 @@
                 </div>
                 ${horse ? `<div>
                     <label>Active</label>
-                    <select id="h-active"><option value="true" ${horse.active ? 'selected' : ''}>Yes</option><option value="false" ${horse.active ? '' : 'selected'}>No (retired)</option></select>
+                    <select id="h-active"><option value="true" ${horse.active ? 'selected' : ''}>Yes</option><option value="false" ${horse.active ? '' : 'selected'}>Retired</option></select>
                 </div>` : ''}
             </div>
             <label>Owned by (for contacts riding their own horse)</label>
-            <select id="h-owner">${contactOptions(horse ? horse.owner_contact_id : null, '(stable horse)')}</select>
+            <select id="h-owner">${contactOptions(horse ? horse.owner_contact_id : null, '(school horse)')}</select>
+            <!-- Only meaningful for an owned horse: a school horse is already
+                 available to everyone. -->
+            <label class="role-check" id="h-shared-wrap" style="margin:6px 0 10px">
+                <input type="checkbox" id="h-shared" ${horse && horse.shared_with_school ? 'checked' : ''}>
+                Shared with the school
+            </label>
+            <div class="muted" id="h-shared-note" style="margin:-6px 0 10px"></div>
             <label>Notes</label>
             <textarea id="h-notes" style="min-height:110px">${esc(horse ? horse.notes || '' : '')}</textarea>
             <div class="form-error"></div>
@@ -5943,11 +5963,25 @@
                 <button id="h-save">Save</button>
             </div>`);
         document.getElementById('h-cancel').addEventListener('click', closeDialog);
+        const ownerSel = document.getElementById('h-owner');
+        const syncShared = () => {
+            const owned = !!ownerSel.value;
+            document.getElementById('h-shared-wrap').classList.toggle('hidden', !owned);
+            document.getElementById('h-shared-note').textContent = !owned
+                ? 'A school horse — available for anyone\u2019s lessons.'
+                : document.getElementById('h-shared').checked
+                ? 'Available for anyone\u2019s lessons, like a school horse.'
+                : 'Only offered when planning a ride for the owner or someone they pay for.';
+        };
+        ownerSel.addEventListener('change', syncShared);
+        document.getElementById('h-shared').addEventListener('change', syncShared);
+        syncShared();
         document.getElementById('h-save').addEventListener('click', async () => {
             const body = {
                 name: document.getElementById('h-name').value,
                 color: document.getElementById('h-color').value,
                 owner_contact_id: document.getElementById('h-owner').value || null,
+                shared_with_school: document.getElementById('h-shared').checked,
                 notes: document.getElementById('h-notes').value
             };
             if (horse) body.active = document.getElementById('h-active').value === 'true';

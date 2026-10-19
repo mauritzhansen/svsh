@@ -992,14 +992,15 @@ app.get('/api/horses', requireAuth, async (req, res) => {
 
 app.post('/api/horses', requireRole('helper'), async (req, res) => {
     try {
-        const { name, color, notes, owner_contact_id } = req.body || {};
+        const { name, color, notes, owner_contact_id, shared_with_school } = req.body || {};
         if (!String(name || '').trim()) return res.status(400).json({ error: 'Name is required.' });
         const { rows } = await pool.query(
-            `INSERT INTO horses (name, color, notes, owner_contact_id, sort_order)
-             VALUES ($1, COALESCE($2, '#7c9885'), $3, $4,
+            `INSERT INTO horses (name, color, notes, owner_contact_id, shared_with_school, sort_order)
+             VALUES ($1, COALESCE($2, '#7c9885'), $3, $4, $5,
                      (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM horses))
              RETURNING *`,
-            [String(name).trim(), color, notes || '', owner_contact_id || null]);
+            [String(name).trim(), color, notes || '', owner_contact_id || null,
+             !!owner_contact_id && !!shared_with_school]);
         res.json({ horse: rows[0] });
     } catch (err) {
         handleError(res, err, 'Creating horse');
@@ -1118,7 +1119,8 @@ app.put('/api/horses/reorder', requireRole('helper'), async (req, res) => {
 
 app.put('/api/horses/:id', requireRole('helper'), async (req, res) => {
     try {
-        const { name, color, notes, active, sort_order, owner_contact_id } = req.body || {};
+        const { name, color, notes, active, sort_order, owner_contact_id,
+                shared_with_school } = req.body || {};
         const { rows } = await pool.query(
             `UPDATE horses SET
                 name = COALESCE($2, name),
@@ -1126,10 +1128,14 @@ app.put('/api/horses/:id', requireRole('helper'), async (req, res) => {
                 notes = COALESCE($4, notes),
                 active = COALESCE($5, active),
                 sort_order = COALESCE($6, sort_order),
-                owner_contact_id = CASE WHEN $7 THEN $8::bigint ELSE owner_contact_id END
+                owner_contact_id = CASE WHEN $7 THEN $8::bigint ELSE owner_contact_id END,
+                -- a horse with no owner is the school's, so the flag is moot
+                shared_with_school = CASE WHEN $8::bigint IS NULL AND $7
+                    THEN false ELSE COALESCE($9, shared_with_school) END
              WHERE id = $1 RETURNING *`,
             [req.params.id, name, color, notes, active, sort_order,
-             owner_contact_id !== undefined, owner_contact_id || null]);
+             owner_contact_id !== undefined, owner_contact_id || null,
+             typeof shared_with_school === 'boolean' ? shared_with_school : null]);
         if (!rows[0]) return res.status(404).json({ error: 'Horse not found.' });
         res.json({ horse: rows[0] });
     } catch (err) {

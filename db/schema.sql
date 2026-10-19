@@ -99,6 +99,9 @@ CREATE TABLE horses (
     -- Full, half or quarter livery for this horse; NULL = not on livery. A
     -- customer can have several horses here, each on its own share.
     livery_share INT CHECK (livery_share IN (25, 50, 100)),
+    -- An owned horse is private to its owner (and the riders they pay for)
+    -- unless this says the school may use it in anyone's lessons.
+    shared_with_school BOOLEAN NOT NULL DEFAULT false,
     notes TEXT,
     active BOOLEAN NOT NULL DEFAULT true,
     sort_order INT NOT NULL DEFAULT 0
