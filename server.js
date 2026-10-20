@@ -1798,6 +1798,7 @@ async function fetchRides(from, to) {
         `SELECT rp.*, h.name AS horse_name, ah.name AS alt_horse_name, c.name AS contact_name,
                 c.needs_collection, c.collection_teacher, c.collection_class,
                 (il.id IS NOT NULL) AS invoiced,
+                inv.number AS invoice_number,
                 EXISTS (SELECT 1 FROM reschedule_credits rc
                          WHERE rc.used_ride_id = rp.ride_id AND rc.contact_id = rp.contact_id) AS credit_used
            FROM ride_participants rp
@@ -1806,6 +1807,7 @@ async function fetchRides(from, to) {
            LEFT JOIN horses ah ON ah.id = rp.alt_horse_id
            LEFT JOIN contacts c ON c.id = rp.contact_id
            LEFT JOIN invoice_lines il ON il.participant_id = rp.id
+           LEFT JOIN invoices inv ON inv.id = il.invoice_id
           WHERE rp.ride_id = ANY($1::bigint[])
           ORDER BY h.sort_order NULLS LAST, h.name, c.name`, [ids]);
     const { rows: rideGuides } = await pool.query(
@@ -1817,12 +1819,16 @@ async function fetchRides(from, to) {
           ORDER BY g.is_assistant, g.name`, [ids]);
     const byId = {};
     rides.forEach((r) => {
-        r.participants = []; r.guides = []; r.off_riders = []; r.cancellations = []; r.invoiced = false;
+        r.participants = []; r.guides = []; r.off_riders = []; r.cancellations = [];
+        r.invoiced = false; r.invoiced_riders = [];
         byId[r.id] = r;
     });
     parts.forEach((p) => {
         byId[p.ride_id].participants.push(p);
-        if (p.invoiced) byId[p.ride_id].invoiced = true;
+        if (p.invoiced) {
+            byId[p.ride_id].invoiced = true;
+            byId[p.ride_id].invoiced_riders.push({ name: p.contact_name, number: p.invoice_number });
+        }
     });
     rideGuides.forEach((g) => byId[g.ride_id].guides.push(g));
 
@@ -1931,11 +1937,30 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                                 WHERE rp.ride_id = r.id) AS invoiced
                FROM rides r WHERE r.id = $1`, [req.params.id]);
         if (!existing[0]) return res.status(404).json({ error: 'Ride not found.' });
-        if (existing[0].invoiced) {
-            return res.status(400).json({ error: 'This ride is already invoiced and can no longer be changed.' });
-        }
         const parsed = parseRideBody(req.body);
         if (parsed.error) return res.status(400).json({ error: parsed.error });
+        // An invoiced ride is no longer frozen — the time, the horses and the
+        // other riders often still need fixing after billing. What cannot
+        // happen is losing the seat an invoice line points at, so the seats
+        // that carry invoice lines are preserved through the save and cannot
+        // be removed here; the invoice has to go first.
+        const { rows: invoicedSeats } = await pool.query(
+            `SELECT rp.id, rp.contact_id::text, c.name AS contact_name, i.number
+               FROM ride_participants rp
+               JOIN invoice_lines il ON il.participant_id = rp.id
+               JOIN invoices i ON i.id = il.invoice_id
+               LEFT JOIN contacts c ON c.id = rp.contact_id
+              WHERE rp.ride_id = $1`, [req.params.id]);
+        const billedContacts = new Set(invoicedSeats.map((s) => String(s.contact_id)));
+        const submitted = new Set(parsed.participants.map((p) => String(p.contact_id)));
+        const dropped = invoicedSeats.filter((s) => !submitted.has(String(s.contact_id)));
+        if (dropped.length) {
+            return res.status(400).json({
+                error: `${dropped.map((d) => d.contact_name || 'A rider').join(', ')} `
+                    + `${dropped.length === 1 ? 'is' : 'are'} already on invoice `
+                    + `${[...new Set(dropped.map((d) => d.number))].join(', ')}. `
+                    + 'Delete that invoice before taking them off this ride.' });
+        }
         const conflicts = await findConflicts(parsed.date, parsed.start_time,
             parsed.horseIds, req.params.id, parsed.allDay,
             parsed.duration_min || await rideDurationMin(parsed.ride_type_id));
@@ -1953,9 +1978,23 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         parsed.participants.forEach((p) => {
             if (p.contact_id && wasRecurring.has(String(p.contact_id))) p.from_recurring = true;
         });
-        await client.query('DELETE FROM ride_participants WHERE ride_id = $1', [req.params.id]);
+        // Keep the seats an invoice points at; replace everything else.
+        await client.query(
+            `DELETE FROM ride_participants rp WHERE rp.ride_id = $1
+              AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)`,
+            [req.params.id]);
         await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
-        await insertRideChildren(client, req.params.id, parsed.participants, parsed.guides);
+        await insertRideChildren(client, req.params.id,
+            parsed.participants.filter((p) => !billedContacts.has(String(p.contact_id))),
+            parsed.guides);
+        // a preserved seat can still have its horse changed
+        for (const seat of invoicedSeats) {
+            const p = parsed.participants.find((x) => String(x.contact_id) === String(seat.contact_id));
+            if (!p) continue;
+            await client.query(
+                'UPDATE ride_participants SET horse_id = $2, alt_horse_id = $3 WHERE id = $1',
+                [seat.id, p.horse_id || null, p.alt_horse_id || null]);
+        }
         await replaceCancellations(client, req.params.id, parsed.cancellations);
         // Typing one occurrence of a fixed ride types the whole series: the
         // template (so future weeks inherit it) plus every other occurrence that
@@ -3541,18 +3580,30 @@ function drawInvoicePage(doc, inv, lines, settings) {
     const drawRow = (dateTxt, desc, amount, bold) => {
         const y = doc.y;
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
+        const descW = amountX - descX - 10;
+        // The row is as tall as its TALLEST cell. doc.y is left wherever the
+        // last cell finished, and the amount is always one line — so a
+        // description that wrapped had the next row drawn straight over it.
+        const rowH = Math.max(
+            doc.heightOfString(String(dateTxt || ''), { width: dateW - 10 }),
+            doc.heightOfString(String(desc || ''), { width: descW }),
+            doc.heightOfString(String(amount || ''), { width: amountW }));
         doc.text(dateTxt, left, y, { width: dateW - 10 });
-        doc.text(desc, descX, y, { width: amountX - descX - 10 });
+        doc.text(desc, descX, y, { width: descW });
         doc.text(amount, amountX, y, { width: amountW, align: 'right' });
+        doc.y = y + rowH;
         doc.moveDown(0.4);
     };
-    drawRow('Date', 'Description', 'Amount', true);
+    // The grouped layout carries dates inside the description ("Nolan: 13, 20,
+    // 27 Oct"), so the date column is empty and its heading would label nothing.
+    const grouped = lines.some((l) => l.section);
+    drawRow(grouped ? '' : 'Date', 'Description', 'Amount', true);
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
     // Grouped under headings: livery per horse, lessons per type with each
     // rider's dates collapsed onto one row, then the extras. Lines from before
     // this existed have no section and keep the flat list they were sent as.
-    if (lines.some((l) => l.section)) {
+    if (grouped) {
         const order = [];
         const bySection = new Map();
         for (const l of lines) {
@@ -3664,9 +3715,18 @@ function drawGuideStatement(doc, guide, rides, from, to, settings) {
     const drawRow = (dateTxt, desc, amount, bold) => {
         const y = doc.y;
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
+        const descW = amountX - descX - 10;
+        // The row is as tall as its TALLEST cell. doc.y is left wherever the
+        // last cell finished, and the amount is always one line — so a
+        // description that wrapped had the next row drawn straight over it.
+        const rowH = Math.max(
+            doc.heightOfString(String(dateTxt || ''), { width: dateW - 10 }),
+            doc.heightOfString(String(desc || ''), { width: descW }),
+            doc.heightOfString(String(amount || ''), { width: amountW }));
         doc.text(dateTxt, left, y, { width: dateW - 10 });
-        doc.text(desc, descX, y, { width: amountX - descX - 10 });
+        doc.text(desc, descX, y, { width: descW });
         doc.text(amount, amountX, y, { width: amountW, align: 'right' });
+        doc.y = y + rowH;
         doc.moveDown(0.4);
     };
     drawRow('Date', 'Lesson', 'Pay', true);

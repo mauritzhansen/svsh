@@ -2354,8 +2354,12 @@
         openDialog(`
             <h2>${isEdit ? (ride.is_block ? '🚫 Blocked horses' : '🐴 Ride') : 'New ride'} — ${esc(fmtDay(defaults.date))}</h2>
             ${isEdit && ride.recurring_id ? '<p class="muted">🔁 This comes from a fixed weekly slot. When you save you can choose to change just this day or the whole series.</p>' : ''}
-            ${locked ? '<p class="muted">🧾 This ride is on an invoice and can no longer be changed.</p>' : ''}
-            <fieldset style="border:none;margin:0;padding:0" ${locked ? 'disabled' : ''}>
+            ${locked ? `<div class="warn-bar">🧾 <b>Already invoiced.</b>
+                ${(ride.invoiced_riders || []).map((r) =>
+                    `${esc(r.name || 'A rider')} on ${esc(r.number || 'an invoice')}`).join(', ')}.
+                You can still change this ride — the time, the horses, the other riders —
+                but those riders cannot be taken off until the invoice is deleted.</div>` : ''}
+            <fieldset style="border:none;margin:0;padding:0">
             <div class="form-row">
                 <div>
                     <label>Time</label>
