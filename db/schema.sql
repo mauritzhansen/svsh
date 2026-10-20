@@ -258,6 +258,9 @@ CREATE TABLE invoice_lines (
                              -- because contact_charges is declared further down
     cancellation_id BIGINT UNIQUE, -- a late cancellation that is still charged;
                                    -- FK added at the end, same reason
+    -- Heading this line is grouped under on the PDF ("Livery — Bella", a lesson
+    -- type, "Additional costs"). NULL on older invoices, which render flat.
+    section TEXT,
     description TEXT NOT NULL,
     ride_date DATE,
     amount_cents INT NOT NULL DEFAULT 0

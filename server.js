@@ -2618,6 +2618,10 @@ const IN_TERM_SQL = `EXISTS (
 // billed deliberately with a custom date range.
 const CARRY_BACK = `INTERVAL '1 month'`;
 
+// Heading for everything on an invoice that is neither a lesson nor a horse's
+// livery: one-off expenses, discounts, arena fees, standing monthly charges.
+const EXTRAS_SECTION = 'Additional costs';
+
 // A customer can be billable without riding at all — livery, or a standing
 // monthly charge. They have no seats, so every overview built on seats alone
 // misses them entirely and there is no way to reach a Create invoice button.
@@ -3077,7 +3081,6 @@ async function liveryLines(client, payerId, from, to) {
           ORDER BY sort_order, name`);
 
     if (!base && !extras.length) return [];
-    const many = horses.length > 1;   // name the horse only when it matters
 
     // Rides cannot be double-billed because an invoiced seat is skipped, but a
     // livery charge has no seat to mark. Guard on the description instead, so
@@ -3091,10 +3094,11 @@ async function liveryLines(client, payerId, from, to) {
     const add = (l) => { if (!billed.has(l.description)) lines.push(l); };
     for (const month of liveryMonths(from, to)) {
         for (const h of horses) {
-            const who = many ? `${h.name} — ` : '';
+            const section = `Livery — ${h.name}`;
             if (base) {
                 add({
-                    description: `Livery — ${who}${month.label}`
+                    section,
+                    description: `${month.label}`
                         + (h.livery_share === 100 ? '' : ` (${h.livery_share}% share)`),
                     ride_date: month.on,
                     amount_cents: Math.round(base * h.livery_share / 100)
@@ -3105,14 +3109,14 @@ async function liveryLines(client, payerId, from, to) {
             const split = h.livery_share === 25;
             for (const e of extras) {
                 if (!e.price_cents) continue;
-                add({ description: `${e.name} — ${who}${month.label}${split ? ' (shared 50/50)' : ''}`,
+                add({ section, description: `${e.name} — ${month.label}${split ? ' (shared 50/50)' : ''}`,
                       ride_date: month.on,
                       amount_cents: split ? Math.round(e.price_cents / 2) : e.price_cents });
             }
             // Shown as its own line rather than folded into the livery charge,
             // so the full price and the deal are both visible on the invoice.
             if (h.livery_discount_cents) {
-                add({ description: `Livery discount — ${who}${month.label}`,
+                add({ section, description: `Discount — ${month.label}`,
                       ride_date: month.on, amount_cents: -h.livery_discount_cents });
             }
         }
@@ -3139,6 +3143,7 @@ async function chargeLines(client, payerId, to, soleRider) {
           ORDER BY ch.charge_date, ch.id`, [payerId, to]);
     return rows.map((r) => ({
         charge_id: r.id,
+        section: EXTRAS_SECTION,
         // name the rider when the invoice covers more than one, as ride lines do
         description: (!soleRider && r.is_child ? `${r.who} — ` : '') + r.description,
         ride_date: String(r.charge_date).slice(0, 10),
@@ -3166,7 +3171,8 @@ async function monthlyChargeLines(client, payerId, from, to) {
             if (!c.price_cents) continue;
             const description = `${c.name} — ${month.label}`;
             if (!billed.has(description)) {
-                lines.push({ description, ride_date: month.on, amount_cents: c.price_cents });
+                lines.push({ section: EXTRAS_SECTION, description,
+                         ride_date: month.on, amount_cents: c.price_cents });
             }
         }
     }
@@ -3191,7 +3197,8 @@ async function cancelledLines(client, payerId, from, to, soleRider) {
           ORDER BY r.date`, [payerId, from, to]);
     return rows.map((r) => ({
         cancellation_id: r.id,
-        description: `${soleRider ? '' : r.rider_name + ' — '}${r.ride_type_name} (cancelled late)`,
+        section: r.ride_type_name,
+        description: `${r.rider_name} (cancelled late)`,
         ride_date: String(r.date).slice(0, 10),
         amount_cents: r.amount_cents
     }));
@@ -3211,6 +3218,7 @@ async function arenaFeeLines(client, riderIds, from, to, soleRider) {
     for (const r of payers) {
         for (const q of quarters) {
             lines.push({
+                section: EXTRAS_SECTION,
                 description: `${soleRider ? '' : r.name + ' — '}Arena fee Q${q.quarter} ${q.year}`,
                 ride_date: q.on,
                 amount_cents: cents
@@ -3298,21 +3306,17 @@ async function createInvoiceForContact(contactId, from, to, mode) {
             [number, payerId, soleRider, from, to, total]);
         for (const r of rides) {
             await client.query(
-                `INSERT INTO invoice_lines (invoice_id, participant_id, description, ride_date, amount_cents)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [invRows[0].id, r.id,
-                 // name the rider on every line when the invoice covers several,
-                 // so the payer can see what each child cost
-                 `${soleRider ? '' : r.rider_name + ' — '}${r.ride_type_name} at ${String(r.start_time).slice(0, 5)}`,
-                 r.date, r.amount_cents]);
+                `INSERT INTO invoice_lines (invoice_id, participant_id, section, description, ride_date, amount_cents)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [invRows[0].id, r.id, r.ride_type_name, r.rider_name, r.date, r.amount_cents]);
         }
         for (const f of fees) {
             await client.query(
                 `INSERT INTO invoice_lines (invoice_id, participant_id, charge_id, cancellation_id,
-                                            description, ride_date, amount_cents)
-                 VALUES ($1, NULL, $2, $3, $4, $5, $6)`,
+                                            section, description, ride_date, amount_cents)
+                 VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)`,
                 [invRows[0].id, f.charge_id || null, f.cancellation_id || null,
-                 f.description, f.ride_date, f.amount_cents]);
+                 f.section || EXTRAS_SECTION, f.description, f.ride_date, f.amount_cents]);
         }
         await client.query('COMMIT');
         // Return the invoice the way the list shows it — with the payer's name
@@ -3481,6 +3485,14 @@ async function loadSettings() {
 
 // Draws one invoice onto the current page of `doc`
 // "14 Oct 2026" — the same format the screen uses
+// "13 Oct" — a date list on an invoice line repeats the year on every entry
+// otherwise, which is noise when the period is already stated at the top.
+function fmtShort(value) {
+    const d = value instanceof Date ? value : new Date(String(value).slice(0, 10) + 'T00:00:00Z');
+    return `${d.getUTCDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()]}`;
+}
+
 function fmtDay(value) {
     if (!value) return '';
     // pg hands back a Date for timestamptz and a string for date columns
@@ -3537,9 +3549,51 @@ function drawInvoicePage(doc, inv, lines, settings) {
     drawRow('Date', 'Description', 'Amount', true);
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
-    for (const line of lines) {
-        if (doc.y > doc.page.height - 120) doc.addPage();
-        drawRow(fmtDay(line.ride_date), line.description, money(line.amount_cents), false);
+    // Grouped under headings: livery per horse, lessons per type with each
+    // rider's dates collapsed onto one row, then the extras. Lines from before
+    // this existed have no section and keep the flat list they were sent as.
+    if (lines.some((l) => l.section)) {
+        const order = [];
+        const bySection = new Map();
+        for (const l of lines) {
+            const key = l.section || EXTRAS_SECTION;
+            if (!bySection.has(key)) { bySection.set(key, []); order.push(key); }
+            bySection.get(key).push(l);
+        }
+        // extras last, whatever order they were added in
+        order.sort((a, b) => (a === EXTRAS_SECTION ? 1 : 0) - (b === EXTRAS_SECTION ? 1 : 0));
+        for (const section of order) {
+            if (doc.y > doc.page.height - 150) doc.addPage();
+            doc.moveDown(0.3);
+            doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000')
+                .text(section, left, doc.y);
+            doc.moveDown(0.25);
+            // One row per rider inside a lesson section: "Nolan: 13, 20, 27 Oct".
+            // A horse's livery is already one row per charge, so it is left alone.
+            const rows = [];
+            const byRider = new Map();
+            for (const l of bySection.get(section)) {
+                const isLesson = l.participant_id || l.cancellation_id;
+                if (!isLesson) { rows.push({ label: l.description, dates: [], cents: l.amount_cents }); continue; }
+                if (!byRider.has(l.description)) {
+                    byRider.set(l.description, { label: l.description, dates: [], cents: 0 });
+                    rows.push(byRider.get(l.description));
+                }
+                const r = byRider.get(l.description);
+                r.dates.push(fmtShort(l.ride_date));
+                r.cents += l.amount_cents;
+            }
+            for (const r of rows) {
+                if (doc.y > doc.page.height - 120) doc.addPage();
+                drawRow('', r.dates.length ? `${r.label}: ${r.dates.join(', ')}` : r.label,
+                        money(r.cents), false);
+            }
+        }
+    } else {
+        for (const line of lines) {
+            if (doc.y > doc.page.height - 120) doc.addPage();
+            drawRow(fmtDay(line.ride_date), line.description, money(line.amount_cents), false);
+        }
     }
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
@@ -3552,7 +3606,7 @@ function drawInvoicePage(doc, inv, lines, settings) {
     }
     // Explain the arena fee, but only on an invoice that actually carries one —
     // otherwise it is a paragraph about a charge that is not there.
-    if (settings.livery_note && lines.some((l) => /^Livery — /.test(l.description || ''))) {
+    if (settings.livery_note && lines.some((l) => /^Livery — /.test(l.section || l.description || ''))) {
         doc.moveDown(1);
         doc.fontSize(9.5).font('Helvetica').fillColor('#555555')
             .text(settings.livery_note, left, doc.y, { width: right - left });
