@@ -1961,6 +1961,27 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                     + `${[...new Set(dropped.map((d) => d.number))].join(', ')}. `
                     + 'Delete that invoice before taking them off this ride.' });
         }
+        // The ride's own settings describe every seat on it, the billed ones
+        // included, so none of them may move while an invoice points here —
+        // re-timing or re-typing a lesson someone has already paid for would
+        // silently change what they were charged for. The UI disables these,
+        // so reaching this is a stale page or a direct call.
+        if (invoicedSeats.length) {
+            // Only the two the invoice itself is built from: it lists each
+            // lesson by date and prices it by ride type. pg hands back a Date
+            // for a date column, so both sides are normalised before comparing.
+            const day = (v) => (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
+            const frozen = [
+                ['date', day(existing[0].date), day(parsed.date)],
+                ['ride type', String(existing[0].ride_type_id ?? ''), String(parsed.ride_type_id ?? '')]
+            ].filter(([, was, now]) => was !== now).map(([what]) => what);
+            if (frozen.length) {
+                return res.status(400).json({
+                    error: `This ride is on invoice ${[...new Set(invoicedSeats.map((s) => s.number))].join(', ')}, `
+                        + `so its ${frozen.join(' and ')} cannot be changed. `
+                        + 'Delete that invoice first, or change only the riders who are not on it.' });
+            }
+        }
         const conflicts = await findConflicts(parsed.date, parsed.start_time,
             parsed.horseIds, req.params.id, parsed.allDay,
             parsed.duration_min || await rideDurationMin(parsed.ride_type_id));

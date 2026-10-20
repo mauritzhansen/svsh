@@ -2019,7 +2019,7 @@
 
     function participantRowHtml(p, withResched, freq) {
         return `
-            <div class="pick-row" data-kind="part">
+            <div class="pick-row" data-kind="part"${p && p.invoiced ? ' data-invoiced="1"' : ''}>
                 <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)', null, true, true)}</select>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
@@ -2357,8 +2357,9 @@
             ${locked ? `<div class="warn-bar">🧾 <b>Already invoiced.</b>
                 ${(ride.invoiced_riders || []).map((r) =>
                     `${esc(r.name || 'A rider')} on ${esc(r.number || 'an invoice')}`).join(', ')}.
-                You can still change this ride — the time, the horses, the other riders —
-                but those riders cannot be taken off until the invoice is deleted.</div>` : ''}
+                The riders who are not on an invoice can still be changed — their horse,
+                how often they come, taking them off. The ride itself (time, type, length)
+                and the invoiced riders are fixed until the invoice is deleted.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
             <div class="form-row">
                 <div>
@@ -2486,7 +2487,30 @@
         document.getElementById('ride-parts').addEventListener('input', syncFreqVisibility);
         document.getElementById('ride-guides').addEventListener('change', refreshOptions);
         refreshOptions();
-        if (locked) return;
+        // A ride with an invoice line on it is half-frozen, not frozen: the
+        // riders nobody has billed yet can still be changed. Anything that
+        // would alter what was already invoiced — the time, the type, the
+        // length, the invoiced rider's own row — is disabled instead.
+        if (locked) lockInvoicedParts();
+
+        function lockInvoicedParts() {
+            // Ride-level settings describe every seat, the billed ones too, so
+            // none of them can move while an invoice points here.
+            ['ride-time', 'ride-type', 'ride-level', 'ride-duration', 'ride-venue', 'ride-repeat']
+                .forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el) {
+                        el.disabled = true;
+                        el.title = 'Already invoiced — the ride itself cannot be changed';
+                    }
+                });
+            $dialog.querySelectorAll('[data-kind="part"][data-invoiced="1"]').forEach((row) => {
+                row.querySelectorAll('select, button').forEach((el) => {
+                    el.disabled = true;
+                    el.title = 'This rider is on an invoice';
+                });
+            });
+        }
 
         // Snapshot after the form is fully built, so a redraw is not mistaken
         // for an edit. Any real input from here on enables Save.
