@@ -210,7 +210,8 @@
 
     // ---- offline + background updates ----
     if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js').then(prefetchWeek).catch(() => { /* http, or blocked */ });
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+            .then(prefetchWeek).catch(() => { /* http, or blocked */ });
         navigator.serviceWorker.addEventListener('message', (e) => {
             if (e.data && e.data.type === 'schedule-changed') load(true);
         });

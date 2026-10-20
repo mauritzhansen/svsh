@@ -3595,15 +3595,15 @@ function drawInvoicePage(doc, inv, lines, settings) {
         doc.moveDown(0.4);
     };
     // A lesson section bills the same rate for every seat, so the heading can
-    // carry it: "Group Lesson 75 — R 500.00 each". Left off when the section's
-    // seats were not all charged alike (a seat override, a part-billed late
-    // cancellation) or when it is not lessons at all, where "each" means
-    // nothing.
+    // carry it: "Group Lesson 75 — R 500.00". Left off when the section's seats
+    // were not all charged alike (a seat override, a part-billed late
+    // cancellation) or when it is not lessons at all, where a single per-ride
+    // rate means nothing.
     const sectionRate = (sectionLines) => {
         const seats = sectionLines.filter((l) => l.participant_id || l.cancellation_id);
         if (!seats.length || seats.length !== sectionLines.length) return '';
         const rates = new Set(seats.map((l) => l.amount_cents));
-        return rates.size === 1 ? `  —  ${money(seats[0].amount_cents)} each` : '';
+        return rates.size === 1 ? `  —  ${money(seats[0].amount_cents)}` : '';
     };
     // The grouped layout carries dates inside the description ("Nolan: 13, 20,
     // 27 Oct"), so the date column is empty and its heading would label nothing.

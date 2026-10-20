@@ -6412,7 +6412,12 @@
         }, true);
         if (!navigator.onLine) setOffline(true);
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(() => { /* http, or blocked */ });
+            // updateViaCache 'none': Caddy serves *.js with a day's max-age, and
+            // without this the browser would honour that for sw.js itself — so a
+            // deploy could take up to 24h to reach a phone that already has the
+            // old worker installed.
+            navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+                .catch(() => { /* http, or blocked */ });
         }
     }
 

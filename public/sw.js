@@ -79,7 +79,12 @@ self.addEventListener('fetch', (e) => {
         e.respondWith((async () => {
             const cache = await caches.open(SHELL);
             try {
-                const res = await withTimeout(fetch(e.request), 3000);
+                // cache: 'no-cache' forces a revalidation against the server.
+                // Caddy labels *.js and *.css with a day's max-age, so without
+                // this the browser's own HTTP cache could hand us a stale
+                // app.js and we would store it as the good copy.
+                const res = await withTimeout(
+                    fetch(e.request, { cache: 'no-cache' }), 3000);
                 if (res.ok) cache.put(url.pathname, res.clone());
                 return res;
             } catch (err) {
