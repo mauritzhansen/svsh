@@ -2411,8 +2411,8 @@
                 ${isEdit && !locked ? '<button class="danger small" id="ride-delete">Delete</button>' : ''}
                 ${isEdit && !locked ? '<button type="button" class="secondary small" id="ride-bill" title="Invoice this ride now, whatever the date">💳 Bill now</button>' : ''}
                 ${isEdit && !locked ? '<span class="spacer"></span>' : ''}
-                <button class="secondary" id="ride-cancel">${locked ? 'Close' : 'Cancel'}</button>
-                ${locked ? '' : '<button id="ride-save">Save</button>'}
+                <button class="secondary" id="ride-cancel">Cancel</button>
+                <button id="ride-save">Save</button>
             </div>`);
 
         // The clicked cell's horse may still be busy once overlap is considered
