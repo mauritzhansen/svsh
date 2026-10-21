@@ -2019,7 +2019,8 @@
 
     function participantRowHtml(p, withResched, freq) {
         return `
-            <div class="pick-row" data-kind="part"${p && p.invoiced ? ' data-invoiced="1"' : ''}>
+            <div class="pick-row" data-kind="part"${p && p.invoiced
+                ? ` data-invoiced="1" data-invoiced-cents="${p.invoiced_cents || 0}"` : ''}>
                 <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)', null, true, true)}</select>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
@@ -2093,13 +2094,15 @@
             const busy = busyFor(timeVal());
             const horses = new Set(busy.horses), contacts = new Set(busy.contacts), guides = new Set(busy.guides);
             const dialogGuides = new Set();   // same instructor twice on THIS ride
-            // Rows marked as rescheduled are leaving the ride — theirs don't count
+            // A rider leaving the ride frees their HORSE for someone else, but
+            // not their own place on the day: they are already on it, struck
+            // through, and putting them back is what Undo is for.
             $dialog.querySelectorAll('.pr-horse, .gr-horse').forEach((sel) => {
                 if (sel !== exceptSel && sel.value && !sel.classList.contains('hidden') &&
                     !sel.closest('.removed')) horses.add(sel.value);
             });
             $dialog.querySelectorAll('.pr-contact').forEach((sel) => {
-                if (sel !== exceptSel && sel.value && !sel.closest('.removed')) contacts.add(sel.value);
+                if (sel !== exceptSel && sel.value) contacts.add(sel.value);
             });
             $dialog.querySelectorAll('.gr-guide').forEach((sel) => {
                 if (sel !== exceptSel && sel.value) { guides.add(sel.value); dialogGuides.add(sel.value); }
@@ -2294,15 +2297,23 @@
                 // that rather than assume. Reschedule-with-credit is the ⟳
                 // button; these two are the ways a lesson simply does not happen.
                 const name = (contactById(cid) || {}).name || 'this rider';
+                const billedAlready = row.dataset.invoiced === '1';
+                const rowAmount = Number(row.dataset.invoicedCents || 0);
                 const options = [
                     { key: 'billed', label: 'Cancelled — still charge for it',
-                      hint: 'they called off too late to be let off' },
-                    { key: 'free', label: 'Cancelled — do not charge',
-                      hint: 'taken off the day, nothing owed' }
+                      hint: billedAlready ? 'the invoice stands as it is'
+                          : 'they called off too late to be let off' },
+                    billedAlready
+                        ? { key: 'free', label: 'Cancel and create a refund',
+                            hint: `already invoiced, so the ${money(rowAmount)} comes back as a discount on their next invoice` }
+                        : { key: 'free', label: 'Cancelled — do not charge',
+                            hint: 'taken off the day, nothing owed' }
                 ];
                 if (isEdit && ride.recurring_id) {
                     options.push({ key: 'series', label: 'Remove from the weekly schedule',
-                                   hint: 'this week and from now on, not charged' });
+                                   hint: billedAlready
+                                       ? 'this week and from now on; this week is refunded as a discount'
+                                       : 'this week and from now on, not charged' });
                 }
                 const choice = await askChoice(`Remove ${name}`,
                     isEdit && ride.recurring_id ? 'They are on the weekly fixed ride.' : '', options);
@@ -2354,9 +2365,10 @@
             ${locked ? `<div class="warn-bar">🧾 <b>Already invoiced.</b>
                 ${(ride.invoiced_riders || []).map((r) =>
                     `${esc(r.name || 'A rider')} on ${esc(r.number || 'an invoice')}`).join(', ')}.
-                The riders who are not on an invoice can still be changed — their horse,
-                how often they come, taking them off. The ride itself (time, type, length)
-                and the invoiced riders are fixed until the invoice is deleted.</div>` : ''}
+                The ride itself — time, type, length — is fixed until that invoice is
+                deleted. The riders can still be taken off: cancelled-and-charged or
+                rescheduled leave the invoice as it stands, and cancelling an invoiced
+                rider creates a refund — a discount on their next invoice.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
             <label>Once-off or weekly? <span class="req">*</span></label>
             <select id="ride-repeat" style="width:auto;min-width:240px;margin-bottom:14px">
@@ -2434,7 +2446,8 @@
         // 3a: riders taken off earlier come back as struck-through rows, so the
         // day still shows what happened and they can be put back.
         if (isEdit) {
-            (ride.cancellations || []).forEach((c) => {
+            const riding = new Set((parts || []).map((p) => String(p.contact_id)));
+            (ride.cancellations || []).filter((c) => !riding.has(String(c.contact_id))).forEach((c) => {
                 addRow('ride-parts', participantRowHtml(
                     { contact_id: c.contact_id, horse_id: null }, isEdit,
                     seriesFreq[String(c.contact_id)]));
@@ -2502,10 +2515,15 @@
                     }
                 });
             $dialog.querySelectorAll('[data-kind="part"][data-invoiced="1"]').forEach((row) => {
-                row.querySelectorAll('select, button').forEach((el) => {
-                    el.disabled = true;
-                    el.title = 'This rider is on an invoice';
-                });
+                // Swapping the rider would move someone else's charge onto
+                // this invoice, so that one select is fixed. Taking them off
+                // the day is not: that happens all month and each way of doing
+                // it has an answer for the money.
+                const sel = row.querySelector('.pr-contact');
+                if (sel) {
+                    sel.disabled = true;
+                    sel.title = 'This rider is on an invoice and cannot be swapped for another';
+                }
             });
         }
 

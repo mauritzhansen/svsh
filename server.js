@@ -1646,6 +1646,7 @@ function parseRideBody(body) {
         }
     }
     // riders taken off this ride, kept rather than deleted
+    const cancelled = new Set();
     const cancellations = (Array.isArray((body || {}).cancellations) ? body.cancellations : [])
         .filter((c) => c && c.contact_id)
         .map((c) => ({
@@ -1655,6 +1656,17 @@ function parseRideBody(body) {
             // a late cancellation is still owed for; see migration 031
             billed: !!c.billed
         }));
+    // Nobody can be on the ride twice, and riding while also taken off it is
+    // the same contradiction wearing two hats — it is what put a rider on the
+    // day twice, once live and once struck through.
+    for (const c of cancellations) {
+        const id = String(c.contact_id);
+        if (contactsUsed.has(id)) {
+            return { error: 'A rider cannot be both on this ride and taken off it.' };
+        }
+        if (cancelled.has(id)) return { error: 'The same rider is taken off twice.' };
+        cancelled.add(id);
+    }
     // A lesson where everyone called off is still a real record of the day, so
     // cancellations count as content even when no seat is left.
     if (!participants.length && !cancellations.length && (isBlock || !guides.length)) {
@@ -1673,6 +1685,9 @@ function parseRideBody(body) {
         horseIds: [...horsesUsed]
     };
 }
+
+// "INV-2026-0050" on its own in a line of prose reads like a code; give it a word.
+const invoiceLabel = (number) => (number ? `invoice ${number}` : 'an earlier invoice');
 
 async function replaceCancellations(client, rideId, cancellations) {
     // A cancellation already billed must survive: deleting it would orphan the
@@ -1798,6 +1813,7 @@ async function fetchRides(from, to) {
         `SELECT rp.*, h.name AS horse_name, ah.name AS alt_horse_name, c.name AS contact_name,
                 c.needs_collection, c.collection_teacher, c.collection_class,
                 (il.id IS NOT NULL) AS invoiced,
+                il.amount_cents AS invoiced_cents,
                 inv.number AS invoice_number,
                 EXISTS (SELECT 1 FROM reschedule_credits rc
                          WHERE rc.used_ride_id = rp.ride_id AND rc.contact_id = rp.contact_id) AS credit_used
@@ -1945,7 +1961,8 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // that carry invoice lines are preserved through the save and cannot
         // be removed here; the invoice has to go first.
         const { rows: invoicedSeats } = await pool.query(
-            `SELECT rp.id, rp.contact_id::text, c.name AS contact_name, i.number
+            `SELECT rp.id, rp.contact_id::text, c.name AS contact_name, i.number,
+                    il.id AS line_id, il.amount_cents
                FROM ride_participants rp
                JOIN invoice_lines il ON il.participant_id = rp.id
                JOIN invoices i ON i.id = il.invoice_id
@@ -1953,7 +1970,15 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
               WHERE rp.ride_id = $1`, [req.params.id]);
         const billedContacts = new Set(invoicedSeats.map((s) => String(s.contact_id)));
         const submitted = new Set(parsed.participants.map((p) => String(p.contact_id)));
-        const dropped = invoicedSeats.filter((s) => !submitted.has(String(s.contact_id)));
+        // An invoiced rider can still come off the day — that is the normal
+        // course of a month — but not silently: the save has to say which of
+        // the three it is, because each one means something different for the
+        // money. Cancelled-and-charged and rescheduled leave the invoice as it
+        // stands; cancelled-and-not-charged gives the money back as a discount.
+        const cancelledBy = new Map(
+            (parsed.cancellations || []).map((c) => [String(c.contact_id), c]));
+        const dropped = invoicedSeats.filter((s) => !submitted.has(String(s.contact_id))
+            && !cancelledBy.has(String(s.contact_id)));
         if (dropped.length) {
             return res.status(400).json({
                 error: `${dropped.map((d) => d.contact_name || 'A rider').join(', ')} `
@@ -1999,7 +2024,35 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         parsed.participants.forEach((p) => {
             if (p.contact_id && wasRecurring.has(String(p.contact_id))) p.from_recurring = true;
         });
-        // Keep the seats an invoice points at; replace everything else.
+        // Cancellations are written first so an invoiced seat that is coming
+        // off the ride has something to hand its invoice line to.
+        await replaceCancellations(client, req.params.id, parsed.cancellations);
+        for (const seat of invoicedSeats) {
+            const c = cancelledBy.get(String(seat.contact_id));
+            if (!c) continue;
+            const { rows: rc } = await client.query(
+                'SELECT id FROM ride_cancellations WHERE ride_id = $1 AND contact_id = $2',
+                [req.params.id, seat.contact_id]);
+            if (!rc[0]) continue;
+            // The lesson was invoiced and that invoice stands. Move the line
+            // onto the cancellation so the charge keeps its meaning and the
+            // seat is free to be deleted below.
+            await client.query(
+                'UPDATE invoice_lines SET participant_id = NULL, cancellation_id = $2 WHERE id = $1',
+                [seat.line_id, rc[0].id]);
+            // Cancelled and NOT charged, on a lesson already paid for: the
+            // money has to come back, and an issued invoice is not rewritten.
+            // It returns as a discount on the next one.
+            if (c.kind === 'cancelled' && !c.billed && seat.amount_cents > 0) {
+                await client.query(
+                    `INSERT INTO contact_charges (contact_id, charge_date, description, amount_cents)
+                     VALUES ($1, $2, $3, $4)`,
+                    [seat.contact_id, parsed.date,
+                     `Refund — cancelled lesson ${fmtDay(parsed.date)} (${invoiceLabel(seat.number)})`,
+                     -seat.amount_cents]);
+            }
+        }
+        // Keep the seats an invoice still points at; replace everything else.
         await client.query(
             `DELETE FROM ride_participants rp WHERE rp.ride_id = $1
               AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)`,
@@ -2016,7 +2069,6 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                 'UPDATE ride_participants SET horse_id = $2, alt_horse_id = $3 WHERE id = $1',
                 [seat.id, p.horse_id || null, p.alt_horse_id || null]);
         }
-        await replaceCancellations(client, req.params.id, parsed.cancellations);
         // Typing one occurrence of a fixed ride types the whole series: the
         // template (so future weeks inherit it) plus every other occurrence that
         // has no type yet, past ones included. Occurrences with a type already
@@ -2186,9 +2238,15 @@ async function syncSeriesCadence(client, recurringId) {
                      return w >= 0 && w % 2 === 0;
                  })());
             if (due) {
+                // Taking a rider off a single week is a decision about that
+                // day, and the series must not quietly overrule it: without
+                // this the seat comes straight back, leaving the rider on the
+                // ride AND struck off it at the same time.
                 await client.query(
                     `INSERT INTO ride_participants (ride_id, contact_id, from_recurring)
-                     VALUES ($1, $2, true)
+                     SELECT $1, $2, true
+                      WHERE NOT EXISTS (SELECT 1 FROM ride_cancellations rc
+                                         WHERE rc.ride_id = $1 AND rc.contact_id = $2)
                      ON CONFLICT (ride_id, contact_id) DO NOTHING`, [r.id, p.contact_id]);
             } else {
                 await client.query(
