@@ -2361,13 +2361,12 @@
                 how often they come, taking them off. The ride itself (time, type, length)
                 and the invoiced riders are fixed until the invoice is deleted.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
-            <label style="display:flex;align-items:center;gap:8px;margin-top:0;color:var(--text);font-weight:500">
-                <input type="checkbox" id="ride-repeat" style="width:auto" ${isEdit && ride.recurring_id ? 'checked' : ''}>
-                🔁 Repeats every week (fixed ride)
-            </label>
-            <div class="muted" id="repeat-note" style="margin-left:26px;margin-bottom:14px">${isEdit && ride.recurring_id
-                ? 'This ride repeats on this weekday every week. The dropdown beside each rider sets whether they come every week or every second week. Untick to end the series — this day stays, later weeks stop being created.'
-                : 'Makes this a weekly fixed ride from this date on. Each rider can then be set to every week or every 2nd week.'}</div>
+            <label>Once-off or weekly? <span class="req">*</span></label>
+            <select id="ride-repeat" style="width:auto;min-width:240px;margin-bottom:14px">
+                <option value="" ${isEdit ? '' : 'selected'} disabled>— choose —</option>
+                <option value="once" ${isEdit && !ride.recurring_id ? 'selected' : ''}>Once off — this day only</option>
+                <option value="repeats" ${isEdit && ride.recurring_id ? 'selected' : ''}>🔁 Repeats every week (fixed ride)</option>
+            </select>
             <div class="form-row">
                 <div>
                     <label>Time</label>
@@ -2478,9 +2477,10 @@
             refreshOptions();
         });
         const repeatBox = document.getElementById('ride-repeat');
+        const repeats = () => !!repeatBox && repeatBox.value === 'repeats';
         const syncFreqVisibility = () => {
             $dialog.querySelectorAll('.pr-freq').forEach((s) =>
-                s.classList.toggle('hidden', !repeatBox || !repeatBox.checked));
+                s.classList.toggle('hidden', !repeats()));
         };
         if (repeatBox) repeatBox.addEventListener('change', syncFreqVisibility);
         syncFreqVisibility();
@@ -2527,6 +2527,9 @@
         document.getElementById('ride-save').addEventListener('click', async () => {
             if (!document.getElementById('ride-type').value) {
                 return dialogError('Pick a ride type — it sets the price and drives the reports.');
+            }
+            if (!document.getElementById('ride-repeat').value) {
+                return dialogError('Say whether this is a once-off ride or a weekly one.');
             }
             const credits = reschedRows();
             const body = {
@@ -2606,7 +2609,7 @@
                 })).filter((p) => p.contact_id);
                 const targetId = isEdit ? ride.id : savedId;
                 if (box && targetId) {
-                    const wants = box.checked;
+                    const wants = box.value === 'repeats';
                     const has = isEdit && !!ride.recurring_id;
                     if (wants && !has) await api('POST', `/api/rides/${targetId}/repeat`, { participants: freqs });
                     else if (wants && has) await api('PUT', `/api/rides/${targetId}/repeat-riders`, { participants: freqs });
