@@ -2228,11 +2228,7 @@
             x.classList.add('secondary');
             x.title = 'Put this rider back on the ride';
             const rb = row.querySelector('.row-resched');
-            if (rb) rb.style.display = kind === 'rescheduled' ? '' : 'none';
-            if (rb && kind === 'rescheduled') {
-                rb.textContent = 'Undo';
-                rb.title = 'Revert — keep the rider on this ride';
-            }
+            if (rb) rb.style.display = 'none';
             let tag = row.querySelector('.removed-tag');
             if (!tag) {
                 tag = document.createElement('span');
@@ -2281,6 +2277,7 @@
                     unmarkRemoved(row);
                     markDirty();
                     refreshOptions();
+                    updateReschedInfo();
                     return;
                 }
                 const contactSel = row.querySelector('.pr-contact');

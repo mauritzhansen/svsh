@@ -2694,14 +2694,16 @@ const NOT_MAKEUP_SQL = `NOT EXISTS (
 // Every overview counts seats to preview an invoice, so each one has to count
 // the billable cancellations too — otherwise the preview and the invoice it
 // creates disagree. This is the same shape as a seats row, keyed on the
-// cancellation rather than the seat, with the rider marked so a day nobody
-// rode is not mistaken for one they did.
+// cancellation rather than the seat. A rescheduled day keeps the rider's plain
+// name so it merges with the days they rode; a late cancellation is marked,
+// because that is a lesson nobody rode and the parent will ask about it.
 //   cols  — extra leading columns the sibling branch selects after id
 //   extra — extra trailing columns
 //   where — the branch's own filters, as ' AND ...'
 function cancelledSeatsSQL({ cols = '', extra = '', where = '' } = {}) {
     return `SELECT rc.id${cols ? ', ' + cols : ''},
-                   rider.name || ' (missed)' AS rider_name,
+                   rider.name || CASE WHEN rc.kind = 'cancelled'
+                                       THEN ' (cancelled late)' ELSE '' END AS rider_name,
                    COALESCE(rider.parent_id, rider.id) AS payer_id,
                    r.date, r.ride_type_id, r.ride_type_name,
                    COALESCE(rt.price_cents, 0) AS cents${extra}
@@ -3340,8 +3342,8 @@ async function cancelledLines(client, payerId, from, to, soleRider) {
     return rows.map((r) => ({
         cancellation_id: r.id,
         section: r.ride_type_name,
-        description: `${r.rider_name} (${r.kind === 'rescheduled'
-            ? 'missed — rescheduled' : 'cancelled late'})`,
+        description: r.kind === 'rescheduled'
+            ? r.rider_name : `${r.rider_name} (cancelled late)`,
         ride_date: String(r.date).slice(0, 10),
         amount_cents: r.amount_cents
     }));
