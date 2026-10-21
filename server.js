@@ -2678,6 +2678,43 @@ const IN_TERM_SQL = `EXISTS (
 // billed deliberately with a custom date range.
 const CARRY_BACK = `INTERVAL '1 month'`;
 
+// A lesson that was taken off the day is still owed for in two of the three
+// cases: a late cancellation marked as still chargeable, and a reschedule —
+// where the credit the rider gets is paid for by the day they missed. The
+// third (off the schedule, not charged) stays unbilled.
+const BILLABLE_CANCELLATION_SQL = "(rc.billed OR rc.kind = 'rescheduled')";
+
+// The other half of the reschedule rule: the seat the credit was spent on is
+// free, because the missed day carried the charge. Requires aliases r (rides)
+// and rp (ride_participants).
+const NOT_MAKEUP_SQL = `NOT EXISTS (
+    SELECT 1 FROM reschedule_credits rc2
+     WHERE rc2.used_ride_id = r.id AND rc2.contact_id = rp.contact_id)`;
+
+// Every overview counts seats to preview an invoice, so each one has to count
+// the billable cancellations too — otherwise the preview and the invoice it
+// creates disagree. This is the same shape as a seats row, keyed on the
+// cancellation rather than the seat, with the rider marked so a day nobody
+// rode is not mistaken for one they did.
+//   cols  — extra leading columns the sibling branch selects after id
+//   extra — extra trailing columns
+//   where — the branch's own filters, as ' AND ...'
+function cancelledSeatsSQL({ cols = '', extra = '', where = '' } = {}) {
+    return `SELECT rc.id${cols ? ', ' + cols : ''},
+                   rider.name || ' (missed)' AS rider_name,
+                   COALESCE(rider.parent_id, rider.id) AS payer_id,
+                   r.date, r.ride_type_id, r.ride_type_name,
+                   COALESCE(rt.price_cents, 0) AS cents${extra}
+              FROM ride_cancellations rc
+              JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
+              JOIN contacts rider ON rider.id = rc.contact_id AND NOT rider.archived
+              JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+              LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+             WHERE ${BILLABLE_CANCELLATION_SQL}
+               AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
+               ${where}`;
+}
+
 // Heading for everything on an invoice that is neither a lesson nor a horse's
 // livery: one-off expenses, discounts, arena fees, standing monthly charges.
 const EXTRAS_SECTION = 'Additional costs';
@@ -2724,18 +2761,36 @@ app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, 
             const [from, to] = monthRange(month);
             await materializeRecurring(from, to);
             const { rows } = await pool.query(
-                `SELECT count(DISTINCT rider.id)::int AS riders,
-                        COALESCE(SUM(COALESCE(rp.price_cents, rt.price_cents, 0)), 0)::int AS total_cents
-                   FROM ride_participants rp
-                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-                   JOIN contacts rider ON rider.id = rp.contact_id
-                   JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
-                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                  WHERE r.date BETWEEN $1 AND $2
-                    AND payer.payment_terms = $3
-                    AND NOT rider.archived
-                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
-                    AND ${NOT_PASS_COVERED_SQL}`,
+                `SELECT count(DISTINCT rider_id)::int AS riders,
+                        COALESCE(SUM(cents), 0)::int AS total_cents
+                   FROM (
+                     SELECT rider.id AS rider_id,
+                            COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                       FROM ride_participants rp
+                       JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                       JOIN contacts rider ON rider.id = rp.contact_id
+                       JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                       LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                      WHERE r.date BETWEEN $1 AND $2
+                        AND payer.payment_terms = $3
+                        AND NOT rider.archived
+                        AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                        AND ${NOT_MAKEUP_SQL}
+                        AND ${NOT_PASS_COVERED_SQL}
+                     UNION ALL
+                     -- the days that were missed but are still owed for
+                     SELECT rider.id, COALESCE(rt.price_cents, 0)
+                       FROM ride_cancellations rc
+                       JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
+                       JOIN contacts rider ON rider.id = rc.contact_id AND NOT rider.archived
+                       JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
+                       LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                      WHERE ${BILLABLE_CANCELLATION_SQL}
+                        AND r.date BETWEEN $1 AND $2
+                        AND payer.payment_terms = $3
+                        AND NOT EXISTS (SELECT 1 FROM invoice_lines il
+                                         WHERE il.cancellation_id = rc.id)
+                   ) q`,
                 [from, to, terms]);
             out.push({ month, riders: rows[0].riders, total_cents: rows[0].total_cents });
         }
@@ -2789,6 +2844,12 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                         AND p2.school_id = $3
                         AND p2.payment_terms = 'advance_term'
                         AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                        AND ${NOT_MAKEUP_SQL}
+                     UNION ALL
+                     ${cancelledSeatsSQL({ where: `
+                        AND (r.date BETWEEN $1 AND $2 OR ${PREV_MONTH_SQL('$1')})
+                        AND payer.school_id = $3
+                        AND payer.payment_terms = 'advance_term'` })}
                  )
                  SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
                         payer.payment_terms,
@@ -2852,6 +2913,11 @@ app.get('/api/invoices/cash-overview', requireRole('helper'), async (req, res) =
                   WHERE payer.payment_terms = 'cash_after'
                     AND r.date <= CURRENT_DATE
                     AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                    AND ${NOT_MAKEUP_SQL}
+                 UNION ALL
+                 ${cancelledSeatsSQL({ where: `
+                    AND payer.payment_terms = 'cash_after'
+                    AND r.date <= CURRENT_DATE` })}
              )
              SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
                     payer.payment_terms,
@@ -2904,6 +2970,18 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
                   WHERE r.date <= $2
                     AND payer.payment_terms IN ('advance_monthly', 'advance_term')
                     AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                    AND ${NOT_MAKEUP_SQL}
+                 UNION ALL
+                 ${cancelledSeatsSQL({
+                     extra: `,
+                        (r.date BETWEEN $1 AND $2) AS in_month,
+                        (r.date >= $1::date - ${CARRY_BACK}) AS in_reach,
+                        payer.payment_terms AS terms,
+                        (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
+                        ${IN_TERM_SQL} AS in_term`,
+                     where: `
+                        AND r.date <= $2
+                        AND payer.payment_terms IN ('advance_monthly', 'advance_term')` })}
              ), billable AS (
                  -- Everyone on advance billing gets last month's leftovers here:
                  -- the lessons the advance invoice could not have known about,
@@ -3019,7 +3097,11 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
                    LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
                   WHERE r.date BETWEEN $1 AND $2
                     AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                    AND ${NOT_MAKEUP_SQL}
                     AND ${NOT_PASS_COVERED_SQL}
+                 UNION ALL
+                 ${cancelledSeatsSQL({ cols: 'rc.contact_id',
+                     where: 'AND r.date BETWEEN $1 AND $2' })}
              )
              SELECT payer.id AS contact_id, payer.name, payer.name AS payer_name,
                     payer.payment_terms, payer.school_id,
@@ -3244,21 +3326,22 @@ async function monthlyChargeLines(client, payerId, from, to) {
 // cancellation record instead, at what the lesson would have cost.
 async function cancelledLines(client, payerId, from, to, soleRider) {
     const { rows } = await client.query(
-        `SELECT rc.id, r.date, c.name AS rider_name,
+        `SELECT rc.id, rc.kind, r.date, c.name AS rider_name,
                 COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
                 COALESCE(rt.price_cents, 0)::int AS amount_cents
            FROM ride_cancellations rc
            JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
            JOIN contacts c ON c.id = rc.contact_id
            LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-          WHERE rc.billed AND COALESCE(c.parent_id, c.id) = $1
+          WHERE ${BILLABLE_CANCELLATION_SQL} AND COALESCE(c.parent_id, c.id) = $1
             AND r.date BETWEEN $2 AND $3
             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
           ORDER BY r.date`, [payerId, from, to]);
     return rows.map((r) => ({
         cancellation_id: r.id,
         section: r.ride_type_name,
-        description: `${r.rider_name} (cancelled late)`,
+        description: `${r.rider_name} (${r.kind === 'rescheduled'
+            ? 'missed — rescheduled' : 'cancelled late'})`,
         ride_date: String(r.date).slice(0, 10),
         amount_cents: r.amount_cents
     }));
@@ -3332,6 +3415,7 @@ async function createInvoiceForContact(contactId, from, to, mode) {
                     ? `(r.date BETWEEN $2 AND $3 OR ${PREV_MONTH_SQL('$2')})`
                     : 'r.date BETWEEN $2 AND $3'}
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
+                AND ${NOT_MAKEUP_SQL}
                 AND ${NOT_PASS_COVERED_SQL}
               ORDER BY c.name, r.date, r.start_time
               FOR UPDATE OF rp`,

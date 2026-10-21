@@ -2361,6 +2361,13 @@
                 how often they come, taking them off. The ride itself (time, type, length)
                 and the invoiced riders are fixed until the invoice is deleted.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:0;color:var(--text);font-weight:500">
+                <input type="checkbox" id="ride-repeat" style="width:auto" ${isEdit && ride.recurring_id ? 'checked' : ''}>
+                🔁 Repeats every week (fixed ride)
+            </label>
+            <div class="muted" id="repeat-note" style="margin-left:26px;margin-bottom:14px">${isEdit && ride.recurring_id
+                ? 'This ride repeats on this weekday every week. The dropdown beside each rider sets whether they come every week or every second week. Untick to end the series — this day stays, later weeks stop being created.'
+                : 'Makes this a weekly fixed ride from this date on. Each rider can then be set to every week or every 2nd week.'}</div>
             <div class="form-row">
                 <div>
                     <label>Time</label>
@@ -2397,13 +2404,6 @@
                    placeholder="e.g. Nolan on the lunge for the first 10 min">
             <label>Where</label>
             <select id="ride-venue">${venueOptions(isEdit ? (ride.venue || 'instructor') : 'instructor')}</select>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);font-weight:500">
-                <input type="checkbox" id="ride-repeat" style="width:auto" ${isEdit && ride.recurring_id ? 'checked' : ''}>
-                🔁 Repeats every week (fixed ride)
-            </label>
-            <div class="muted" id="repeat-note" style="margin-left:26px">${isEdit && ride.recurring_id
-                ? 'This ride repeats on this weekday every week. The dropdown beside each rider sets whether they come every week or every second week. Untick to end the series — this day stays, later weeks stop being created.'
-                : 'Makes this a weekly fixed ride from this date on. Each rider can then be set to every week or every 2nd week.'}</div>
             </fieldset>
             <div class="form-warning" id="ride-resched-info"></div>
             <div class="form-warning" id="ride-warnings"></div>
