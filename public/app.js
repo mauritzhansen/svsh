@@ -2602,12 +2602,6 @@
                     typedSiblings = res.typed_siblings || 0;
                     seriesRides = res.series_rides || 0;
                 } else savedId = (await api('POST', '/api/rides', body)).ride_id;
-                for (const pc of credits) {
-                    await api('POST', '/api/credits', {
-                        contact_id: pc.contact_id,
-                        note: `Missed ride on ${defaults.date} at ${timeVal()}`
-                    });
-                }
                 if (isEdit && defaults.addContactId) {
                     await api('POST', '/api/credits/consume', {
                         contact_id: defaults.addContactId, ride_id: ride.id

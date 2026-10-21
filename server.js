@@ -1706,6 +1706,35 @@ async function replaceCancellations(client, rideId, cancellations) {
                      billed = EXCLUDED.billed`,
             [rideId, c.contact_id, c.kind, c.from_series, !!c.billed]);
     }
+    await syncRescheduleCredits(client, rideId, cancellations);
+}
+
+// One missed lesson, one credit. This used to be raised by the dialog on every
+// save, so re-opening a ride and saving it again handed the rider another one;
+// the calendar bar ended up offering "Lara ×3" for a single missed Wednesday.
+// Driving it from the cancellation makes saving the same day twice a no-op.
+async function syncRescheduleCredits(client, rideId, cancellations) {
+    const owed = (cancellations || []).filter((c) => c.kind === 'rescheduled')
+        .map((c) => String(c.contact_id));
+    // Undoing a reschedule takes the credit back — unless it has been spent,
+    // in which case the make-up ride already exists and must keep its cover.
+    await client.query(
+        `DELETE FROM reschedule_credits
+          WHERE missed_ride_id = $1 AND used_ride_id IS NULL
+            AND NOT (contact_id = ANY($2::bigint[]))`,
+        [rideId, owed]);
+    if (!owed.length) return;
+    const { rows: ride } = await client.query(
+        'SELECT date::text AS date, start_time FROM rides WHERE id = $1', [rideId]);
+    const note = ride[0]
+        ? `Missed ride on ${ride[0].date} at ${String(ride[0].start_time).slice(0, 5)}` : 'Missed ride';
+    for (const contactId of owed) {
+        await client.query(
+            `INSERT INTO reschedule_credits (contact_id, note, missed_ride_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (contact_id, missed_ride_id) DO NOTHING`,
+            [contactId, note, rideId]);
+    }
 }
 
 async function insertRideChildren(client, rideId, participants, guides) {

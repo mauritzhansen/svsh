@@ -274,8 +274,14 @@ CREATE TABLE reschedule_credits (
     note TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     used_at TIMESTAMPTZ,
-    used_ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL
+    used_ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL,
+    -- which lesson was missed; one credit per rider per missed ride
+    missed_ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL
 );
+
+CREATE UNIQUE INDEX reschedule_credits_one_per_missed_ride
+    ON reschedule_credits (contact_id, missed_ride_id)
+ WHERE missed_ride_id IS NOT NULL;
 
 -- Simple to-dos; dated (and optionally timed) ones double as the day's
 -- activities in the calendar's first column. Done items go to the archive.
