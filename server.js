@@ -1732,7 +1732,8 @@ async function syncRescheduleCredits(client, rideId, cancellations) {
         await client.query(
             `INSERT INTO reschedule_credits (contact_id, note, missed_ride_id)
              VALUES ($1, $2, $3)
-             ON CONFLICT (contact_id, missed_ride_id) DO NOTHING`,
+             ON CONFLICT (contact_id, missed_ride_id)
+                 WHERE missed_ride_id IS NOT NULL DO NOTHING`,
             [contactId, note, rideId]);
     }
 }
