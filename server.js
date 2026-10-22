@@ -3980,7 +3980,7 @@ app.get('/api/guides/:id/statement.pdf', requireRole('helper'), async (req, res)
               ORDER BY r.date, r.start_time`,
             [req.params.id, from, to]);
         const settings = await loadSettings();
-        const safe = guide.name.replace(/[^a-zA-Z0-9]+/g, '-');
+        const safe = filenameSafe(guide.name);
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition',
             `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="lessons-${safe}-${from}.pdf"`);
@@ -3992,6 +3992,14 @@ app.get('/api/guides/:id/statement.pdf', requireRole('helper'), async (req, res)
         handleError(res, err, 'Generating instructor statement');
     }
 });
+
+// A person's name inside a Content-Disposition filename: anything outside
+// plain ASCII letters and digits becomes a dash, so accents, apostrophes and
+// slashes cannot break the header or escape the directory.
+function filenameSafe(name) {
+    return String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
 
 const INVOICE_WITH_CONTACT_SQL = `
     SELECT i.*, c.name AS contact_name, c.email AS contact_email,
@@ -4060,8 +4068,12 @@ app.get('/api/invoices/:id/pdf', requireRole('helper'), async (req, res) => {
         res.setHeader('Content-Type', 'application/pdf');
         // ?download=1 saves the file instead of taking over the screen — an
         // inline PDF has no back button in a standalone/installed window.
+        // The number alone makes a folder of downloads unreadable — name the
+        // account too, so a batch can be sorted and sent without opening each.
+        const who = filenameSafe(inv.contact_name);
         res.setHeader('Content-Disposition',
-            `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${inv.number}.pdf"`);
+            `${req.query.download === '1' ? 'attachment' : 'inline'}; `
+            + `filename="${inv.number}${who ? ' ' + who : ''}.pdf"`);
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
         doc.pipe(res);
         drawInvoicePage(doc, inv, lines, settings);
