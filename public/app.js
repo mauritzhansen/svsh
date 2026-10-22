@@ -208,12 +208,14 @@
 
     function openDialog(html) {
         $dialog.innerHTML = html;
-        // A dialog can be replaced in place while the old one is scrolled down
-        // (reopening a parent after adding a child, tapping edit from a scrolled
-        // form). Replacing innerHTML does not reset the scroll, so the new
-        // dialog would open part-way down with its heading off-screen.
-        $dialog.scrollTop = 0;
+        // Show it BEFORE resetting the scroll. A dialog carries the scroll
+        // position of the last one — replacing innerHTML does not clear it —
+        // so a long form opened after a scrolled one came up at its foot, on
+        // the Save button. Setting scrollTop while the backdrop is still
+        // display:none is silently dropped: the element has no layout to
+        // scroll, and the old offset is restored the moment it is shown.
         $backdrop.classList.remove('hidden');
+        $dialog.scrollTop = 0;
         enhanceTimeInputs($dialog);
     }
 
