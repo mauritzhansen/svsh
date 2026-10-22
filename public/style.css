@@ -1585,3 +1585,39 @@ body.is-offline .ride-box { opacity: 0.92; }
 
 /* A discount in the expenses list reads as money coming off, not going on */
 .charge-amt.is-discount { color: #3c5a34; font-weight: 600; }
+
+/* Day note — what is happening today, written on the calendar and read by the
+   instructors on their phones. Shared by both views, so the instructors see
+   the same block the scheduler typed into (read-only on their side). */
+.day-note {
+    background: #fff8e1;
+    border: 1px solid #e8d79a;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+}
+.day-note.is-empty { background: none; border-style: dashed; border-color: var(--border); }
+.day-note-text { flex: 1 1 100%; line-height: 1.45; white-space: normal; }
+.day-note-meta { color: var(--muted); font-size: 12.5px; }
+.day-note .day-note-meta + button { margin-left: auto; }
+.day-note.is-empty button { margin: 0; }
+.day-note.editing { display: block; }
+.day-note.editing label { display: block; font-weight: 600; margin-bottom: 6px; }
+.day-note-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+/* The instructors only read it, so it needs no room for controls */
+.day-note.is-read { display: block; }
+
+/* Report tables — one look for every report the engine can build, matching
+   the PDF it prints: group headings in bold, subtotals muted, grand total
+   ruled off, numbers right-aligned. */
+.rep-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.rep-table th, .rep-table td { padding: 6px 8px; text-align: left; vertical-align: top; }
+.rep-table th { border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.rep-table td.num, .rep-table th.num { text-align: right; white-space: nowrap; }
+.rep-table tr.rep-group td { font-weight: 700; padding-top: 12px; }
+.rep-table tr.rep-subtotal td { color: var(--muted); border-bottom: 1px solid var(--border); }
+.rep-table tfoot tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }

@@ -157,6 +157,7 @@
             $out.classList.remove('muted');
             $out.innerHTML = data.days.map((d) => `
                 <h2 class="pub-day ${d.date === todayStr() ? 'is-today' : ''}">${esc(longDate(d.date))}</h2>
+                ${d.note ? `<div class="day-note is-read">📋 ${esc(d.note).replace(/\n/g, '<br>')}</div>` : ''}
                 ${d.rides.length ? d.rides.map(rideHtml).join('')
                     : '<div class="card muted">Nothing scheduled.</div>'}`).join('');
             markFreshness(changed);

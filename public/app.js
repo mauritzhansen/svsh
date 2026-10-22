@@ -71,6 +71,15 @@
             { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
     }
 
+    // A timestamp as "22 Oct 09:14" — enough to tell whether a note is from
+    // this morning or last week, without a full date swamping the line.
+    function whenShort(ts) {
+        const d = new Date(ts);
+        if (isNaN(d)) return '';
+        return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+            + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    }
+
     const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     let toastTimer = null;
@@ -921,6 +930,7 @@
         const oldScroller = $view.querySelector('.calendar-scroller');
         if (oldScroller) state.calScroll = { x: oldScroller.scrollLeft, y: oldScroller.scrollTop };
         $view.innerHTML = `
+            <div id="day-note-bar"></div>
             <div id="holiday-bar" class="holiday-bar hidden"></div>
             <div id="credit-bar"></div>
             <div id="cal-grid" class="muted">Loading…</div>
@@ -936,9 +946,70 @@
             drawDayGrid(dayRides, date);
             drawCreditBar(creditsData.credits || [], date, dayRides);
             drawHolidayBar(date);
+            drawDayNote(date);
         } catch (err) {
             document.getElementById('cal-grid').textContent = err.message;
         }
+    }
+
+
+    // What is happening today, for the instructors: "arena closed until 10",
+    // "farrier here all morning". It sits at the very top of the day because
+    // it is the thing anyone looking at the day needs to know first, and it
+    // goes straight to the phones through the same push the rides use.
+    async function drawDayNote(date) {
+        const bar = document.getElementById('day-note-bar');
+        if (!bar) return;
+        let note = '', by = '', at = '';
+        try {
+            const data = await api('GET', `/api/day-notes?from=${date}&to=${date}`);
+            const row = (data.notes || [])[0];
+            if (row) { note = row.note; by = row.updated_by || ''; at = row.updated_at || ''; }
+        } catch (err) { /* the day still works without it */ }
+
+        const show = () => {
+            bar.className = note ? 'day-note' : 'day-note is-empty';
+            bar.innerHTML = note
+                ? `<div class="day-note-text">📋 ${esc(note).replace(/\n/g, '<br>')}</div>
+                   <div class="day-note-meta">${by ? 'by ' + esc(by) : ''}${
+                       by && at ? ' · ' : ''}${at ? esc(whenShort(at)) : ''}</div>
+                   <button class="secondary small" id="dn-edit">Edit note</button>`
+                : '<button class="secondary small" id="dn-edit">📋 Add a note for this day</button>';
+            const btn = document.getElementById('dn-edit');
+            if (btn) btn.addEventListener('click', edit);
+        };
+
+        const edit = () => {
+            bar.className = 'day-note editing';
+            bar.innerHTML = `
+                <label>Note for ${esc(fmtDay(date))} — shown to the instructors</label>
+                <textarea id="dn-text" rows="3"
+                          placeholder="e.g. Arena closed until 10 · farrier here all morning">${esc(note)}</textarea>
+                <div class="day-note-actions">
+                    <button class="secondary small" id="dn-cancel">Cancel</button>
+                    <button class="small" id="dn-save">Save note</button>
+                </div>`;
+            const ta = document.getElementById('dn-text');
+            ta.focus();
+            ta.setSelectionRange(ta.value.length, ta.value.length);
+            document.getElementById('dn-cancel').addEventListener('click', show);
+            document.getElementById('dn-save').addEventListener('click', async () => {
+                const btn = document.getElementById('dn-save');
+                btn.disabled = true;
+                try {
+                    const res = await api('PUT', `/api/day-notes/${date}`, { note: ta.value });
+                    note = res.note || '';
+                    by = res.updated_by || '';
+                    at = res.updated_at || '';
+                    show();
+                    toast(note ? 'Note saved — the instructors will see it.' : 'Note cleared.');
+                } catch (err) {
+                    btn.disabled = false;
+                    toast(err.message, true);
+                }
+            });
+        };
+        show();
     }
 
     // Which schools are on holiday today. The weekly schedule keeps running
@@ -3681,6 +3752,22 @@
         row.querySelector('.row-x').addEventListener('click', () => row.remove());
     }
 
+    // This rider's own price for a ride type. The placeholder shows the
+    // standard price so it is obvious what is being overridden.
+    function ridePriceRowHtml(p) {
+        const sel = activeRideTypes().map((t) =>
+            `<option value="${t.id}" ${p && String(p.ride_type_id) === String(t.id) ? 'selected' : ''}
+             >${esc(t.name)} — ${money(t.price_cents)}</option>`).join('');
+        return `<div class="pick-row" data-ridetype-row>
+            <select class="rtp-type" style="flex:1 1 auto;min-width:0">
+                <option value="">(pick a ride type)</option>${sel}</select>
+            <input class="rtp-price" type="number" inputmode="decimal" step="0.01" min="0"
+                   style="flex:0 0 100px" value="${p ? (Number(p.price_cents) / 100).toFixed(2) : ''}"
+                   placeholder="0.00">
+            <button type="button" class="danger small row-x">${ICON_X}</button>
+        </div>`;
+    }
+
     // One-off expenses are saved the moment they are added, not with the form:
     // they are a record of something that happened, and losing them to a stray
     // navigation would lose money. Invoiced ones can no longer be removed.
@@ -3991,6 +4078,11 @@
                                share: Number(r.querySelector('.lh-share').value),
                                discount_cents: parseMoneyCents(r.querySelector('.lh-discount').value) || 0 }))
                 .filter((h) => h.horse_id),
+            ride_type_prices: [...(ctHost || $dialog).querySelectorAll('[data-ridetype-row]')]
+                .map((r) => ({
+                    ride_type_id: r.querySelector('.rtp-type').value,
+                    price_cents: parseMoneyCents(r.querySelector('.rtp-price').value) || 0
+                })).filter((p) => p.ride_type_id),
             monthly_charges: [...(ctHost || $dialog).querySelectorAll('[data-monthly-row]')]
                 .map((r) => ({
                     name: r.querySelector('.mc-name').value.trim(),
@@ -4256,6 +4348,12 @@
                    arrangement. Name it so the invoice line reads sensibly.</div>
                 <div id="ct-monthly"></div>
                 <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
+                <label style="margin-top:10px">Lesson prices for this rider</label>
+                <div class="muted" style="margin:-4px 0 6px">A discounted or agreed rate for one
+                   ride type. It replaces the standard price for this rider only; every other
+                   rider on the same lesson pays the usual price.</div>
+                <div id="ct-ridetypes"></div>
+                <button type="button" class="secondary small" id="ct-ridetype-add">＋ Add a lesson price</button>
                 <label style="margin-top:10px">One-off expenses &amp; discounts</label>
                 <div class="muted" style="margin:-4px 0 6px">A vet call, a bag of feed, or a
                    discount off a month's lessons. Dated, and settled on the next invoice.</div>
@@ -4362,6 +4460,15 @@
         ((contact && contact.monthly_charges) || []).forEach((m) => {
             monthlyBox.insertAdjacentHTML('beforeend', monthlyRowHtml(m));
             wireMonthlyRow(monthlyBox.lastElementChild);
+        });
+        const rtBox = document.getElementById('ct-ridetypes');
+        ((contact && contact.ride_type_prices) || []).forEach((p) => {
+            rtBox.insertAdjacentHTML('beforeend', ridePriceRowHtml(p));
+            wireMonthlyRow(rtBox.lastElementChild);
+        });
+        document.getElementById('ct-ridetype-add').addEventListener('click', () => {
+            rtBox.insertAdjacentHTML('beforeend', ridePriceRowHtml(null));
+            wireMonthlyRow(rtBox.lastElementChild);
         });
         document.getElementById('ct-monthly-add').addEventListener('click', () => {
             monthlyBox.insertAdjacentHTML('beforeend', monthlyRowHtml(null));
@@ -5355,23 +5462,30 @@
             <div class="page-tabs">
                 <button class="page-tab ${tab === 'horses' ? 'active' : ''}" data-rep-tab="horses">🐴 Rides per horse</button>
                 <button class="page-tab ${tab === 'types' ? 'active' : ''}" data-rep-tab="types">🏷️ Ride types</button>
+                <button class="page-tab ${tab === 'lesson' ? 'active' : ''}" data-rep-tab="lesson">📋 One lesson type</button>
+                <button class="page-tab ${tab === 'arena' ? 'active' : ''}" data-rep-tab="arena">🏟️ Arena fees</button>
             </div>
             <div class="card">
                 <div class="form-row">
                     <div><label>From</label><input type="date" id="rep-from" value="${from}"></div>
                     <div><label>To</label><input type="date" id="rep-to" value="${to}"></div>
                 </div>
+                ${tab === 'lesson' ? `<label>Lesson type</label>
+                    <select id="rep-type">${rideTypeOptions(state.reportTypeId)}</select>` : ''}
                 <div class="form-actions" style="justify-content:flex-start">
                     <button class="secondary small" id="rep-this">This month</button>
                     <button class="secondary small" id="rep-last">Last month</button>
                     <span class="spacer"></span>
+                    <button class="secondary small" id="rep-pdf" title="Open this report as a PDF">⬇ PDF</button>
                     <button class="small" id="rep-go">Show</button>
                 </div>
             </div>
             <div id="rep-result" class="muted">Loading…</div>
-            <p class="muted">${tab === 'horses'
-                ? "Counts booked riders plus horses ridden by a guide. Open seats and blocked horses don't count; guide rides earn no income."
-                : 'Tap a ride type to break it down by date, then tap a date to see and edit the rides themselves. Blocks are excluded.'}</p>`;
+            <p class="muted">${
+                tab === 'horses' ? "Counts booked riders plus horses ridden by a guide. Open seats and blocked horses don't count; guide rides earn no income."
+                : tab === 'types' ? 'Tap a ride type to break it down by date, then tap a date to see and edit the rides themselves. Blocks are excluded.'
+                : tab === 'lesson' ? 'Every lesson of one type in the period, grouped by rider, with what each of them came to.'
+                : 'Who pays arena fees and what that comes to, so the arena can be paid.'}</p>`;
         const rerun = (range) => {
             state.reportRange = range;
             renderReports();
@@ -5387,7 +5501,21 @@
             const t = document.getElementById('rep-to').value;
             if (f && t) rerun([f, t]);
         });
+        const typeSel = document.getElementById('rep-type');
+        if (typeSel) typeSel.addEventListener('change', () => {
+            state.reportTypeId = typeSel.value;
+            renderReports();
+        });
+        // Every report prints through the same route, so this button needs to
+        // know nothing about which one is on screen.
+        document.getElementById('rep-pdf').addEventListener('click', () => {
+            if (tab === 'lesson' && !state.reportTypeId) {
+                return toast('Pick a lesson type first.', true);
+            }
+            window.open(reportUrl(tab, from, to) + '/pdf?' + reportParams(tab, from, to), '_blank');
+        });
 
+        if (tab === 'lesson' || tab === 'arena') return renderDocReport(tab, from, to);
         if (tab === 'types') return renderRideTypeReport(from, to);
 
         try {
@@ -5443,6 +5571,54 @@
     // Ride types, drilled down three levels: type → dates → the rides themselves.
     // Expanded rows are remembered in state so a save can redraw without
     // collapsing everything the user opened.
+
+    // The report engine names each report once; the page just points at it.
+    const REPORT_NAMES = { horses: 'horse-usage', types: 'ride-types',
+                           lesson: 'lesson-type', arena: 'arena-fees' };
+    const reportUrl = (tab) => `/api/reports/${REPORT_NAMES[tab]}`;
+    const reportParams = (tab, from, to) => `from=${from}&to=${to}`
+        + (tab === 'lesson' ? `&ride_type_id=${state.reportTypeId || ''}` : '');
+
+    // Any report the server can build, drawn as a table. The same document
+    // feeds the PDF, so what is on screen is what prints.
+    async function renderDocReport(tab, from, to) {
+        const $res = document.getElementById('rep-result');
+        if (tab === 'lesson' && !state.reportTypeId) {
+            $res.classList.remove('muted');
+            $res.innerHTML = '<div class="card">Pick a lesson type above.</div>';
+            return;
+        }
+        let doc;
+        try {
+            doc = await api('GET', `${reportUrl(tab)}/data?${reportParams(tab, from, to)}`);
+        } catch (err) { $res.textContent = err.message; return; }
+        $res.classList.remove('muted');
+        const cell = (c, r) => {
+            const v = r[c.key];
+            return v === undefined || v === null || v === '' ? ''
+                : (c.money ? money(v) : esc(String(v)));
+        };
+        const line = (r, cls) => `<tr${cls ? ` class="${cls}"` : ''}>${doc.columns.map((c) =>
+            `<td${c.align === 'right' ? ' class="num"' : ''}>${cell(c, r)}</td>`).join('')}</tr>`;
+        const body = (doc.groups && doc.groups.length)
+            ? doc.groups.map((g) => `
+                <tr class="rep-group"><td colspan="${doc.columns.length}">${esc(g.heading)}</td></tr>
+                ${(g.rows || []).map((r) => line(r)).join('')}
+                ${g.totals ? line(g.totals, 'rep-subtotal') : ''}`).join('')
+            : (doc.rows || []).map((r) => line(r)).join('');
+        $res.innerHTML = (doc.rows && !doc.rows.length) || (doc.groups && !doc.groups.length)
+            ? '<div class="card">Nothing to report for this period.</div>'
+            : `<div class="card">
+                 <table class="rep-table">
+                   <thead><tr>${doc.columns.map((c) =>
+                       `<th${c.align === 'right' ? ' class="num"' : ''}>${esc(c.label)}</th>`).join('')}</tr></thead>
+                   <tbody>${body}</tbody>
+                   ${doc.totals ? `<tfoot>${line(doc.totals, 'rep-total')}</tfoot>` : ''}
+                 </table>
+                 ${doc.note ? `<div class="muted" style="margin-top:8px">${esc(doc.note)}</div>` : ''}
+               </div>`;
+    }
+
     async function renderRideTypeReport(from, to) {
         const $res = document.getElementById('rep-result');
         state.repOpenTypes = state.repOpenTypes || new Set();

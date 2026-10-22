@@ -283,6 +283,29 @@ CREATE UNIQUE INDEX reschedule_credits_one_per_missed_ride
     ON reschedule_credits (contact_id, missed_ride_id)
  WHERE missed_ride_id IS NOT NULL;
 
+-- A rider's own price for a ride type, overriding that type's standard price.
+-- Resolution order for what a seat costs: the seat's own price_cents, then
+-- this, then ride_types.price_cents.
+CREATE TABLE contact_ride_type_prices (
+    id BIGSERIAL PRIMARY KEY,
+    contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    ride_type_id BIGINT NOT NULL REFERENCES ride_types(id) ON DELETE CASCADE,
+    price_cents INT NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+    UNIQUE (contact_id, ride_type_id)
+);
+
+CREATE INDEX contact_ride_type_prices_contact ON contact_ride_type_prices (contact_id);
+
+-- A note for the whole day, written by the scheduler and read by instructors
+-- on the shared schedule. Per-ride instructor_notes cover one lesson; this is
+-- what applies to the day itself. Rows exist only for days that have a note.
+CREATE TABLE day_notes (
+    note_date DATE PRIMARY KEY,
+    note TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by BIGINT REFERENCES users(id) ON DELETE SET NULL
+);
+
 -- Simple to-dos; dated (and optionally timed) ones double as the day's
 -- activities in the calendar's first column. Done items go to the archive.
 CREATE TABLE todos (

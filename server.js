@@ -399,7 +399,14 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                             'description', ch.description, 'amount_cents', ch.amount_cents,
                             'invoiced', EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id))
                             ORDER BY ch.charge_date DESC, ch.id DESC), '[]'::json)
-                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges
+                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges,
+                    (SELECT COALESCE(json_agg(json_build_object(
+                                'ride_type_id', p.ride_type_id::text,
+                                'name', rt.name,
+                                'price_cents', p.price_cents) ORDER BY rt.name), '[]'::json)
+                       FROM contact_ride_type_prices p
+                       JOIN ride_types rt ON rt.id = p.ride_type_id
+                      WHERE p.contact_id = c.id) AS ride_type_prices
                FROM contacts c
                LEFT JOIN contacts p ON p.id = c.parent_id
                LEFT JOIN schools sc ON sc.id = c.school_id
@@ -441,7 +448,14 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
                             'description', ch.description, 'amount_cents', ch.amount_cents,
                             'invoiced', EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id))
                             ORDER BY ch.charge_date DESC, ch.id DESC), '[]'::json)
-                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges
+                       FROM contact_charges ch WHERE ch.contact_id = c.id) AS charges,
+                    (SELECT COALESCE(json_agg(json_build_object(
+                                'ride_type_id', p.ride_type_id::text,
+                                'name', rt.name,
+                                'price_cents', p.price_cents) ORDER BY rt.name), '[]'::json)
+                       FROM contact_ride_type_prices p
+                       JOIN ride_types rt ON rt.id = p.ride_type_id
+                      WHERE p.contact_id = c.id) AS ride_type_prices
                FROM contacts c LEFT JOIN contacts p ON p.id = c.parent_id
               WHERE c.id = $1`, [req.params.id]);
         if (!rows[0]) return res.status(404).json({ error: 'Contact not found.' });
@@ -451,7 +465,7 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
         const rides = await pool.query(
             `SELECT rp.id, r.date, r.start_time, h.name AS horse_name,
                     COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
-                    COALESCE(rp.price_cents, rt.price_cents, 0) AS amount_cents,
+                    ${SEAT_PRICE_SQL()} AS amount_cents,
                     il.invoice_id
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
@@ -505,6 +519,21 @@ async function saveContactExtras(contactId, body) {
                 `INSERT INTO contact_monthly_charges (contact_id, name, price_cents, sort_order)
                  VALUES ($1, $2, $3, $4)`,
                 [contactId, name, Math.round(Number(m.price_cents) || 0), i++]);
+        }
+    }
+    // A rider's own price for a ride type. Full list, same as above: an empty
+    // array means they are back on the standard prices.
+    if (Array.isArray(body.ride_type_prices)) {
+        await pool.query('DELETE FROM contact_ride_type_prices WHERE contact_id = $1', [contactId]);
+        const seen = new Set();
+        for (const r of body.ride_type_prices) {
+            const typeId = String((r || {}).ride_type_id || '');
+            if (!/^\d+$/.test(typeId) || seen.has(typeId)) continue;
+            seen.add(typeId);
+            await pool.query(
+                `INSERT INTO contact_ride_type_prices (contact_id, ride_type_id, price_cents)
+                 VALUES ($1, $2, $3)`,
+                [contactId, typeId, Math.max(0, Math.round(Number(r.price_cents) || 0))]);
         }
     }
     if (Array.isArray(body.horse_prefs)) {
@@ -2453,6 +2482,57 @@ app.delete('/api/rides/:id', requireAuth, async (req, res) => {
     }
 });
 
+// ---------- Day notes ----------
+// What is happening on a given day, written once and read by every instructor.
+app.get('/api/day-notes', requireAuth, async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+            return res.status(400).json({ error: 'Valid from/to dates are required.' });
+        }
+        const { rows } = await pool.query(
+            `SELECT dn.note_date::text AS date, dn.note, dn.updated_at,
+                    u.display_name AS updated_by
+               FROM day_notes dn
+               LEFT JOIN users u ON u.id = dn.updated_by
+              WHERE dn.note_date BETWEEN $1 AND $2 AND dn.note <> ''
+              ORDER BY dn.note_date`, [from, to]);
+        res.json({ notes: rows });
+    } catch (err) {
+        handleError(res, err, 'Loading day notes');
+    }
+});
+
+app.put('/api/day-notes/:date', requireRole('helper'), async (req, res) => {
+    try {
+        if (!DATE_RE.test(req.params.date || '')) {
+            return res.status(400).json({ error: 'A valid date is required.' });
+        }
+        const note = String((req.body || {}).note || '').trim().slice(0, 2000);
+        if (!note) {
+            // Clearing a note removes the row rather than storing an empty one,
+            // so the table only holds days that have something to say.
+            await pool.query('DELETE FROM day_notes WHERE note_date = $1', [req.params.date]);
+            notifyScheduleChanged(req.params.date);
+            return res.json({ ok: true, note: '' });
+        }
+        const { rows } = await pool.query(
+            `INSERT INTO day_notes (note_date, note, updated_at, updated_by)
+             VALUES ($1, $2, now(), $3)
+             ON CONFLICT (note_date) DO UPDATE
+                 SET note = EXCLUDED.note, updated_at = now(), updated_by = EXCLUDED.updated_by
+             RETURNING note, updated_at`,
+            [req.params.date, note, req.user.id]);
+        // Instructors keep the schedule on their phones; a note they cannot see
+        // until they next happen to open it is not much of a note.
+        notifyScheduleChanged(req.params.date);
+        res.json({ ok: true, note: rows[0].note, updated_at: rows[0].updated_at,
+                   updated_by: req.user.display_name || null });
+    } catch (err) {
+        handleError(res, err, 'Saving day note');
+    }
+});
+
 // ---------- Reschedule credits ----------
 app.get('/api/credits', requireAuth, async (req, res) => {
     try {
@@ -2640,12 +2720,261 @@ app.delete('/api/service-contacts/:id', requireRole('helper'), async (req, res) 
     }
 });
 
+// What one seat costs. A rider can have their own standing price for a ride
+// type — a discounted group lesson, a long-standing arrangement — and it beats
+// the type's standard price. A price set on the seat itself still beats both,
+// because that is someone deciding about this one lesson.
+//   rideAlias — the rides alias in scope (for ride_type_id)
+//   fallback  — the standard price to fall back to
+// Requires an alias rp (ride_participants) in scope.
+const SEAT_PRICE_SQL = (rideAlias = 'r', fallback = 'rt.price_cents') => `COALESCE(
+    rp.price_cents,
+    (SELECT crtp.price_cents FROM contact_ride_type_prices crtp
+      WHERE crtp.contact_id = rp.contact_id
+        AND crtp.ride_type_id = ${rideAlias}.ride_type_id),
+    ${fallback}, 0)`;
+
 // ---------- Reports ----------
-// Rides per ride type per horse in a period. A horse "worked" when it carried
-// a booked rider or a guide; open seats and blocked entries don't count.
-// Ride types broken down by day: how many ride slots ran, how many rider seats
-// were filled and what they were worth. The UI rolls this up per type and can
-// drill into a single date.
+//
+// Every report is the same shape — a title, some columns, some rows, maybe a
+// total — so they are built once as data and rendered twice: as JSON for the
+// page and as a PDF for the arena, the accountant or the filing cabinet. A new
+// report is one entry in REPORTS and it can be printed the day it is written.
+//
+// A builder returns:
+//   { title, subtitle, columns: [{key, label, align, money}], rows, totals,
+//     groups: [{ heading, rows, totals }], note }
+// Either rows or groups; groups are for reports that break down per person or
+// per month with a heading over each block.
+
+function reportPeriod(req) {
+    const { from, to } = req.query;
+    if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '') || from > to) {
+        return { error: 'Valid from/to dates are required.' };
+    }
+    if (datesInRange(from, to).length > 366) {
+        return { error: 'Period too large (max 1 year).' };
+    }
+    return { from, to };
+}
+
+// 1. One lesson type, listed per day and per rider, with what it came to.
+async function reportLessonType(req) {
+    const period = reportPeriod(req);
+    if (period.error) return period;
+    const { from, to } = period;
+    if (datesInRange(from, to).length <= 92) await materializeRecurring(from, to);
+    const typeId = String(req.query.ride_type_id || '');
+    if (!/^\d+$/.test(typeId)) return { error: 'Pick a lesson type.' };
+    const { rows: tr } = await pool.query(
+        'SELECT name, price_cents FROM ride_types WHERE id = $1', [typeId]);
+    if (!tr[0]) return { error: 'That lesson type no longer exists.' };
+
+    const { rows } = await pool.query(
+        `SELECT r.date::text AS date, r.start_time, c.name AS rider,
+                ${SEAT_PRICE_SQL()}::int AS cents,
+                payer.name AS payer
+           FROM ride_participants rp
+           JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+           JOIN contacts c ON c.id = rp.contact_id
+           JOIN contacts payer ON payer.id = COALESCE(c.parent_id, c.id)
+           LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+          WHERE r.ride_type_id = $1 AND r.date BETWEEN $2 AND $3
+          ORDER BY r.date, r.start_time, c.name`,
+        [typeId, from, to]);
+
+    // Grouped by rider: the question behind this report is almost always
+    // "how much of this lesson did X do, and what does that come to".
+    const byRider = new Map();
+    for (const r of rows) {
+        if (!byRider.has(r.rider)) byRider.set(r.rider, { payer: r.payer, rows: [], cents: 0 });
+        const g = byRider.get(r.rider);
+        g.rows.push({ date: fmtDay(r.date), time: String(r.start_time).slice(0, 5), amount: r.cents });
+        g.cents += r.cents;
+    }
+    const groups = [...byRider.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([rider, g]) => ({
+            heading: rider + (g.payer && g.payer !== rider ? `  (billed to ${g.payer})` : ''),
+            rows: g.rows,
+            totals: { date: `${g.rows.length} lesson${g.rows.length === 1 ? '' : 's'}`, amount: g.cents }
+        }));
+    return {
+        title: tr[0].name,
+        subtitle: `${fmtDay(from)} to ${fmtDay(to)}`,
+        columns: [
+            { key: 'date', label: 'Date' },
+            { key: 'time', label: 'Time' },
+            { key: 'amount', label: 'Amount', align: 'right', money: true }
+        ],
+        groups,
+        totals: {
+            date: `${rows.length} lesson${rows.length === 1 ? '' : 's'} · ${byRider.size} rider${byRider.size === 1 ? '' : 's'}`,
+            amount: rows.reduce((n, r) => n + r.cents, 0)
+        }
+    };
+}
+
+// 2. Arena fees: who pays them and what that comes to, so the arena can be paid.
+async function reportArenaFees(req) {
+    const period = reportPeriod(req);
+    if (period.error) return period;
+    const { from, to } = period;
+    const feeRow = await pool.query("SELECT value FROM settings WHERE key = 'arena_fee_cents'");
+    const fee = parseInt((feeRow.rows[0] || {}).value, 10) || 0;
+    // The fee falls due once a quarter, so a period covering two quarters owes
+    // it twice — the same rule the invoices use, counted the same way.
+    const quarters = arenaFeeQuarters(from, to);
+    const { rows } = await pool.query(
+        `SELECT c.name, payer.name AS payer
+           FROM contacts c
+           JOIN contacts payer ON payer.id = COALESCE(c.parent_id, c.id)
+          WHERE c.pays_arena_fee AND NOT c.archived
+          ORDER BY c.name`);
+    const each = fee * quarters.length;
+    return {
+        title: 'Arena fees',
+        subtitle: `${fmtDay(from)} to ${fmtDay(to)}`
+            + (quarters.length ? ` · ${quarters.map((q) => `Q${q.quarter} ${q.year}`).join(', ')}` : ''),
+        columns: [
+            { key: 'name', label: 'Rider' },
+            { key: 'payer', label: 'Billed to' },
+            { key: 'amount', label: 'Amount', align: 'right', money: true }
+        ],
+        rows: rows.map((r) => ({ name: r.name, payer: r.payer === r.name ? '' : r.payer, amount: each })),
+        totals: { name: `${rows.length} rider${rows.length === 1 ? '' : 's'}`, amount: each * rows.length },
+        note: !quarters.length
+            ? 'No arena-fee quarter falls in this period, so nothing is due.'
+            : `Charged once a quarter at ${fee ? (fee / 100).toFixed(2) : '0.00'} per rider.`
+    };
+}
+
+// 3 & 4. The two reports the page already had, as printable documents.
+async function reportHorseUsage(req) {
+    const period = reportPeriod(req);
+    if (period.error) return period;
+    const { from, to } = period;
+    if (datesInRange(from, to).length <= 92) await materializeRecurring(from, to);
+    const { rows } = await pool.query(
+        `SELECT h.name AS horse, COALESCE(rt.name, r.ride_type_name, '(no type)') AS type,
+                count(*)::int AS rides, SUM(${SEAT_PRICE_SQL()})::int AS cents
+           FROM ride_participants rp
+           JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+           JOIN horses h ON h.id = rp.horse_id
+           LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+          WHERE r.date BETWEEN $1 AND $2
+          GROUP BY h.name, 2 ORDER BY h.name, 2`, [from, to]);
+    const byHorse = new Map();
+    for (const r of rows) {
+        if (!byHorse.has(r.horse)) byHorse.set(r.horse, { rows: [], rides: 0, cents: 0 });
+        const g = byHorse.get(r.horse);
+        g.rows.push({ type: r.type, rides: r.rides, amount: r.cents });
+        g.rides += r.rides; g.cents += r.cents;
+    }
+    return {
+        title: 'Rides per horse',
+        subtitle: `${fmtDay(from)} to ${fmtDay(to)}`,
+        columns: [
+            { key: 'type', label: 'Ride type' },
+            { key: 'rides', label: 'Rides', align: 'right' },
+            { key: 'amount', label: 'Amount', align: 'right', money: true }
+        ],
+        groups: [...byHorse.entries()].map(([horse, g]) => ({
+            heading: horse, rows: g.rows,
+            totals: { type: `${g.rides} ride${g.rides === 1 ? '' : 's'}`, amount: g.cents }
+        })),
+        totals: {
+            type: `${rows.reduce((n, r) => n + r.rides, 0)} rides`,
+            amount: rows.reduce((n, r) => n + r.cents, 0)
+        }
+    };
+}
+
+async function reportRideTypes(req) {
+    const period = reportPeriod(req);
+    if (period.error) return period;
+    const { from, to } = period;
+    if (datesInRange(from, to).length <= 92) await materializeRecurring(from, to);
+    const { rows } = await pool.query(
+        `WITH ride_rows AS (
+             SELECT r.id, COALESCE(rt.name, r.ride_type_name, '(no type)') AS tname,
+                    COALESCE(r.duration_min, rt.duration_min, 60) AS mins,
+                    r.ride_type_id, rt.price_cents AS type_price
+               FROM rides r LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+              WHERE r.date BETWEEN $1 AND $2 AND r.status = 'active' AND NOT r.is_block
+         ), seat_rows AS (
+             SELECT rr.id, count(rp.id)::int AS seats,
+                    COALESCE(SUM(${SEAT_PRICE_SQL('rr', 'rr.type_price')}), 0)::int AS cents
+               FROM ride_rows rr
+               LEFT JOIN ride_participants rp ON rp.ride_id = rr.id AND rp.contact_id IS NOT NULL
+              GROUP BY rr.id
+         )
+         SELECT rr.tname AS type, count(*)::int AS rides, SUM(s.seats)::int AS seats,
+                SUM(s.cents)::int AS cents, SUM(rr.mins)::int AS mins
+           FROM ride_rows rr JOIN seat_rows s ON s.id = rr.id
+          GROUP BY rr.tname ORDER BY 2 DESC, 1`, [from, to]);
+    return {
+        title: 'Ride types',
+        subtitle: `${fmtDay(from)} to ${fmtDay(to)}`,
+        columns: [
+            { key: 'type', label: 'Ride type' },
+            { key: 'rides', label: 'Rides', align: 'right' },
+            { key: 'seats', label: 'Riders', align: 'right' },
+            { key: 'hours', label: 'Hours', align: 'right' },
+            { key: 'amount', label: 'Amount', align: 'right', money: true }
+        ],
+        rows: rows.map((r) => ({ type: r.type, rides: r.rides, seats: r.seats,
+                                 hours: (r.mins / 60).toFixed(1), amount: r.cents })),
+        totals: {
+            type: 'Total',
+            rides: rows.reduce((n, r) => n + r.rides, 0),
+            seats: rows.reduce((n, r) => n + r.seats, 0),
+            hours: (rows.reduce((n, r) => n + r.mins, 0) / 60).toFixed(1),
+            amount: rows.reduce((n, r) => n + r.cents, 0)
+        }
+    };
+}
+
+const REPORTS = {
+    'lesson-type': reportLessonType,
+    'arena-fees': reportArenaFees,
+    'horse-usage': reportHorseUsage,
+    'ride-types': reportRideTypes
+};
+
+app.get('/api/reports/:name/data', requireAuth, async (req, res) => {
+    try {
+        const build = REPORTS[req.params.name];
+        if (!build) return res.status(404).json({ error: 'No such report.' });
+        const doc = await build(req);
+        if (doc.error) return res.status(400).json({ error: doc.error });
+        res.json(doc);
+    } catch (err) {
+        handleError(res, err, 'Building report');
+    }
+});
+
+// The same document, printed. One route for every report there is or will be.
+app.get('/api/reports/:name/pdf', requireAuth, async (req, res) => {
+    try {
+        const build = REPORTS[req.params.name];
+        if (!build) return res.status(404).json({ error: 'No such report.' });
+        const doc = await build(req);
+        if (doc.error) return res.status(400).json({ error: doc.error });
+        const settings = await loadSettings();
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition',
+            `${req.query.download === '1' ? 'attachment' : 'inline'}; `
+            + `filename="${filenameSafe(doc.title)}-${req.query.from}.pdf"`);
+        const pdf = new PDFDocument({ size: 'A4', margin: 50 });
+        pdf.pipe(res);
+        drawReportPage(pdf, doc, settings);
+        pdf.end();
+    } catch (err) {
+        handleError(res, err, 'Generating report PDF');
+    }
+});
+
 app.get('/api/reports/ride-types', requireAuth, async (req, res) => {
     try {
         const { from, to } = req.query;
@@ -2662,14 +2991,14 @@ app.get('/api/reports/ride-types', requireAuth, async (req, res) => {
                  SELECT r.id, r.date,
                         COALESCE(rt.name, r.ride_type_name, '(no type)') AS tname,
                         COALESCE(r.duration_min, rt.duration_min, 60) AS mins,
-                        rt.price_cents AS type_price
+                        r.ride_type_id, rt.price_cents AS type_price
                    FROM rides r
                    LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
                   WHERE r.date BETWEEN $1 AND $2
                     AND r.status = 'active' AND NOT r.is_block
              ), seat_rows AS (
                  SELECT rr.id, count(rp.id)::int AS seats,
-                        COALESCE(SUM(COALESCE(rp.price_cents, rr.type_price, 0)), 0)::int AS cents
+                        COALESCE(SUM(${SEAT_PRICE_SQL('rr', 'rr.type_price')}), 0)::int AS cents
                    FROM ride_rows rr
                    LEFT JOIN ride_participants rp
                           ON rp.ride_id = rr.id AND rp.contact_id IS NOT NULL
@@ -2708,7 +3037,7 @@ app.get('/api/reports/horse-usage', requireAuth, async (req, res) => {
                     SUM(x.amount_cents)::int AS total_cents
                FROM (
                  SELECT rp.horse_id, COALESCE(rt.name, r.ride_type_name, '(no type)') AS ride_type_name,
-                        COALESCE(rp.price_cents, rt.price_cents, 0) AS amount_cents
+                        ${SEAT_PRICE_SQL()} AS amount_cents
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                    LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
@@ -2855,7 +3184,7 @@ app.get('/api/invoices/advance-outstanding', requireRole('helper'), async (req, 
                         COALESCE(SUM(cents), 0)::int AS total_cents
                    FROM (
                      SELECT rider.id AS rider_id,
-                            COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                            ${SEAT_PRICE_SQL()} AS cents
                        FROM ride_participants rp
                        JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                        JOIN contacts rider ON rider.id = rp.contact_id
@@ -2924,7 +3253,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                      SELECT rp.id, rider.name AS rider_name,
                             COALESCE(rider.parent_id, rider.id) AS payer_id,
                             r.date, r.ride_type_id, r.ride_type_name,
-                            COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                            ${SEAT_PRICE_SQL()} AS cents
                        FROM ride_participants rp
                        JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                        JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
@@ -2994,7 +3323,7 @@ app.get('/api/invoices/cash-overview', requireRole('helper'), async (req, res) =
                  SELECT rp.id, rider.name AS rider_name,
                         COALESCE(rider.parent_id, rider.id) AS payer_id,
                         r.date, r.ride_type_id, r.ride_type_name,
-                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                        ${SEAT_PRICE_SQL()} AS cents
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                    JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
@@ -3044,7 +3373,7 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
                  SELECT rp.id, rider.name AS rider_name,
                         COALESCE(rider.parent_id, rider.id) AS payer_id,
                         r.date, r.ride_type_id, r.ride_type_name,
-                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents,
+                        ${SEAT_PRICE_SQL()} AS cents,
                         (r.date BETWEEN $1 AND $2) AS in_month,
                         (r.date >= $1::date - ${CARRY_BACK}) AS in_reach,
                         payer.payment_terms AS terms,
@@ -3180,7 +3509,7 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
                  SELECT rp.id, rp.contact_id, rider.name AS rider_name,
                         COALESCE(rider.parent_id, rider.id) AS payer_id,
                         r.date, r.ride_type_id, r.ride_type_name,
-                        COALESCE(rp.price_cents, rt.price_cents, 0) AS cents
+                        ${SEAT_PRICE_SQL()} AS cents
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                    JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
@@ -3481,7 +3810,7 @@ async function createInvoiceForContact(contactId, from, to, mode) {
         const { rows: rides } = await client.query(
             `SELECT rp.id, rp.contact_id, c.name AS rider_name, r.date, r.start_time,
                     COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
-                    COALESCE(rp.price_cents, rt.price_cents, 0)::int AS amount_cents
+                    ${SEAT_PRICE_SQL()}::int AS amount_cents
                FROM ride_participants rp
                JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                JOIN contacts c ON c.id = rp.contact_id
@@ -3738,6 +4067,93 @@ function fmtDay(value) {
         // a plain date column has no zone; read it as written
         timeZone: value instanceof Date ? undefined : 'UTC'
     });
+}
+
+// One renderer for every report. Columns are laid out across the page, money
+// right-aligned, group headings in bold with their own subtotal, and a rule
+// above the grand total — the same furniture a reader expects whichever report
+// they are holding.
+function drawReportPage(doc, rep, settings) {
+    const cur = settings.currency || 'R';
+    const money = (cents) => `${cur} ${((cents || 0) / 100).toFixed(2)}`;
+    const left = 50, right = doc.page.width - 50;
+    const cols = rep.columns || [];
+    // The first column takes whatever the fixed-width ones leave.
+    const FIXED = 90;
+    const firstW = right - left - FIXED * Math.max(0, cols.length - 1);
+    const xOf = (i) => i === 0 ? left : left + firstW + FIXED * (i - 1);
+    const wOf = (i) => i === 0 ? firstW - 10 : FIXED - 10;
+
+    doc.fillColor('#000000').fontSize(18).font('Helvetica-Bold')
+        .text(settings.business_name || 'Report', left, 50);
+    doc.fontSize(13).font('Helvetica-Bold').fillColor('#000000').moveDown(0.6).text(rep.title);
+    if (rep.subtitle) doc.fontSize(10).font('Helvetica').fillColor('#555555').text(rep.subtitle);
+    doc.moveDown(0.8);
+
+    const row = (values, opts = {}) => {
+        if (doc.y > doc.page.height - 90) {
+            doc.addPage();
+            doc.y = 50;
+        }
+        const y = doc.y;
+        doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10)
+            .fillColor(opts.muted ? '#555555' : '#000000');
+        // As tall as the tallest cell, so a long name cannot be overdrawn by
+        // the row beneath it.
+        let h = 0;
+        cols.forEach((c, i) => {
+            h = Math.max(h, doc.heightOfString(String(values[i] ?? ''), { width: wOf(i) }));
+        });
+        cols.forEach((c, i) => {
+            doc.text(String(values[i] ?? ''), xOf(i), y,
+                { width: wOf(i), align: i === 0 ? 'left' : (c.align || 'left') });
+        });
+        doc.y = y + h;
+        doc.moveDown(0.35);
+    };
+    const cells = (r) => cols.map((c) => {
+        const v = r[c.key];
+        return v === undefined || v === null || v === '' ? '' : (c.money ? money(v) : v);
+    });
+    const rule = () => {
+        doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
+        doc.moveDown(0.35);
+    };
+
+    row(cols.map((c) => c.label), { bold: true });
+    rule();
+
+    const block = (rows, totals, heading) => {
+        if (heading) {
+            if (doc.y > doc.page.height - 130) doc.addPage();
+            doc.moveDown(0.3);
+            doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000000').text(heading, left, doc.y);
+            doc.moveDown(0.25);
+        }
+        (rows || []).forEach((r) => row(cells(r)));
+        if (totals) row(cells(totals), { bold: true, muted: true });
+    };
+
+    if (rep.groups && rep.groups.length) {
+        rep.groups.forEach((g) => block(g.rows, g.totals, g.heading));
+    } else if (rep.rows && rep.rows.length) {
+        block(rep.rows, null, null);
+    } else {
+        doc.fontSize(10).font('Helvetica').fillColor('#555555')
+            .text('Nothing to report for this period.', left, doc.y);
+        doc.moveDown(0.5);
+    }
+
+    if (rep.totals) {
+        doc.moveDown(0.2);
+        rule();
+        row(cells(rep.totals), { bold: true });
+    }
+    if (rep.note) {
+        doc.moveDown(0.8);
+        doc.fontSize(9.5).font('Helvetica').fillColor('#555555')
+            .text(rep.note, left, doc.y, { width: right - left });
+    }
 }
 
 function drawInvoicePage(doc, inv, lines, settings) {
@@ -4357,12 +4773,17 @@ app.get('/api/public/schedule', async (req, res) => {
             return res.status(400).json({ error: 'Valid from/to dates are required (max 14 days).' });
         }
         const rides = await fetchRides(from, to);
+        const { rows: noteRows } = await pool.query(
+            `SELECT note_date::text AS date, note FROM day_notes
+              WHERE note_date BETWEEN $1 AND $2 AND note <> ''`, [from, to]);
+        const noteByDate = Object.fromEntries(noteRows.map((n) => [n.date, n.note]));
         const { rows: settingRows } = await pool.query(
             "SELECT value FROM settings WHERE key = 'business_name'");
         res.json({
             business_name: (settingRows[0] || {}).value || 'Riding school',
             days: datesInRange(from, to).map((date) => ({
                 date,
+                note: (noteByDate[date] || ''),
                 rides: ((dayRides, clash) => dayRides
                     .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))
                     .map((r) => ({
