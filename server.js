@@ -487,7 +487,7 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
                    LEFT JOIN invoice_lines il ON il.cancellation_id = rc.id
                   WHERE rc.contact_id = $1 AND ${BILLABLE_CANCELLATION_SQL}
              ) q
-              ORDER BY q.date DESC, q.start_time DESC
+              ORDER BY q.date, q.start_time
               LIMIT 200`,
             [req.params.id]);
         const invoices = await pool.query(
