@@ -3815,7 +3815,7 @@
         if (!np || !pick) return;
         np.classList.add('hidden');
         pick.classList.remove('hidden');
-        ['np-name', 'np-email', 'np-address', 'np-terms'].forEach((id) => {
+        ['np-name', 'np-email', 'np-address', 'np-terms', 'np-school'].forEach((id) => {
             const el = document.getElementById(id);
             if (el) el.value = '';
         });
@@ -3898,10 +3898,19 @@
                     const payer = contactById(document.getElementById('ct-parent').value);
                     const school = payer && state.schools.find(
                         (s) => String(s.id) === String(payer.school_id));
+                    const npSchoolSel = inlineParentOpen() && document.getElementById('np-school');
+                    const npSchool = npSchoolSel && state.schools.find(
+                        (sc) => String(sc.id) === String(npSchoolSel.value));
                     document.getElementById('ct-school-inherited-text').innerHTML = school
                         ? `${esc(school.name)} <span class="muted">— from ${esc(payer.name)}</span>`
                         : payer
                         ? `<span class="no-parent">${esc(payer.name)} has no school set</span>`
+                        // A parent being typed in above has no id yet, so there
+                        // is nothing to look up — read their school off the form.
+                        : npSchool
+                        ? `${esc(npSchool.name)} <span class="muted">— from the new parent</span>`
+                        : inlineParentOpen()
+                        ? '<span class="no-parent">set the school on the new parent above</span>'
                         : '<span class="no-parent">pick the parent who pays first</span>';
                 }
             }
@@ -3924,14 +3933,16 @@
         let termsTouched = false;
         termsSel.addEventListener('change', () => { termsTouched = true; sync(); });
         document.getElementById('ct-school').addEventListener('change', sync);
+        const npSchool = document.getElementById('np-school');
+        if (npSchool) npSchool.addEventListener('change', sync);
         paysParent.addEventListener('change', sync);
         document.getElementById('ct-parent').addEventListener('change', sync);
         paysOwn.addEventListener('change', sync);
         rider.addEventListener('change', sync);
         parent.addEventListener('change', sync);
         sync();
-        document.getElementById('ct-add-parent').addEventListener('click', openInlineParent);
-        document.getElementById('ct-np-cancel').addEventListener('click', closeInlineParent);
+        document.getElementById('ct-add-parent').addEventListener('click', () => { openInlineParent(); sync(); });
+        document.getElementById('ct-np-cancel').addEventListener('click', () => { closeInlineParent(); sync(); });
         document.getElementById('ct-add-kid').addEventListener('click', async () => {
             // Save the parent first so the new rider has something to point at
             const saved = await saveContactForm(contact);
@@ -4143,8 +4154,10 @@
         if (inlineParentOpen()) {
             const npName = document.getElementById('np-name').value.trim();
             const npTerms = document.getElementById('np-terms').value;
+            const npSchool = document.getElementById('np-school').value;
             if (!npName) { ctError('The new parent needs a name.'); return null; }
             if (!npTerms) { ctError('Choose how the new parent pays.'); return null; }
+            if (!npSchool) { ctError('Pick the school for the new parent.'); return null; }
             try {
                 const made = await api('POST', '/api/contacts', {
                     name: npName,
@@ -4153,6 +4166,7 @@
                     email: document.getElementById('np-email').value,
                     address: document.getElementById('np-address').value,
                     is_parent: true,
+                    school_id: npSchool,
                     is_rider: document.getElementById('np-also-rides').checked
                 });
                 state.contacts = (await api('GET', '/api/contacts')).contacts;
@@ -4261,6 +4275,14 @@
                     <input id="np-email" type="email">
                     <label>Address (optional)</label>
                     <textarea id="np-address"></textarea>
+                    <label>School <span class="req">*</span></label>
+                    <div class="muted" style="margin:-4px 0 6px">Term dates decide which lessons
+                       are term-time. The riders this parent pays for follow it.</div>
+                    <select id="np-school">
+                        <option value="">(not set)</option>
+                        ${state.schools.filter((sc) => sc.active)
+                            .map((sc) => `<option value="${sc.id}">${esc(sc.name)}</option>`).join('')}
+                    </select>
                     <label>How they pay <span class="req">*</span></label>
                     <select id="np-terms">
                         <option value="">(not assigned)</option>
@@ -4599,10 +4621,12 @@
                 ${data.rides.length ? `<table class="plain">
                     <tr><th>Date</th><th>Time</th><th>Horse</th><th>Type</th><th class="num">Price</th><th></th></tr>
                     ${data.rides.map((r) => `
-                        <tr>
+                        <tr${r.off_kind ? ' class="ride-off"' : ''}>
                             <td><a href="#/calendar/${r.date}">${esc(fmtDay(r.date))}</a></td>
                             <td>${hhmm(r.start_time)}</td>
-                            <td>${esc(r.horse_name)}</td>
+                            <td>${r.off_kind
+                                ? `<span class="muted">${r.off_kind === 'rescheduled' ? '⟳ rescheduled' : '✕ cancelled late'}</span>`
+                                : esc(r.horse_name || '')}</td>
                             <td>${esc(r.ride_type_name || '')}</td>
                             <td class="num">${money(r.amount_cents)}</td>
                             <td>${r.invoice_id ? '🧾' : ''}</td>
@@ -5145,7 +5169,8 @@
             // that payer's outstanding lessons.
             renderOverviewTable(document.getElementById('inv-cash'), cashOv.cash,
                 'No lessons to settle in cash yet.',
-                { from: todayStr(), to: todayStr(), label: 'lessons settled in cash' });
+                { from: todayStr(), to: todayStr(), mode: 'cash',
+                  label: 'lessons settled in cash, with anything else outstanding' });
 
             const $ov = document.getElementById('inv-overview');
             if (!arrears.length) {

@@ -1621,3 +1621,8 @@ body.is-offline .ride-box { opacity: 0.92; }
 .rep-table tr.rep-group td { font-weight: 700; padding-top: 12px; }
 .rep-table tr.rep-subtotal td { color: var(--muted); border-bottom: 1px solid var(--border); }
 .rep-table tfoot tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
+
+/* A lesson the rider was taken off but is still charged for: shown on her page
+   so the invoice can be checked against it, greyed so it is not read as one
+   she rode. */
+.plain tr.ride-off td { color: var(--muted); }

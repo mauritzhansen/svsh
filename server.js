@@ -463,17 +463,31 @@ app.get('/api/contacts/:id', requireAuth, async (req, res) => {
             `SELECT id, name FROM contacts WHERE parent_id = $1 AND NOT archived ORDER BY name`,
             [req.params.id]);
         const rides = await pool.query(
-            `SELECT rp.id, r.date, r.start_time, h.name AS horse_name,
-                    COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
-                    ${SEAT_PRICE_SQL()} AS amount_cents,
-                    il.invoice_id
-               FROM ride_participants rp
-               JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
-               LEFT JOIN horses h ON h.id = rp.horse_id
-               LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-               LEFT JOIN invoice_lines il ON il.participant_id = rp.id
-              WHERE rp.contact_id = $1
-              ORDER BY r.date DESC, r.start_time DESC
+            `SELECT * FROM (
+                 SELECT rp.id, r.date, r.start_time, h.name AS horse_name,
+                        COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
+                        ${SEAT_PRICE_SQL()} AS amount_cents,
+                        il.invoice_id, NULL::text AS off_kind
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
+                   LEFT JOIN horses h ON h.id = rp.horse_id
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                   LEFT JOIN invoice_lines il ON il.participant_id = rp.id
+                  WHERE rp.contact_id = $1
+                 UNION ALL
+                 -- Taken off the day but still owed for. Her record has to show
+                 -- the lesson she is being billed for, or the invoice cannot be
+                 -- checked against her page.
+                 SELECT rc.id, r.date, r.start_time, NULL,
+                        COALESCE(rt.name, r.ride_type_name),
+                        ${CANCELLATION_PRICE_SQL}, il.invoice_id, rc.kind
+                   FROM ride_cancellations rc
+                   JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
+                   LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
+                   LEFT JOIN invoice_lines il ON il.cancellation_id = rc.id
+                  WHERE rc.contact_id = $1 AND ${BILLABLE_CANCELLATION_SQL}
+             ) q
+              ORDER BY q.date DESC, q.start_time DESC
               LIMIT 200`,
             [req.params.id]);
         const invoices = await pool.query(
@@ -2832,9 +2846,20 @@ async function reportArenaFees(req) {
           WHERE c.pays_arena_fee AND NOT c.archived
           ORDER BY c.name`);
     const each = fee * quarters.length;
+    // The fee buys a whole quarter, so the report is headed by the quarter it
+    // covers — 1 Oct to 31 Dec — not by the month that happened to be asked
+    // for. Paying the arena for October alone would misread the amount.
+    const quarterSpan = (q) => {
+        const start = new Date(q.on + 'T00:00:00Z');
+        const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 3, 0));
+        return { start: q.on, end: end.toISOString().slice(0, 10) };
+    };
+    const covered = quarters.length
+        ? `${fmtDay(quarterSpan(quarters[0]).start)} to ${fmtDay(quarterSpan(quarters[quarters.length - 1]).end)}`
+        : `${fmtDay(from)} to ${fmtDay(to)}`;
     return {
         title: 'Arena fees',
-        subtitle: `${fmtDay(from)} to ${fmtDay(to)}`
+        subtitle: covered
             + (quarters.length ? ` · ${quarters.map((q) => `Q${q.quarter} ${q.year}`).join(', ')}` : ''),
         columns: [
             { key: 'name', label: 'Rider' },
@@ -3146,6 +3171,17 @@ const HAS_STANDING_SQL = `(
     EXISTS (SELECT 1 FROM horses h
              WHERE h.owner_contact_id = payer.id AND h.livery_share IS NOT NULL)
     OR EXISTS (SELECT 1 FROM contact_monthly_charges mc WHERE mc.contact_id = payer.id))`;
+
+// A standing charge leaves no row behind on the invoice the way a seat or a
+// one-off expense does, so "have they been billed for this month yet" cannot be
+// asked of the lines. It is asked of the invoice instead: a payer with no
+// lessons who already has an invoice covering this period has been dealt with,
+// and listing them again only invites a second one. Requires the alias payer.
+const STANDING_NOT_YET_INVOICED = `NOT EXISTS (
+    SELECT 1 FROM invoices i
+     WHERE i.contact_id = payer.id
+       AND i.period_start IS NOT NULL AND i.period_end IS NOT NULL
+       AND i.period_start <= $2 AND i.period_end >= $1)`;
 
 // The previous calendar month relative to a date — the window an advance
 // invoice reaches back over. Written once so the term run and the monthly run
@@ -3473,6 +3509,7 @@ app.get('/api/invoices/advance-overview', requireRole('helper'), async (req, res
                 AND payer.payment_terms IN ('advance_monthly', 'advance_term')
                 AND NOT (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL})
                 AND NOT EXISTS (SELECT 1 FROM seats s WHERE s.payer_id = payer.id)
+                AND ${STANDING_NOT_YET_INVOICED}
               ORDER BY 2`,
             [from, to]);
         res.json({ overview: rows, from, to, month });
@@ -3547,6 +3584,7 @@ app.get('/api/invoices/overview', requireRole('helper'), async (req, res) => {
                FROM contacts payer
               WHERE NOT payer.archived AND ${HAS_STANDING_SQL}
                 AND NOT EXISTS (SELECT 1 FROM seats s WHERE s.payer_id = payer.id)
+                AND ${STANDING_NOT_YET_INVOICED}
               ORDER BY 2`,
             [from, to]);
         res.json({ overview: rows, from, to });
@@ -3591,7 +3629,34 @@ function arenaFeeQuarters(from, to) {
             const mStart = new Date(Date.UTC(year, m, 1));
             const mEnd = new Date(Date.UTC(year, m + 1, 0));
             if (mEnd >= start && mStart <= end) {
-                out.push({ year, quarter: m / 3 + 1, on: mStart.toISOString().slice(0, 10) });
+                out.push({ year, quarter: m / 3 + 1, on: mStart.toISOString().slice(0, 10),
+                           // every month of the quarter, so a rider who starts
+                           // partway through can be charged from hers
+                           months: [0, 1, 2].map((i) =>
+                               new Date(Date.UTC(year, m + i, 1)).toISOString().slice(0, 10)),
+                           ends: new Date(Date.UTC(year, m + 3, 0)).toISOString().slice(0, 10) });
+            }
+        }
+    }
+    return out;
+}
+
+// Which quarters a period touches at all, so a rider who starts in the second
+// month of one is still found. (arenaFeeQuarters only reports a quarter when
+// the period reaches its first month, which is when the full fee falls due.)
+function arenaQuartersOverlapping(from, to) {
+    const out = [];
+    const start = new Date(from + 'T00:00:00Z');
+    const end = new Date(to + 'T00:00:00Z');
+    for (let year = start.getUTCFullYear() - 1; year <= end.getUTCFullYear() + 1; year++) {
+        for (const m of [0, 3, 6, 9]) {
+            const qStart = new Date(Date.UTC(year, m, 1));
+            const qEnd = new Date(Date.UTC(year, m + 3, 0));
+            if (qEnd >= start && qStart <= end) {
+                out.push({ year, quarter: m / 3 + 1, on: qStart.toISOString().slice(0, 10),
+                           months: [0, 1, 2].map((i) =>
+                               new Date(Date.UTC(year, m + i, 1)).toISOString().slice(0, 10)),
+                           ends: qEnd.toISOString().slice(0, 10) });
             }
         }
     }
@@ -3743,17 +3808,19 @@ async function monthlyChargeLines(client, payerId, from, to) {
 // Lessons a rider called off too late to be let off paying. The seat is gone,
 // so there is nothing for the ride query to find — these are billed from the
 // cancellation record instead, at what the lesson would have cost.
-async function cancelledLines(client, payerId, from, to, soleRider) {
+async function cancelledLines(client, payerId, from, to, soleRider, mode) {
     const { rows } = await client.query(
         `SELECT rc.id, rc.kind, r.date, c.name AS rider_name,
                 COALESCE(rt.name, r.ride_type_name, 'Ride') AS ride_type_name,
-                COALESCE(rt.price_cents, 0)::int AS amount_cents
+                ${CANCELLATION_PRICE_SQL} AS amount_cents
            FROM ride_cancellations rc
            JOIN rides r ON r.id = rc.ride_id AND r.status = 'active' AND NOT r.is_block
            JOIN contacts c ON c.id = rc.contact_id
+           JOIN contacts rider ON rider.id = rc.contact_id
+           JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
            LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
           WHERE ${BILLABLE_CANCELLATION_SQL} AND COALESCE(c.parent_id, c.id) = $1
-            AND r.date BETWEEN $2 AND $3
+            AND ${PERIOD_FOR_MODE(mode)}
             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
           ORDER BY r.date`, [payerId, from, to]);
     return rows.map((r) => ({
@@ -3766,29 +3833,81 @@ async function cancelledLines(client, payerId, from, to, soleRider) {
     }));
 }
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthLabel = (iso) => MONTH_NAMES[Number(iso.slice(5, 7)) - 1];
+
 async function arenaFeeLines(client, riderIds, from, to, soleRider) {
     const feeRow = await client.query(
         "SELECT value FROM settings WHERE key = 'arena_fee_cents'");
     const cents = parseInt((feeRow.rows[0] || {}).value, 10);
     if (!Number.isInteger(cents) || cents <= 0 || !riderIds.length) return [];
-    const quarters = arenaFeeQuarters(from, to);
+    const quarters = arenaQuartersOverlapping(from, to);
     if (!quarters.length) return [];
     const { rows: payers } = await client.query(
-        'SELECT id, name FROM contacts WHERE id = ANY($1::bigint[]) AND pays_arena_fee',
+        `SELECT c.id, c.name,
+                (SELECT min(r.date)::text
+                   FROM ride_participants rp
+                   JOIN rides r ON r.id = rp.ride_id
+                        AND r.status = 'active' AND NOT r.is_block
+                  WHERE rp.contact_id = c.id) AS first_ride
+           FROM contacts c
+          WHERE c.id = ANY($1::bigint[]) AND c.pays_arena_fee`,
         [riderIds]);
+    const perMonth = Math.round(cents / 3);
     const lines = [];
     for (const r of payers) {
         for (const q of quarters) {
+            // A rider pays from the month of her first lesson. Before that the
+            // arena is nothing to do with her; a quarter she rode none of is
+            // not hers to pay for.
+            const startedAfter = r.first_ride && r.first_ride > q.ends;
+            if (startedAfter) continue;
+            const firstMonth = r.first_ride && r.first_ride.slice(0, 7) > q.on.slice(0, 7)
+                ? r.first_ride.slice(0, 7) : q.on.slice(0, 7);
+            const owedMonths = q.months.filter((m) => m.slice(0, 7) >= firstMonth);
+            if (!owedMonths.length) continue;
+            // Billed once, on the invoice covering the first month she owes —
+            // the whole quarter up front for someone who was already riding,
+            // the remainder for someone who joined partway through.
+            const dueOn = owedMonths[0];
+            if (dueOn < from || dueOn > to) continue;
+            const whole = owedMonths.length === 3;
             lines.push({
                 section: EXTRAS_SECTION,
-                description: `${soleRider ? '' : r.name + ' — '}Arena fee Q${q.quarter} ${q.year}`,
-                ride_date: q.on,
-                amount_cents: cents
+                description: `${soleRider ? '' : r.name + ' — '}Arena fee Q${q.quarter} ${q.year}`
+                    + (whole ? '' : ` (${owedMonths.length === 1 ? monthLabel(owedMonths[0])
+                        : `${monthLabel(owedMonths[0])}–${monthLabel(owedMonths[owedMonths.length - 1])}`}, `
+                        + `${owedMonths.length} of 3 months)`),
+                ride_date: dueOn,
+                amount_cents: whole ? cents : perMonth * owedMonths.length
             });
         }
     }
     return lines;
 }
+
+// What a cancelled-but-billable lesson costs. Same ladder as a seat minus the
+// seat itself: the rider's own rate for the type, then the standard price.
+// Requires aliases rc (ride_cancellations), r (rides) and rt (ride_types).
+const CANCELLATION_PRICE_SQL = `COALESCE(
+    (SELECT crtp.price_cents FROM contact_ride_type_prices crtp
+      WHERE crtp.contact_id = rc.contact_id
+        AND crtp.ride_type_id = r.ride_type_id),
+    rt.price_cents, 0)::int`;
+
+// Which dates an invoice reaches, by mode. The seats and the billable
+// cancellations have to agree on this: when they did not, a payer whose only
+// unbilled item was a cancellation carried over from last month was offered in
+// the overview and then refused with "no uninvoiced rides".
+// Requires aliases r (rides) and payer (contacts).
+const PERIOD_FOR_MODE = (mode) => mode === 'advance_month'
+    ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})
+        OR (r.date >= $2 AND r.date <= $3 AND ${IN_TERM_SQL}
+            AND payer.payment_terms = 'advance_monthly'))`
+    : mode === 'term'
+    ? `(r.date BETWEEN $2 AND $3 OR ${PREV_MONTH_SQL('$2')})`
+    : 'r.date BETWEEN $2 AND $3';
 
 // mode 'advance_month' bills the month-ahead rule (term lessons of the coming
 // month + everything unbilled from before it). Anything else bills the plain
@@ -3819,20 +3938,7 @@ async function createInvoiceForContact(contactId, from, to, mode) {
                LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
               WHERE COALESCE(c.parent_id, c.id) = $1
                 AND NOT c.archived
-                AND ${mode === 'advance_month'
-                    // Last month's unbilled lessons for anyone on advance
-                    // billing, plus the coming month's term lessons for the
-                    // monthly payers only — a per-term payer has those on their
-                    // term invoice, so taking them here would bill them twice.
-                    ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})
-                        OR (r.date >= $2 AND r.date <= $3 AND ${IN_TERM_SQL}
-                            AND payer.payment_terms = 'advance_monthly'))`
-                    : mode === 'term'
-                    // The term ahead, plus anything left unbilled from the month
-                    // before it started — so a per-term customer gets one
-                    // invoice in a term month, not a term one and a monthly one.
-                    ? `(r.date BETWEEN $2 AND $3 OR ${PREV_MONTH_SQL('$2')})`
-                    : 'r.date BETWEEN $2 AND $3'}
+                AND ${PERIOD_FOR_MODE(mode)}
                 AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                 AND ${NOT_MAKEUP_SQL}
                 AND ${NOT_PASS_COVERED_SQL}
@@ -3845,8 +3951,13 @@ async function createInvoiceForContact(contactId, from, to, mode) {
             .concat(await monthlyChargeLines(client, payerId, from, to));
         const soleRiderGuess = rides.length
             && new Set(rides.map((r) => String(r.contact_id))).size === 1;
-        const charges = await chargeLines(client, payerId, to, soleRiderGuess);
-        const lateCancels = await cancelledLines(client, payerId, from, to, soleRiderGuess);
+        // Cash is a bucket, not a period: the rider settles up on the day, so
+        // "outstanding" means everything owed by now — not only what happened
+        // to fall on or before their last lesson. An expense added after that
+        // lesson would otherwise sit unbilled until they next rode.
+        const chargesTo = mode === 'cash' ? todayISO() : to;
+        const charges = await chargeLines(client, payerId, chargesTo, soleRiderGuess);
+        const lateCancels = await cancelledLines(client, payerId, from, to, soleRiderGuess, mode);
         if (!rides.length && !livery.length && !charges.length && !lateCancels.length) {
             await client.query('ROLLBACK');
             return null;
