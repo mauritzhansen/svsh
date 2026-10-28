@@ -1333,7 +1333,9 @@
                     <span class="rider-name">${esc(c.contact_name)}</span>
                     <span class="rider-off">${c.kind === 'rescheduled'
                         ? '⟳ rescheduled'
-                        : (c.from_series ? '✕ off the weekly ride' : '✕ cancelled')}</span>
+                        : c.from_series ? '✕ off the weekly ride'
+                        : c.billed ? '✕ cancelled — still charged'
+                        : '✕ cancelled — not charged'}</span>
                 </div>`).join('');
             riderRows += (r.off_riders || []).map((o) => `
                 <div class="rider-row off-rider">
@@ -2104,6 +2106,8 @@
                     <option value="weekly" ${freq === 'biweekly' ? '' : 'selected'}>Every week</option>
                     <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
                 </select>
+                <button type="button" class="secondary small pr-anchor hidden"
+                        title="They are riding this week instead — count the fortnight from here, so next week is the off week">↺ from this week</button>
                 ${withResched ? `<button type="button" class="secondary small row-resched" title="Can't make it — give a reschedule credit">${ICON_ROTATE}</button>` : ''}
                 <button type="button" class="danger small row-x">${ICON_X}</button>
             </div>`;
@@ -2414,6 +2418,14 @@
             }
             const partSel = row.querySelector('.pr-contact');
             if (partSel) partSel.dataset.prev = partSel.value;
+            const anchorBtn = row.querySelector('.pr-anchor');
+            if (anchorBtn) anchorBtn.addEventListener('click', () => {
+                const on = row.dataset.reanchor === '1';
+                if (on) delete row.dataset.reanchor; else row.dataset.reanchor = '1';
+                anchorBtn.classList.toggle('is-on', !on);
+                anchorBtn.textContent = on ? '↺ from this week' : '↺ restarting here';
+                markDirty();
+            });
             const altToggle = row.querySelector('.pr-alt-toggle');
             if (altToggle) altToggle.addEventListener('click', () => {
                 row.querySelector('.pr-alt').classList.toggle('hidden');
@@ -2562,8 +2574,14 @@
         const repeatBox = document.getElementById('ride-repeat');
         const repeats = () => !!repeatBox && repeatBox.value === 'repeats';
         const syncFreqVisibility = () => {
-            $dialog.querySelectorAll('.pr-freq').forEach((s) =>
-                s.classList.toggle('hidden', !repeats()));
+            $dialog.querySelectorAll('[data-kind="part"]').forEach((row) => {
+                const freq = row.querySelector('.pr-freq');
+                const anchor = row.querySelector('.pr-anchor');
+                if (freq) freq.classList.toggle('hidden', !repeats());
+                // Only a fortnightly rider has a fortnight to restart.
+                if (anchor) anchor.classList.toggle('hidden',
+                    !repeats() || !freq || freq.value !== 'biweekly' || row.classList.contains('removed'));
+            });
         };
         if (repeatBox) repeatBox.addEventListener('change', syncFreqVisibility);
         syncFreqVisibility();
@@ -2687,7 +2705,8 @@
                 const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('removed')).map((row) => ({
                     contact_id: row.querySelector('.pr-contact').value || null,
-                    frequency: row.querySelector('.pr-freq').value
+                    frequency: row.querySelector('.pr-freq').value,
+                    reanchor: row.dataset.reanchor === '1'
                 })).filter((p) => p.contact_id);
                 const targetId = isEdit ? ride.id : savedId;
                 if (box && targetId) {

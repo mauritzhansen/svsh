@@ -2345,13 +2345,19 @@ app.put('/api/rides/:id/repeat-riders', requireRole('helper'), async (req, res) 
         await client.query('BEGIN');
         for (const p of wanted) {
             const frequency = p.frequency === 'biweekly' ? 'biweekly' : 'weekly';
+            // Which week of the fortnight they ride is decided by the anchor.
+            // Normally it is left alone — moving it would silently shift every
+            // week that follows. "Restart from this week" is the deliberate
+            // version of that: the rider swaps to the other week, usually
+            // because they came on an off week and want to carry on from here.
             const { rowCount } = await client.query(
                 `UPDATE recurring_participants
                     SET frequency = $3,
-                        biweekly_anchor = CASE WHEN $3 = 'biweekly'
-                            THEN COALESCE(biweekly_anchor, $4::date) ELSE NULL END
+                        biweekly_anchor = CASE WHEN $3 <> 'biweekly' THEN NULL
+                            WHEN $5 THEN $4::date
+                            ELSE COALESCE(biweekly_anchor, $4::date) END
                   WHERE recurring_id = $1 AND contact_id = $2`,
-                [ride.recurring_id, p.contact_id, frequency, ride.date]);
+                [ride.recurring_id, p.contact_id, frequency, ride.date, !!p.reanchor]);
             if (!rowCount) {
                 await client.query(
                     `INSERT INTO recurring_participants (recurring_id, contact_id, frequency, biweekly_anchor, start_date)

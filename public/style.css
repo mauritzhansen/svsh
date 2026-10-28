@@ -1626,3 +1626,9 @@ body.is-offline .ride-box { opacity: 0.92; }
    so the invoice can be checked against it, greyed so it is not read as one
    she rode. */
 .plain tr.ride-off td { color: var(--muted); }
+
+/* "Restart the fortnight here" — armed, but nothing is written until Save, so
+   it has to look obviously pressed while it waits. */
+.pr-anchor.is-on {
+    background: var(--green); border-color: var(--green); color: #fff; font-weight: 600;
+}
