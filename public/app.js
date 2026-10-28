@@ -2328,6 +2328,48 @@
                 : `✕ ${name}not riding this week — not charged`;
         }
 
+        // Shown but not on the ride: the save ignores anything that is not
+        // data-kind="part", so the row is inert until she joins.
+        function markOffWeek(row, o) {
+            row.setAttribute('data-kind', 'off');
+            row.classList.add('off-week');
+            row.querySelectorAll('select').forEach((sel) => { sel.disabled = true; });
+            row.querySelectorAll('.row-x, .row-resched, .pr-alt-toggle, .pr-anchor')
+                .forEach((b) => { b.style.display = 'none'; });
+            const tag = document.createElement('span');
+            tag.className = 'removed-tag';
+            tag.textContent = `every 2nd week — off this week${o.next_date ? ', next ' + shortDate(o.next_date) : ''}`;
+            row.appendChild(tag);
+            const join = document.createElement('button');
+            join.type = 'button';
+            join.className = 'secondary small pr-join';
+            join.textContent = '↺ Riding this week instead';
+            join.title = 'Put her on this ride and count the fortnight from here — next week becomes the off week';
+            row.appendChild(join);
+            join.addEventListener('click', () => {
+                // Becomes an ordinary seat, fortnightly, re-anchored to today.
+                row.setAttribute('data-kind', 'part');
+                row.classList.remove('off-week');
+                row.querySelectorAll('select').forEach((sel) => { sel.disabled = false; });
+                row.querySelectorAll('.row-x, .row-resched, .pr-alt-toggle')
+                    .forEach((b) => { b.style.display = ''; });
+                tag.remove();
+                join.remove();
+                const freq = row.querySelector('.pr-freq');
+                if (freq) freq.value = 'biweekly';
+                row.dataset.reanchor = '1';
+                const anchor = row.querySelector('.pr-anchor');
+                if (anchor) {
+                    anchor.style.display = '';
+                    anchor.classList.add('is-on');
+                    anchor.textContent = '↺ restarting here';
+                }
+                refreshOptions();
+                syncFreqVisibility();
+                markDirty();
+            });
+        }
+
         function unmarkRemoved(row) {
             row.classList.remove('removed');
             delete row.dataset.removeScope;
@@ -2540,6 +2582,18 @@
                 // the row's own X is already the undo (see wireRow)
                 markRemoved(row, c.from_series ? 'series' : 'week', c.kind, c.billed);
             });
+            // A fortnightly rider on her off week has no seat, so she had no
+            // row — and the one time "restart the fortnight from this week"
+            // is needed is exactly when she turns up on her off week. Offer
+            // her greyed out, with that as the single action.
+            const offNow = new Set([...riding, ...(ride.cancellations || []).map((c) => String(c.contact_id))]);
+            (ride.off_riders || [])
+                .filter((o) => o.frequency === 'biweekly' && !offNow.has(String(o.contact_id)))
+                .forEach((o) => {
+                    addRow('ride-parts', participantRowHtml(
+                        { contact_id: o.contact_id, horse_id: null }, isEdit, 'biweekly'));
+                    markOffWeek(document.getElementById('ride-parts').lastElementChild, o);
+                });
         }
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
         document.getElementById('part-add').addEventListener('click', () =>

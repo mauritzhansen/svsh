@@ -2315,12 +2315,16 @@ async function syncSeriesCadence(client, recurringId) {
                 // day, and the series must not quietly overrule it: without
                 // this the seat comes straight back, leaving the rider on the
                 // ride AND struck off it at the same time.
+                // A seat that is there already (she was put on by hand before
+                // the fortnight was restarted around her) is the series' seat
+                // from now on, so later cadence changes manage it too.
                 await client.query(
                     `INSERT INTO ride_participants (ride_id, contact_id, from_recurring)
                      SELECT $1, $2, true
                       WHERE NOT EXISTS (SELECT 1 FROM ride_cancellations rc
                                          WHERE rc.ride_id = $1 AND rc.contact_id = $2)
-                     ON CONFLICT (ride_id, contact_id) DO NOTHING`, [r.id, p.contact_id]);
+                     ON CONFLICT (ride_id, contact_id) DO UPDATE SET from_recurring = true`,
+                    [r.id, p.contact_id]);
             } else {
                 await client.query(
                     `DELETE FROM ride_participants rp
@@ -3877,7 +3881,10 @@ async function arenaFeeLines(client, riderIds, from, to, soleRider) {
             // the whole quarter up front for someone who was already riding,
             // the remainder for someone who joined partway through.
             const dueOn = owedMonths[0];
-            if (dueOn < from || dueOn > to) continue;
+            // By MONTH, not by date: a term invoice starts mid-month (13 Oct)
+            // and must still carry the fee that fell due on the 1st.
+            const ym = (d) => d.slice(0, 7);
+            if (ym(dueOn) < ym(from) || ym(dueOn) > ym(to)) continue;
             const whole = owedMonths.length === 3;
             lines.push({
                 section: EXTRAS_SECTION,

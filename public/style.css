@@ -1632,3 +1632,8 @@ body.is-offline .ride-box { opacity: 0.92; }
 .pr-anchor.is-on {
     background: var(--green); border-color: var(--green); color: #fff; font-weight: 600;
 }
+
+/* A fortnightly rider on her off week: listed so the fortnight can be restarted
+   around her, but greyed and inert until "Riding this week instead" is tapped. */
+.pick-row.off-week select { opacity: 0.55; }
+.pick-row.off-week .removed-tag { color: var(--muted); }
