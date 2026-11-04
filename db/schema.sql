@@ -237,11 +237,12 @@ CREATE INDEX idx_ride_guides_ride ON ride_guides(ride_id);
 
 CREATE TABLE invoices (
     id BIGSERIAL PRIMARY KEY,
-    number TEXT UNIQUE NOT NULL,
+    number TEXT UNIQUE NOT NULL, -- INV-<year>-<n>, from invoice_counters
     contact_id BIGINT NOT NULL REFERENCES contacts(id),
     period_start DATE,
     period_end DATE,
-    -- 'monthly' = after the fact (rides that happened); 'advance' = up front (term pass)
+    -- 'monthly' = after the fact (arrears, cash); 'advance' = billed ahead of
+    -- the period (the month-ahead and per-term runs)
     kind TEXT NOT NULL DEFAULT 'monthly' CHECK (kind IN ('monthly', 'advance')),
     -- Invoices are per rider, billed to the payer (parent) in contact_id
     rider_contact_id BIGINT REFERENCES contacts(id) ON DELETE SET NULL,
@@ -263,7 +264,22 @@ CREATE TABLE invoice_lines (
     section TEXT,
     description TEXT NOT NULL,
     ride_date DATE,
-    amount_cents INT NOT NULL DEFAULT 0
+    amount_cents INT NOT NULL DEFAULT 0,
+    -- What a standing line bills, for lines with no row of their own to point
+    -- at: "livery:<horse>:<YYYY-MM>:base", "monthly:<charge>:<YYYY-MM>",
+    -- "arena:<rider>:<year>-Q<n>". Unique, so a month cannot be billed twice.
+    -- NULL on lesson/expense lines (they link by id) and on older lines.
+    source_key TEXT
+);
+
+CREATE UNIQUE INDEX invoice_lines_source_key
+    ON invoice_lines (source_key) WHERE source_key IS NOT NULL;
+
+-- Invoice numbers only ever go up: one counter per year, bumped under a row
+-- lock, never rewound when a draft is deleted.
+CREATE TABLE invoice_counters (
+    year INT PRIMARY KEY,
+    last INT NOT NULL DEFAULT 0
 );
 
 -- A "right to a new ride", granted when a rider couldn't make a booked ride
@@ -380,8 +396,14 @@ CREATE TABLE contact_charges (
     charge_date DATE NOT NULL,
     description TEXT NOT NULL,
     amount_cents INT NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Set on a refund raised because an invoiced rider was cancelled without
+    -- charge: the refund belongs to that invoice and goes when it is deleted.
+    source_invoice_id BIGINT REFERENCES invoices(id) ON DELETE CASCADE
 );
+
+CREATE INDEX contact_charges_source_invoice
+    ON contact_charges (source_invoice_id) WHERE source_invoice_id IS NOT NULL;
 
 
 -- Riders taken off a ride, kept rather than deleted so the day still shows what
@@ -390,12 +412,15 @@ CREATE TABLE ride_cancellations (
     id BIGSERIAL PRIMARY KEY,
     ride_id BIGINT NOT NULL REFERENCES rides(id) ON DELETE CASCADE,
     contact_id BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('cancelled', 'rescheduled')),
+    -- 'moved': went to another lesson that day; the seat travelled with its
+    -- invoice line and credit, this row just marks the lesson they left
+    kind TEXT NOT NULL CHECK (kind IN ('cancelled', 'rescheduled', 'moved')),
     from_series BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (ride_id, contact_id),
     -- a late cancellation that is still charged for
-    billed BOOLEAN NOT NULL DEFAULT false
+    billed BOOLEAN NOT NULL DEFAULT false,
+    moved_to_ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL
 );
 
 -- Declared here rather than inline: invoice_lines is defined before

@@ -1627,13 +1627,28 @@ body.is-offline .ride-box { opacity: 0.92; }
    she rode. */
 .plain tr.ride-off td { color: var(--muted); }
 
-/* "Restart the fortnight here" — armed, but nothing is written until Save, so
-   it has to look obviously pressed while it waits. */
+/* The fortnight picker — a restart is armed but nothing is written until
+   Save, so it has to look obviously set while it waits. */
+.pick-row .pr-anchor { flex: 0 0 auto; width: auto; }
 .pr-anchor.is-on {
     background: var(--green); border-color: var(--green); color: #fff; font-weight: 600;
 }
 
 /* A fortnightly rider on her off week: listed so the fortnight can be restarted
    around her, but greyed and inert until "Riding this week instead" is tapped. */
+/* Same wrap as .removed, for the same reason (see .pick-row.removed above):
+   without it the full-width tag squeezes the selects and the join button to
+   nothing, and the row reads as two empty boxes with no name. */
+.pick-row.off-week { background: #f6f6f2; border-radius: 8px; flex-wrap: wrap; }
 .pick-row.off-week select { opacity: 0.55; }
 .pick-row.off-week .removed-tag { color: var(--muted); }
+.pick-row.off-week .pr-join { flex: 0 0 auto; }
+
+/* A make-up seat: paid for by the day that was missed, never charged again */
+.rider-makeup { font-size: 11px; font-weight: 600; color: #5b4ab8; background: #e8e2f5; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.pick-row .rider-makeup { flex: 0 0 auto; }
+
+/* The lessons a reschedule credit is making up for, in the picker */
+.missed-list { background: #fff8e6; border: 1px solid #f0dfa6; border-radius: 8px; padding: 8px 10px; margin: 0 0 12px; }
+.missed-item { font-size: 13.5px; font-weight: 600; color: #7a5300; }
+.missed-item::before { content: '✕ '; color: #c08a1c; }

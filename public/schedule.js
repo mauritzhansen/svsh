@@ -93,7 +93,8 @@
         riderRows += (r.cancellations || []).map((c) => `
             <div class="rider-row off-rider ${c.kind}">
                 <span class="rider-name">${esc(c.name)}</span>
-                <span class="rider-off">${c.kind === 'rescheduled' ? '⟳ rescheduled' : '✕ cancelled'}</span>
+                <span class="rider-off">${c.kind === 'rescheduled' ? '⟳ rescheduled'
+                    : c.kind === 'moved' ? `→ moved to the ${esc(c.moved_to_time || 'other')} ride` : '✕ cancelled'}</span>
             </div>`).join('');
         riderRows += (r.off_riders || []).map((o) => `
             <div class="rider-row off-rider">

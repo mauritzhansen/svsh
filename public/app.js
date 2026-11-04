@@ -1079,13 +1079,21 @@
 
     // Pick one of the day's rides to put a rescheduled rider on
     function openReschedulePicker(credit, date, dayRides) {
-        const candidates = dayRides.filter((r) => !r.is_block && !r.all_day && !r.invoiced &&
+        // A ride with an invoiced rider on it is still fine: the make-up seat
+        // is never invoiced itself, so the others' billing does not matter.
+        const candidates = dayRides.filter((r) => !r.is_block && !r.all_day &&
             !r.participants.some((p) => String(p.contact_id) === String(credit.contact_id)));
         openDialog(`
             <h2>⟳ Reschedule ${esc(credit.name)}</h2>
             <p class="muted">${credit.count} open reschedule ride${credit.count === 1 ? '' : 's'}.
                Pick a ride on ${esc(fmtDate(date))} to add ${esc(credit.name)} to —
                the credit is only used when you save the ride.</p>
+            <div class="missed-list">
+                <div class="muted" style="font-size:12px;margin-bottom:2px">Making up for:</div>
+                ${(credit.missed || []).map((m) => `<div class="missed-item">${m.date
+                    ? `${esc(fmtDay(m.date))} at ${hhmm(m.start_time)}${m.ride_type_name ? ' · ' + esc(m.ride_type_name) : ''}`
+                    : `a lesson (date not recorded${m.note ? ': ' + esc(m.note) : ''})`}</div>`).join('')}
+            </div>
             ${candidates.length ? candidates.map((r) => `
                 <div class="list-item" data-pick-ride="${r.id}">
                     <span class="legend-chip" style="background:color-mix(in srgb, ${rideColor(r)} 26%, white);border:1px solid ${rideColor(r)}"></span>
@@ -1309,6 +1317,7 @@
                 riderRows = riders.map((p) => `
                     <div class="rider-row">
                         <span class="rider-name">${esc(p.contact_name)}</span>
+                        ${p.credit_used ? '<span class="rider-makeup" title="Make-up lesson — paid for by the day that was missed, not charged again">⟳ make-up</span>' : ''}
                         ${p.horse_name
                             ? `<button class="rider-horse has" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">${esc(p.horse_name)}</button>`
                             : `<button class="rider-horse none" data-seat-ride="${r.id}" data-seat-contact="${p.contact_id}">no horse yet</button>`}
@@ -1333,6 +1342,7 @@
                     <span class="rider-name">${esc(c.contact_name)}</span>
                     <span class="rider-off">${c.kind === 'rescheduled'
                         ? '⟳ rescheduled'
+                        : c.kind === 'moved' ? `→ moved to the ${esc(hhmm(c.moved_to_time) || 'other')} ride`
                         : c.from_series ? '✕ off the weekly ride'
                         : c.billed ? '✕ cancelled — still charged'
                         : '✕ cancelled — not charged'}</span>
@@ -1534,11 +1544,55 @@
     }
 
     // Reverse picker: which horse does this rider get?
+    // The full PUT body for a ride as the calendar holds it, with one thing
+    // changed. The grid's pickers used to post only the fields they knew
+    // about, and the server filled in the rest with defaults: the venue went
+    // back to "instructor decides", the instructor notes and alternative
+    // horses were lost, and — worst — an empty cancellations list deleted
+    // every rider taken off that day, credits included. Assigning a horse
+    // silently un-rescheduled everyone else on the lesson.
+    function ridePayload(ride, overrides) {
+        return {
+            date: ride.date,
+            start_time: hhmm(ride.start_time),
+            duration_min: ride.duration_min,
+            ride_type_id: ride.ride_type_id,
+            is_block: ride.is_block,
+            all_day: ride.all_day,
+            level: ride.level,
+            venue: ride.venue || 'instructor',
+            notes: ride.notes || '',
+            instructor_notes: ride.instructor_notes || '',
+            participants: ride.participants.map((p) => ({
+                horse_id: p.horse_id, alt_horse_id: p.alt_horse_id, contact_id: p.contact_id
+            })),
+            guides: ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id })),
+            cancellations: (ride.cancellations || []).map((c) => ({
+                contact_id: c.contact_id, kind: c.kind, from_series: c.from_series, billed: c.billed,
+                to_ride_id: c.moved_to_ride_id || null
+            })),
+            ...(overrides || {})
+        };
+    }
+
+    // Take one horse off every seat and instructor on a ride (payload form).
+    function withoutHorse(ride, horseId) {
+        return ridePayload(ride, {
+            participants: ride.participants.map((p) => ({
+                horse_id: String(p.horse_id) === String(horseId) ? null : p.horse_id,
+                alt_horse_id: String(p.alt_horse_id) === String(horseId) ? null : p.alt_horse_id,
+                contact_id: p.contact_id
+            })).filter((p) => p.contact_id || p.horse_id),
+            guides: ride.guides.map((g) => String(g.horse_id) === String(horseId)
+                ? { guide_id: g.guide_id, mode: 'foot', horse_id: null }
+                : { guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id })
+        });
+    }
+
+    // Horses can be changed on an invoiced ride — the invoice prices the
+    // lesson, not the horse — so the grid no longer refuses the whole ride
+    // because one rider on it has been billed.
     function openRiderHorseDialog(ride, seat, date, dayRides) {
-        if (ride.invoiced) {
-            toast('This ride is already invoiced and cannot be changed.', true);
-            return;
-        }
         const busy = busyAt(dayRides, hhmm(ride.start_time), ride.id, ride.duration_min || 60).horses;
         // Horses already used inside this ride are taken too
         ride.participants.forEach((p) => {
@@ -1587,30 +1641,10 @@
             const clash = horseId ? horseUsedBy(dayRides, ride, horseId) : null;
             if (clash) {
                 const hName = (activeHorses().find((h) => String(h.id) === String(horseId)) || {}).name || 'That horse';
-                if (clash.invoiced) {
-                    dialogError(`${hName} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
-                    return;
-                }
                 if (!await askConfirm(`${hName} is already booked`, `${hName} is on ${rideLabel(clash)}.`,
                     'Move it to this ride', 'it comes off the other ride')) return;
                 try {
-                    await api('PUT', `/api/rides/${clash.id}`, {
-                        date: clash.date,
-                        start_time: hhmm(clash.start_time),
-                        duration_min: clash.duration_min,
-                        ride_type_id: clash.ride_type_id,
-                        is_block: clash.is_block,
-                        all_day: clash.all_day,
-                        level: clash.level,
-                        notes: clash.notes || '',
-                        participants: clash.participants.map((p) => ({
-                            horse_id: String(p.horse_id) === String(horseId) ? null : p.horse_id,
-                            contact_id: p.contact_id
-                        })).filter((p) => p.contact_id || p.horse_id),
-                        guides: clash.guides.map((g) => String(g.horse_id) === String(horseId)
-                            ? { guide_id: g.guide_id, mode: 'foot', horse_id: null }
-                            : { guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id })
-                    });
+                    await api('PUT', `/api/rides/${clash.id}`, withoutHorse(clash, horseId));
                 } catch (err) {
                     dialogError(`Could not free that horse: ${err.message}`);
                     return;
@@ -1618,20 +1652,13 @@
             }
             const parts = ride.participants.map((p) => ({
                 horse_id: String(p.contact_id) === String(seat.contact_id) ? horseId : p.horse_id,
+                alt_horse_id: p.alt_horse_id,
                 contact_id: p.contact_id
             }));
             try {
-                await api('PUT', `/api/rides/${ride.id}`, {
-                    date: ride.date,
-                    start_time: hhmm(ride.start_time),
-                    duration_min: ride.duration_min,
-                    ride_type_id: ride.ride_type_id,
-                    is_block: ride.is_block,
-                    level: ride.level,
-                    notes: ride.notes || '',
-                    participants: parts.filter((p) => p.contact_id || p.horse_id),
-                    guides: ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
-                });
+                await api('PUT', `/api/rides/${ride.id}`, ridePayload(ride, {
+                    participants: parts.filter((p) => p.contact_id || p.horse_id)
+                }));
                 closeDialog();
                 renderCalendar();
             } catch (err) {
@@ -1670,10 +1697,6 @@
 
     // Small picker: who on this ride gets this horse?
     function openHorseAssignDialog(ride, horse, date, dayRides) {
-        if (ride.invoiced) {
-            toast('This ride is already invoiced and cannot be changed.', true);
-            return;
-        }
         const color = rideColor(ride);
         const riders = ride.participants.filter((p) => p.contact_id);
         const current = ride.participants.find((p) => String(p.horse_id) === String(horse.id));
@@ -1725,52 +1748,24 @@
             // If the horse is on another overlapping ride, offer to move it
             const clash = horseUsedBy(dayRides, ride, horse.id);
             if (clash) {
-                if (clash.invoiced) {
-                    dialogError(`${horse.name} is on ${rideLabel(clash)}, which is already invoiced and cannot be changed.`);
-                    return;
-                }
                 if (!await askConfirm(`${horse.name} is already booked`, `${horse.name} is on ${rideLabel(clash)}.`,
                     'Move to this ride', 'it comes off the other ride')) return;
-                const otherParts = clash.participants.map((p) => ({
-                    horse_id: String(p.horse_id) === String(horse.id) ? null : p.horse_id,
-                    contact_id: p.contact_id
-                })).filter((p) => p.contact_id || p.horse_id);
-                const otherGuides = clash.guides.map((g) => String(g.horse_id) === String(horse.id)
-                    ? { guide_id: g.guide_id, mode: 'foot', horse_id: null }
-                    : { guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id });
                 try {
-                    await api('PUT', `/api/rides/${clash.id}`, {
-                        date: clash.date,
-                        start_time: hhmm(clash.start_time),
-                        duration_min: clash.duration_min,
-                        ride_type_id: clash.ride_type_id,
-                        is_block: clash.is_block,
-                        all_day: clash.all_day,
-                        level: clash.level,
-                        notes: clash.notes || '',
-                        participants: otherParts,
-                        guides: otherGuides
-                    });
+                    await api('PUT', `/api/rides/${clash.id}`, withoutHorse(clash, horse.id));
                 } catch (err) {
                     dialogError(`Could not free ${horse.name}: ${err.message}`);
                     return;
                 }
             }
-            const parts = ride.participants.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id }));
+            const parts = ride.participants.map((p) => ({
+                horse_id: p.horse_id, alt_horse_id: p.alt_horse_id, contact_id: p.contact_id }));
             const guides = ride.guides.map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }));
             mutate(parts, guides);
             try {
-                await api('PUT', `/api/rides/${ride.id}`, {
-                    date: ride.date,
-                    start_time: hhmm(ride.start_time),
-                    duration_min: ride.duration_min,
-                    ride_type_id: ride.ride_type_id,
-                    is_block: ride.is_block,
-                    level: ride.level,
-                    notes: ride.notes || '',
+                await api('PUT', `/api/rides/${ride.id}`, ridePayload(ride, {
                     participants: parts.filter((p) => p.contact_id || p.horse_id),
                     guides
-                });
+                }));
                 closeDialog();
                 renderCalendar();
             } catch (err) {
@@ -1827,8 +1822,6 @@
         const involved = dayRides.filter((r) => !(r.is_block && r.all_day) &&
             (r.participants.some((p) => String(p.horse_id) === String(horse.id)) ||
              r.guides.some((g) => String(g.horse_id) === String(horse.id))));
-        const anyInvoiced = involved.some((r) => r.invoiced);
-
         const rows = involved.map((r) => {
             const time = hhmm(r.start_time);
             const part = r.participants.find((p) => String(p.horse_id) === String(horse.id));
@@ -1837,10 +1830,10 @@
                 : part ? (part.contact_name || 'Open seat')
                 : gd ? `${gd.guide_name} (instructor)` : '';
             const label = `${time} · ${who}${r.ride_type_name ? ' · ' + r.ride_type_name : ''}`;
-            if (r.invoiced) {
-                return `<div class="pick-row"><div style="flex:2">${esc(label)}</div>
-                        <div class="muted" style="flex:1">🧾 invoiced — cannot move</div></div>`;
-            }
+            // An invoiced rider keeps their place on the day — the horse can
+            // change, the seat cannot go — so for that seat the only offer is
+            // another horse.
+            const seatInvoiced = !!(part && part.invoiced);
             const taken = busyAt(dayRides, time, null, r.duration_min || 60).horses;
             const seatPrefs = part && part.contact_id ? prefsFor(part.contact_id) : null;
             const prefMark = (h) => !seatPrefs ? ''
@@ -1851,10 +1844,10 @@
                 ? (r.participants.length > 1 ? '✕ Remove rider from this ride' : '✕ Cancel this ride')
                 : '✕ Remove instructor from this ride';
             return `<div class="pick-row" data-move-ride="${r.id}">
-                    <div style="flex:2">${esc(label)}</div>
+                    <div style="flex:2">${esc(label)}${seatInvoiced ? ' <span class="muted">🧾 invoiced</span>' : ''}</div>
                     <select class="mv-horse" style="flex:1">
                         ${free.map((h) => `<option value="${h.id}">→ ${prefMark(h)}${esc(h.name)}</option>`).join('')}
-                        <option value="__cancel">${cancelLabel}</option>
+                        ${seatInvoiced ? '' : `<option value="__cancel">${cancelLabel}</option>`}
                     </select>
                 </div>`;
         }).join('');
@@ -1893,14 +1886,10 @@
             <div class="form-error"></div>
             <div class="form-actions">
                 <button class="secondary" id="bk-cancel">Cancel</button>
-                ${anyInvoiced ? '' : `<button id="bk-save">Block ${esc(horse.name)}</button>`}
+                <button id="bk-save">Block ${esc(horse.name)}</button>
             </div>`);
         document.getElementById('bk-close').addEventListener('click', closeDialog);
         document.getElementById('bk-cancel').addEventListener('click', closeDialog);
-        if (anyInvoiced) {
-            dialogError('Some rides that day are already invoiced and cannot be moved, so this horse cannot be blocked then.');
-            return;
-        }
         const modeSel = document.getElementById('bk-mode');
         const syncMode = () => {
             const part = modeSel.value === 'part';
@@ -1923,31 +1912,30 @@
                 for (const row of $dialog.querySelectorAll('[data-move-ride]')) {
                     const choice = row.querySelector('.mv-horse').value;
                     const r = involved.find((x) => String(x.id) === row.getAttribute('data-move-ride'));
-                    const base = {
-                        date: r.date, start_time: hhmm(r.start_time), duration_min: r.duration_min,
-                        ride_type_id: r.ride_type_id, is_block: r.is_block, level: r.level, notes: r.notes || ''
-                    };
                     if (choice === '__cancel') {
                         const others = r.participants.filter((p) => String(p.horse_id) !== String(horse.id));
-                        if (!others.length) await api('DELETE', `/api/rides/${r.id}?scope=one`);
-                        else await api('PUT', `/api/rides/${r.id}`, {
-                            ...base,
-                            participants: others.map((p) => ({ horse_id: p.horse_id, contact_id: p.contact_id })),
-                            guides: r.guides.filter((g) => String(g.horse_id) !== String(horse.id))
-                                .map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
-                        });
+                        if (!others.length && !(r.cancellations || []).length) {
+                            await api('DELETE', `/api/rides/${r.id}?scope=one`);
+                        } else {
+                            await api('PUT', `/api/rides/${r.id}`, ridePayload(r, {
+                                participants: others.map((p) => ({
+                                    horse_id: p.horse_id, alt_horse_id: p.alt_horse_id, contact_id: p.contact_id })),
+                                guides: r.guides.filter((g) => String(g.horse_id) !== String(horse.id))
+                                    .map((g) => ({ guide_id: g.guide_id, mode: g.mode, horse_id: g.horse_id }))
+                            }));
+                        }
                     } else {
-                        await api('PUT', `/api/rides/${r.id}`, {
-                            ...base,
+                        await api('PUT', `/api/rides/${r.id}`, ridePayload(r, {
                             participants: r.participants.map((p) => ({
                                 horse_id: String(p.horse_id) === String(horse.id) ? choice : p.horse_id,
+                                alt_horse_id: p.alt_horse_id,
                                 contact_id: p.contact_id
                             })),
                             guides: r.guides.map((g) => ({
                                 guide_id: g.guide_id, mode: g.mode,
                                 horse_id: String(g.horse_id) === String(horse.id) ? choice : g.horse_id
                             }))
-                        });
+                        }));
                     }
                 }
                 const body = { from, to };
@@ -2092,10 +2080,16 @@
             { placeholder: '(no alternative)', markInUse: true });
     }
 
+    // freq: 'weekly' | 'biweekly' — on the series at that cadence — or 'once':
+    // on this day only. On a weekly ride a rider added for the day stays a
+    // one-day rider unless someone says otherwise; they used to be swept into
+    // the series by the save.
     function participantRowHtml(p, withResched, freq) {
+        const makeup = !!(p && p.credit_used);
         return `
             <div class="pick-row" data-kind="part"${p && p.invoiced
-                ? ` data-invoiced="1" data-invoiced-cents="${p.invoiced_cents || 0}"` : ''}>
+                ? ` data-invoiced="1" data-invoiced-cents="${p.invoiced_cents || 0}"` : ''}${makeup ? ' data-makeup="1"' : ''}>
+                ${makeup ? '<span class="rider-makeup" title="Make-up lesson — paid for by the day that was missed, not charged again">⟳ make-up</span>' : ''}
                 <select class="pr-contact">${contactOptions(p ? p.contact_id : null, '(no rider — horse only)', null, true, true)}</select>
                 <select class="pr-horse">${partHorseOptions(p ? p.horse_id : null, null, p ? p.contact_id : null)}</select>
                 <button type="button" class="secondary small pr-alt-toggle" title="Offer an alternative horse">alt</button>
@@ -2103,11 +2097,15 @@
                     ${altHorseOptions(p ? p.alt_horse_id : null, null, p ? p.contact_id : null)}
                 </select>
                 <select class="pr-freq hidden" title="How often this rider comes">
-                    <option value="weekly" ${freq === 'biweekly' ? '' : 'selected'}>Every week</option>
+                    <option value="weekly" ${freq === 'biweekly' || freq === 'once' ? '' : 'selected'}>Every week</option>
                     <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
+                    <option value="once" ${freq === 'once' ? 'selected' : ''}>This day only</option>
                 </select>
-                <button type="button" class="secondary small pr-anchor hidden"
-                        title="They are riding this week instead — count the fortnight from here, so next week is the off week">↺ from this week</button>
+                <select class="pr-anchor hidden" title="Which week of the fortnight is this lesson? Leave as is, or restart the count from here">
+                    <option value="">Fortnight as is</option>
+                    <option value="on">↺ On week starts here</option>
+                    <option value="off">↺ Off week starts here</option>
+                </select>
                 ${withResched ? `<button type="button" class="secondary small row-resched" title="Can't make it — give a reschedule credit">${ICON_ROTATE}</button>` : ''}
                 <button type="button" class="danger small row-x">${ICON_X}</button>
             </div>`;
@@ -2321,6 +2319,8 @@
             const name = who ? `${who.name} — ` : '';
             tag.textContent = kind === 'rescheduled'
                 ? `⟳ ${name}rescheduled, gets a credit`
+                : kind === 'moved'
+                ? `→ ${name}moving to the ${row.dataset.moveToLabel || 'other'} ride — nothing changes for billing`
                 : scope === 'series'
                 ? `✕ ${name}removed from the weekly schedule`
                 : row.dataset.removeBilled === '1'
@@ -2357,13 +2357,8 @@
                 join.remove();
                 const freq = row.querySelector('.pr-freq');
                 if (freq) freq.value = 'biweekly';
-                row.dataset.reanchor = '1';
                 const anchor = row.querySelector('.pr-anchor');
-                if (anchor) {
-                    anchor.style.display = '';
-                    anchor.classList.add('is-on');
-                    anchor.textContent = '↺ restarting here';
-                }
+                if (anchor) { anchor.style.display = ''; anchor.value = 'on'; }
                 refreshOptions();
                 syncFreqVisibility();
                 markDirty();
@@ -2375,6 +2370,8 @@
             delete row.dataset.removeScope;
             delete row.dataset.removeKind;
             delete row.dataset.removeBilled;
+            delete row.dataset.moveTo;
+            delete row.dataset.moveToLabel;
             row.querySelectorAll('select').forEach((s) => { s.disabled = false; });
             const x = row.querySelector('.row-x');
             x.innerHTML = ICON_X;
@@ -2416,6 +2413,21 @@
                 // that rather than assume. Reschedule-with-credit is the ⟳
                 // button; these two are the ways a lesson simply does not happen.
                 const name = (contactById(cid) || {}).name || 'this rider';
+                // A make-up seat was paid for by the lesson that was missed,
+                // so taking it off the day charges nothing either way. The
+                // one real choice is ⟳, which hands the rider a fresh credit.
+                if (row.dataset.makeup === '1') {
+                    const choice = await askChoice(`Remove ${name}`,
+                        'This is a make-up lesson, already paid for by the day that was missed.', [
+                            { key: 'free', label: 'Not riding — nothing more is charged',
+                              hint: 'the make-up is forfeited; use ⟳ instead to give them another credit' }
+                        ]);
+                    if (!choice) return;
+                    markRemoved(row, 'week', 'cancelled', false);
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
                 const billedAlready = row.dataset.invoiced === '1';
                 const rowAmount = Number(row.dataset.invoicedCents || 0);
                 const options = [
@@ -2428,6 +2440,15 @@
                         : { key: 'free', label: 'Cancelled — do not charge',
                             hint: 'taken off the day, nothing owed' }
                 ];
+                // Another lesson the same day: the seat simply moves, with its
+                // invoice line and credit, so nothing about the money changes.
+                const moveTargets = isEdit ? dayRides.filter((r) => !r.is_block && !r.all_day
+                    && String(r.id) !== String(ride.id) && r.status !== 'cancelled'
+                    && !r.participants.some((p) => String(p.contact_id) === String(cid))) : [];
+                if (moveTargets.length) {
+                    options.push({ key: 'move', label: 'Move to another lesson today',
+                                   hint: 'same day, nothing changes for invoicing or credits' });
+                }
                 if (isEdit && ride.recurring_id) {
                     options.push({ key: 'series', label: 'Remove from the weekly schedule',
                                    hint: billedAlready
@@ -2437,6 +2458,22 @@
                 const choice = await askChoice(`Remove ${name}`,
                     isEdit && ride.recurring_id ? 'They are on the weekly fixed ride.' : '', options);
                 if (!choice) return;
+                if (choice === 'move') {
+                    const target = await askChoice(`Move ${name} to…`, `Lessons on ${fmtDay(defaults.date)}:`,
+                        moveTargets.map((r) => ({
+                            key: String(r.id),
+                            label: `${hhmm(r.start_time)}${r.ride_type_name ? ' · ' + r.ride_type_name : ''}`,
+                            hint: r.participants.filter((p) => p.contact_name).map((p) => shortName(p.contact_name)).join(', ') || 'no riders yet'
+                        })));
+                    if (!target) return;
+                    const t = moveTargets.find((r) => String(r.id) === target);
+                    row.dataset.moveTo = target;
+                    row.dataset.moveToLabel = hhmm(t.start_time);
+                    markRemoved(row, 'week', 'moved', false);
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
                 const scope = choice === 'series' ? 'series' : 'week';
                 // Nothing is saved yet — it is shown struck through so it can be
                 // undone before saving, and so she can see what she has done.
@@ -2460,13 +2497,19 @@
             }
             const partSel = row.querySelector('.pr-contact');
             if (partSel) partSel.dataset.prev = partSel.value;
-            const anchorBtn = row.querySelector('.pr-anchor');
-            if (anchorBtn) anchorBtn.addEventListener('click', () => {
-                const on = row.dataset.reanchor === '1';
-                if (on) delete row.dataset.reanchor; else row.dataset.reanchor = '1';
-                anchorBtn.classList.toggle('is-on', !on);
-                anchorBtn.textContent = on ? '↺ from this week' : '↺ restarting here';
-                markDirty();
+            // The fortnight picker: "off week starts here" takes the rider off
+            // this lesson when it is saved, so say so where it is picked.
+            const anchorSel = row.querySelector('.pr-anchor');
+            if (anchorSel) anchorSel.addEventListener('change', () => {
+                anchorSel.classList.toggle('is-on', !!anchorSel.value);
+                if (anchorSel.value === 'off') {
+                    const who = contactById((row.querySelector('.pr-contact') || {}).value);
+                    dialogError(`${(who && who.name) || 'This rider'} will come off this lesson when you save — `
+                        + 'it becomes their off week, and they ride next week.');
+                } else {
+                    const err = $dialog.querySelector('.form-error');
+                    if (err) err.textContent = '';
+                }
             });
             const altToggle = row.querySelector('.pr-alt-toggle');
             if (altToggle) altToggle.addEventListener('click', () => {
@@ -2568,8 +2611,15 @@
                 if (p.frequency) seriesFreq[String(p.contact_id)] = p.frequency;
             });
         }
+        // On an existing weekly ride, a rider the template does not know is
+        // here for the day only. On a new ride everyone starts weekly, so
+        // ticking "repeats" makes the whole group the series.
+        const onSeries = isEdit && !!ride.recurring_id;
+        const rowFreq = (cid) => (onSeries ? (seriesFreq[String(cid)] || 'once') : 'weekly');
         parts.forEach((p) => addRow('ride-parts',
-            participantRowHtml(p, isEdit, seriesFreq[String(p.contact_id)])));
+            participantRowHtml(p, isEdit,
+                defaults.addContactId && String(p.contact_id) === String(defaults.addContactId)
+                    ? 'once' : rowFreq(p.contact_id))));
         // 3a: riders taken off earlier come back as struck-through rows, so the
         // day still shows what happened and they can be put back.
         if (isEdit) {
@@ -2579,8 +2629,20 @@
                     { contact_id: c.contact_id, horse_id: null }, isEdit,
                     seriesFreq[String(c.contact_id)]));
                 const row = document.getElementById('ride-parts').lastElementChild;
+                if (c.kind === 'moved') {
+                    row.dataset.moveTo = c.moved_to_ride_id || '';
+                    row.dataset.moveToLabel = hhmm(c.moved_to_time) || 'other';
+                }
                 // the row's own X is already the undo (see wireRow)
                 markRemoved(row, c.from_series ? 'series' : 'week', c.kind, c.billed);
+                // A saved move is undone from the lesson they went to, by
+                // moving them back; their seat lives there now.
+                if (c.kind === 'moved') {
+                    row.querySelector('.removed-tag').textContent =
+                        `→ ${c.contact_name} — moved to the ${hhmm(c.moved_to_time) || 'other'} ride (move them back from there)`;
+                    const x = row.querySelector('.row-x');
+                    if (x) x.style.display = 'none';
+                }
             });
             // A fortnightly rider on her off week has no seat, so she had no
             // row — and the one time "restart the fortnight from this week"
@@ -2596,8 +2658,12 @@
                 });
         }
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
-        document.getElementById('part-add').addEventListener('click', () =>
-            addRow('ride-parts', participantRowHtml(null, isEdit)));
+        document.getElementById('part-add').addEventListener('click', () => {
+            addRow('ride-parts', participantRowHtml(null, isEdit, onSeries ? 'once' : 'weekly'));
+            // show the cadence box at once: on a weekly ride the new row
+            // starts as "this day only", and that has to be visible to change
+            syncFreqVisibility();
+        });
         document.getElementById('guide-add').addEventListener('click', () =>
             addRow('ride-guides', guideRowHtml(null)));
         document.getElementById('ride-cancel').addEventListener('click', closeDialog);
@@ -2692,6 +2758,23 @@
                 return dialogError('Say whether this is a once-off ride or a weekly one.');
             }
             const credits = reschedRows();
+            const partRows = [...$dialog.querySelectorAll('[data-kind="part"]')]
+                .filter((row) => !row.classList.contains('removed'));
+            // Who belongs to the weekly series, and who is leaving it. Riders
+            // marked "this day only" are left out, so a make-up or an extra
+            // booking never becomes a weekly rider by accident. A rider who
+            // WAS on the series and is now "this day only" leaves it from
+            // here on, as does one struck off with "remove from the weekly
+            // schedule".
+            const seriesRiders = partRows.map((row) => ({
+                contact_id: row.querySelector('.pr-contact').value || null,
+                frequency: row.querySelector('.pr-freq').value,
+                anchor: (row.querySelector('.pr-anchor') || {}).value || null
+            })).filter((p) => p.contact_id && p.frequency !== 'once');
+            const leaving = partRows
+                .filter((row) => row.querySelector('.pr-freq').value === 'once'
+                    && seriesFreq[String(row.querySelector('.pr-contact').value)])
+                .map((row) => row.querySelector('.pr-contact').value);
             const body = {
                 date: defaults.date,
                 start_time: document.getElementById('ride-time').value,
@@ -2707,7 +2790,8 @@
                         contact_id: row.querySelector('.pr-contact').value,
                         kind: row.dataset.removeKind || 'cancelled',
                         from_series: row.dataset.removeScope === 'series',
-                        billed: row.dataset.removeBilled === '1'
+                        billed: row.dataset.removeBilled === '1',
+                        to_ride_id: row.dataset.moveTo || null
                     })).filter((c) => c.contact_id),
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('removed'))
@@ -2723,7 +2807,19 @@
                         mode,
                         horse_id: mode === 'horse' ? (row.querySelector('.gr-horse').value || null) : null
                     };
-                }).filter((g) => g.guide_id)
+                }).filter((g) => g.guide_id),
+                // the credit a make-up rider is using, spent with the seat it pays for
+                use_credit_contact_id: isEdit && defaults.addContactId ? defaults.addContactId : null,
+                series: {
+                    repeat: document.getElementById('ride-repeat').value,
+                    riders: seriesRiders,
+                    leave: [...new Set([
+                        ...leaving,
+                        ...[...$dialog.querySelectorAll('[data-kind="part"].removed')]
+                            .filter((row) => row.dataset.removeScope === 'series')
+                            .map((row) => row.querySelector('.pr-contact').value)
+                    ].filter(Boolean))]
+                }
             };
             // Only the ride's own settings can apply to the whole series. Taking a
             // rider off already asked its own week/series question, so asking
@@ -2740,36 +2836,14 @@
                 body.apply_scope = scope;
             }
             try {
-                let savedId = isEdit ? ride.id : null;
+                // The ride, the credit and the series go in one request, so a
+                // failure leaves nothing half-saved.
                 let typedSiblings = 0, seriesRides = 0;
                 if (isEdit) {
                     const res = await api('PUT', `/api/rides/${ride.id}`, body);
                     typedSiblings = res.typed_siblings || 0;
                     seriesRides = res.series_rides || 0;
-                } else savedId = (await api('POST', '/api/rides', body)).ride_id;
-                if (isEdit && defaults.addContactId) {
-                    await api('POST', '/api/credits/consume', {
-                        contact_id: defaults.addContactId, ride_id: ride.id
-                    });
-                }
-                for (const c of body.cancellations.filter((x) => x.from_series)) {
-                    await api('DELETE', `/api/rides/${ride.id}/repeat-riders/${c.contact_id}`);
-                }
-                const box = document.getElementById('ride-repeat');
-                const freqs = [...$dialog.querySelectorAll('[data-kind="part"]')]
-                    .filter((row) => !row.classList.contains('removed')).map((row) => ({
-                    contact_id: row.querySelector('.pr-contact').value || null,
-                    frequency: row.querySelector('.pr-freq').value,
-                    reanchor: row.dataset.reanchor === '1'
-                })).filter((p) => p.contact_id);
-                const targetId = isEdit ? ride.id : savedId;
-                if (box && targetId) {
-                    const wants = box.value === 'repeats';
-                    const has = isEdit && !!ride.recurring_id;
-                    if (wants && !has) await api('POST', `/api/rides/${targetId}/repeat`, { participants: freqs });
-                    else if (wants && has) await api('PUT', `/api/rides/${targetId}/repeat-riders`, { participants: freqs });
-                    else if (!wants && has) await api('POST', `/api/rides/${targetId}/stop-repeat`, {});
-                }
+                } else await api('POST', '/api/rides', body);
                 closeDialog();
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
@@ -4722,7 +4796,7 @@
                         <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
                            target="_blank" rel="noopener" title="Open in a new tab">View</a>
                         <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
-                           download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
+                           download title="Save the PDF to this device">⬇ PDF</a>
                     </div>`).join('') : (c.parent_id ? '' : '<div class="card muted">No invoices yet. They are created automatically after each month.</div>')}` : ''}`;
             document.getElementById('cd-edit').addEventListener('click', () => openContactDialog(c));
         } catch (err) {
@@ -4781,16 +4855,16 @@
                     <td>${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count || (hasStanding(row) ? standingCell(row) : 0)}${row.carried_over
+                    <td class="num">${row.ride_count || (row.charge_count ? chargesCell(row) : hasStanding(row) ? standingCell(row) : 0)}${row.carried_over
                         ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
                         ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}${row.older_unbilled
                         ? ` <span class="older-flag" title="No invoice created for ${missedMonths(row).join(', ')}. ${row.older_unbilled} unbilled lesson${row.older_unbilled === 1 ? '' : 's'} there (earliest ${fmtDay(row.older_from)}) — older than the one-month carry-over, so not on this invoice. Bill these with a custom date range.">⏳${row.older_unbilled}</span>` : ''}</td>
-                    <td class="num">${row.ride_count || !hasStanding(row)
+                    <td class="num">${row.ride_count || row.charge_count || !hasStanding(row)
                         ? money(row.total_cents) : '<span class="muted">—</span>'}</td>
                     <td class="num">${!row.payment_terms
                         ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
                         // A livery-only customer has no lessons but is still billable
-                        : (row.ride_count || hasStanding(row))
+                        : (row.ride_count || row.charge_count || hasStanding(row))
                         ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}"
                                    data-inv-missed="${esc(missedMonths(row).join('|'))}"
                                    ${row.first_date ? `data-inv-from="${row.first_date}"` : ''}
@@ -4856,6 +4930,10 @@
     }
 
     const standingCell = (row) => `<span class="standing-tag" title="${esc(standingLabel(row))}">standing</span>`;
+    // No lessons, but an expense or a discount waiting to be settled.
+    const chargesCell = (row) => `<span class="standing-tag" title="No lessons — ${row.charge_count} expense${
+        row.charge_count === 1 ? '' : 's'} or discount${row.charge_count === 1 ? '' : 's'} outstanding">${
+        row.charge_count} expense${row.charge_count === 1 ? '' : 's'}</span>`;
 
     function missedMonths(row) {
         return (row.older_months || []).map((m) => monthLabel(m.month));
@@ -4916,6 +4994,15 @@
     // WhatsApp cannot be handed a file by a link — only text. So do the tedious
     // half automatically: fetch the PDF so it lands in Downloads, then open the
     // chat with the message already written. The user attaches and sends.
+    // "3 rides", or for a livery or expenses-only invoice "2 items" — the
+    // list used to say "0 rides · R2,700" because it counted lesson lines only.
+    function invoiceCountLabel(inv) {
+        const n = inv.ride_count || 0;
+        if (n) return `${n} ride${n === 1 ? '' : 's'}`;
+        const m = inv.line_count || 0;
+        return `${m} item${m === 1 ? '' : 's'}`;
+    }
+
     // One created-invoice row. Extracted so a freshly created invoice can be
     // slipped into the list without re-rendering (and re-scrolling) the page.
     function invoiceRowHtml(inv) {
@@ -4925,7 +5012,7 @@
                     ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
                 <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${
                     esc(fmtDay(inv.period_start))} – ${esc(fmtDay(inv.period_end))} · ${
-                    inv.line_count} ride${inv.line_count === 1 ? '' : 's'} · ${money(inv.total_cents)}</div>
+                    invoiceCountLabel(inv)} · ${money(inv.total_cents)}</div>
             </div>
             <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
                 ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
@@ -4933,7 +5020,7 @@
             <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
                target="_blank" rel="noopener" title="Open in a new tab">View</a>
             <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
-               download="${esc(inv.number)}.pdf" title="Save the PDF to this device">⬇ PDF</a>
+               download title="Save the PDF to this device">⬇ PDF</a>
             ${waNumber(inv.contact_phone)
                 ? `<button class="secondary small" data-inv-wa="${inv.id}">💬 Send</button>`
                 : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
@@ -4982,7 +5069,7 @@
         const overlay = openSubDialog(`
             <h3 style="margin:0 0 4px">${esc(inv.number)} created</h3>
             <p class="muted" style="margin:0 0 12px">${esc(inv.contact_name)} ·
-                ${inv.line_count} ride${inv.line_count === 1 ? '' : 's'}${
+                ${invoiceCountLabel(inv)}${
                 riderCount > 1 ? ` for ${riderCount} riders` : ''} · <b>${money(inv.total_cents)}</b></p>
             <label>Status</label>
             <select id="ic-status">
@@ -4991,7 +5078,7 @@
             <div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
                 ${waNumber(inv.contact_phone) ? '<button id="ic-send">💬 Send now</button>' : ''}
                 <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
-                   download="${esc(inv.number)}.pdf">⬇ PDF</a>
+                   download>⬇ PDF</a>
                 <span class="spacer"></span>
                 <button class="secondary" id="ic-close">Close</button>
             </div>`);
@@ -5039,7 +5126,7 @@
             <ol class="wa-steps">
                 <li><b>Save the PDF</b> to this device.
                     <div><a class="btn secondary small" id="wa-dl" href="${esc(o.fileUrl)}"
-                            download="${esc(o.fileName)}">⬇ ${esc(o.fileName)}</a></div></li>
+                            download>⬇ ${esc(o.fileName)}</a></div></li>
                 <li><b>Open the chat</b> — the message is written for you.
                     <div><a class="btn small" id="wa-open" target="_blank" rel="noopener"
                             href="https://wa.me/${esc(o.number)}?text=${encodeURIComponent(o.text)}">💬 Open WhatsApp</a></div></li>
