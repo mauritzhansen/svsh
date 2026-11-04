@@ -1902,18 +1902,20 @@ async function replaceCancellations(client, rideId, cancellations) {
 async function syncRescheduleCredits(client, rideId, cancellations) {
     const owed = (cancellations || []).filter((c) => c.kind === 'rescheduled')
         .map((c) => String(c.contact_id));
-    // Undoing a reschedule takes the credit back — unless it has been spent,
-    // in which case the make-up ride already exists and must keep its cover.
-    await client.query(
-        `DELETE FROM reschedule_credits
-          WHERE missed_ride_id = $1 AND used_ride_id IS NULL
-            AND NOT (contact_id = ANY($2::bigint[]))`,
-        [rideId, owed]);
-    if (!owed.length) return;
     const { rows: ride } = await client.query(
         'SELECT date::text AS date, start_time FROM rides WHERE id = $1', [rideId]);
     const note = ride[0]
         ? `Missed ride on ${ride[0].date} at ${String(ride[0].start_time).slice(0, 5)}` : 'Missed ride';
+    // Undoing a reschedule takes the credit back — unless it has been spent,
+    // in which case the make-up ride already exists and must keep its cover.
+    // A credit from before the link to the ride existed is known by its note.
+    await client.query(
+        `DELETE FROM reschedule_credits
+          WHERE (missed_ride_id = $1 OR (missed_ride_id IS NULL AND note = $3))
+            AND used_ride_id IS NULL
+            AND NOT (contact_id = ANY($2::bigint[]))`,
+        [rideId, owed, note]);
+    if (!owed.length) return;
     for (const contactId of owed) {
         await client.query(
             `INSERT INTO reschedule_credits (contact_id, note, missed_ride_id)
@@ -2382,6 +2384,36 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                 'UPDATE ride_participants SET horse_id = $2, alt_horse_id = $3 WHERE id = $1',
                 [seat.id, p.horse_id || null, p.alt_horse_id || null]);
         }
+        // Undoing the removal of an invoiced rider. Their cancellation holds
+        // the invoice line, so it could not simply be deleted above and the
+        // rider ended up both on the ride and struck off it. Hand the line
+        // back to the new seat, then the cancellation (and its credit, and an
+        // unbilled refund it raised) can go — the reverse of taking them off.
+        const { rows: undone } = await client.query(
+            `SELECT rc.id, rc.contact_id, rc.kind, rc.billed, rp.id AS seat_id, il.id AS line_id, il.invoice_id
+               FROM ride_cancellations rc
+               JOIN ride_participants rp ON rp.ride_id = rc.ride_id AND rp.contact_id = rc.contact_id
+               LEFT JOIN invoice_lines il ON il.cancellation_id = rc.id
+              WHERE rc.ride_id = $1
+                AND NOT (rc.contact_id = ANY($2::bigint[]))`,
+            [req.params.id, [...cancelledBy.keys()]]);
+        for (const u of undone) {
+            if (u.line_id) {
+                await client.query(
+                    'UPDATE invoice_lines SET cancellation_id = NULL, participant_id = $2 WHERE id = $1',
+                    [u.line_id, u.seat_id]);
+                if (u.kind === 'cancelled' && !u.billed) {
+                    await client.query(
+                        `DELETE FROM contact_charges ch
+                          WHERE ch.source_invoice_id = $1 AND ch.contact_id = $2
+                            AND ch.description LIKE 'Refund — cancelled lesson ' || $3 || '%'
+                            AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.charge_id = ch.id)`,
+                        [u.invoice_id, u.contact_id, fmtDay(parsed.date)]);
+                }
+            }
+            await client.query('DELETE FROM ride_cancellations WHERE id = $1', [u.id]);
+        }
+        if (undone.length) await syncRescheduleCredits(client, req.params.id, parsed.cancellations);
         // A make-up seat that simply vanished — the rider swapped for someone
         // else, no cancellation recorded — hands its credit back. The rider
         // paid for the day they missed; losing the credit with the seat would

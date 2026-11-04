@@ -1090,9 +1090,15 @@
                the credit is only used when you save the ride.</p>
             <div class="missed-list">
                 <div class="muted" style="font-size:12px;margin-bottom:2px">Making up for:</div>
-                ${(credit.missed || []).map((m) => `<div class="missed-item">${m.date
-                    ? `${esc(fmtDay(m.date))} at ${hhmm(m.start_time)}${m.ride_type_name ? ' · ' + esc(m.ride_type_name) : ''}`
-                    : `a lesson (date not recorded${m.note ? ': ' + esc(m.note) : ''})`}</div>`).join('')}
+                ${(credit.missed || []).map((m) => {
+                    // an older credit knows its lesson only from its note
+                    const fromNote = !m.date && /(\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2})/.exec(m.note || '');
+                    const date = m.date || (fromNote && fromNote[1]);
+                    const time = m.date ? hhmm(m.start_time) : (fromNote && fromNote[2]);
+                    return `<div class="missed-item">${date
+                        ? `${esc(fmtDay(date))} at ${esc(time)}${m.ride_type_name ? ' · ' + esc(m.ride_type_name) : ''}`
+                        : `a lesson${m.note ? ' — ' + esc(m.note) : ''}`}</div>`;
+                }).join('')}
             </div>
             ${candidates.length ? candidates.map((r) => `
                 <div class="list-item" data-pick-ride="${r.id}">
