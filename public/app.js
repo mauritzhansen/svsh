@@ -5212,9 +5212,10 @@
             <div id="inv-untyped-warn" class="warn-bar hidden"></div>
             <h2>In advance — per month</h2>
             <p class="muted">Riders whose payer is set to <b>In advance, per month</b>.
-               Each invoice covers the <b>term lessons of the coming month</b> plus anything
-               still unbilled from before it. Holiday lessons are not billed ahead —
-               they appear on the following month's invoice once they have been ridden.</p>
+               Each invoice covers the <b>fixed weekly lessons of the coming month</b> (in term)
+               plus anything still unbilled from before it. Holiday lessons and once-off
+               bookings are not billed ahead — they appear on the following month's invoice
+               once they have been ridden.</p>
             <div class="card">
                 <div class="month-pills">
                     ${advPills.map((m) => `
