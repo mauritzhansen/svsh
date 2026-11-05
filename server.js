@@ -3663,6 +3663,14 @@ const FIXED_CANCEL_SQL = `(r.recurring_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM recurring_participants fx
      WHERE fx.recurring_id = r.recurring_id AND fx.contact_id = rc.contact_id))`;
 
+// What an advance run may put on its invoice from inside the period: the
+// fixed lessons (they will happen), and anything ALREADY ridden by the time
+// the invoice is made — a trial lesson or an extra booking last week is a
+// fact, not a guess, and a new rider's first lesson belongs on their first
+// invoice. Only the ad-hoc lessons still to come wait for the next month.
+const AHEAD_SEAT_SQL = `(${FIXED_SEAT_SQL} OR r.date < CURRENT_DATE)`;
+const AHEAD_CANCEL_SQL = `(${FIXED_CANCEL_SQL} OR r.date < CURRENT_DATE)`;
+
 // The other half of the reschedule rule: the seat the credit was spent on is
 // free, because the missed day carried the charge. Requires aliases r (rides)
 // and rp (ride_participants).
@@ -3808,14 +3816,14 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                        JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
                        JOIN contacts p2 ON p2.id = COALESCE(rider.parent_id, rider.id)
                        LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
-                      WHERE ((r.date BETWEEN $1 AND $2 AND ${FIXED_SEAT_SQL}) OR ${PREV_MONTH_SQL('$1')})
+                      WHERE ((r.date BETWEEN $1 AND $2 AND ${AHEAD_SEAT_SQL}) OR ${PREV_MONTH_SQL('$1')})
                         AND p2.school_id = $3
                         AND p2.payment_terms = 'advance_term'
                         AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
                         AND ${NOT_MAKEUP_SQL}
                      UNION ALL
                      ${cancelledSeatsSQL({ where: `
-                        AND ((r.date BETWEEN $1 AND $2 AND ${FIXED_CANCEL_SQL}) OR ${PREV_MONTH_SQL('$1')})
+                        AND ((r.date BETWEEN $1 AND $2 AND ${AHEAD_CANCEL_SQL}) OR ${PREV_MONTH_SQL('$1')})
                         AND payer.school_id = $3
                         AND payer.payment_terms = 'advance_term'` })}
                  )
@@ -3959,7 +3967,7 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                         -- invoiced once, by the term run, leftovers included
                         (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
                         ${IN_TERM_SQL} AS in_term,
-                        ${FIXED_SEAT_SQL} AS fixed
+                        ${AHEAD_SEAT_SQL} AS fixed
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                    JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
@@ -3978,7 +3986,7 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                         payer.payment_terms AS terms,
                         (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
                         ${IN_TERM_SQL} AS in_term,
-                        ${FIXED_CANCEL_SQL} AS fixed`,
+                        ${AHEAD_CANCEL_SQL} AS fixed`,
                      where: `
                         AND r.date <= $2
                         AND payer.payment_terms ${termsFilter}` })}
@@ -3992,10 +4000,16 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                  -- term invoice already, so for them this is the leftovers
                  -- alone. An ad-hoc lesson in the coming month is never billed
                  -- ahead, whoever the payer is.
+                 --
+                 -- Only while the month is still ahead, though: once it is
+                 -- over, its lessons are the NEXT month's leftovers and are
+                 -- listed there — showing them under both months read as two
+                 -- invoices for one lesson.
                  SELECT * FROM seats
                   WHERE NOT term_month
                     AND ((NOT in_month AND in_reach)
-                         OR (in_month AND in_term AND fixed AND terms = 'advance_monthly'))
+                         OR (in_month AND in_term AND fixed AND terms = 'advance_monthly'
+                             AND $1::date >= date_trunc('month', CURRENT_DATE)))
              )`;
 }
 
@@ -4404,7 +4418,7 @@ async function cancelledLines(client, payerId, from, to, soleRider, mode) {
            JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
            LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
           WHERE ${BILLABLE_CANCELLATION_SQL} AND COALESCE(c.parent_id, c.id) = $1
-            AND ${PERIOD_FOR_MODE(mode, FIXED_CANCEL_SQL)}
+            AND ${PERIOD_FOR_MODE(mode, AHEAD_CANCEL_SQL)}
             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
           ORDER BY r.date`, [payerId, from, to]);
     return rows.map((r) => ({
@@ -4502,7 +4516,7 @@ const CANCELLATION_PRICE_SQL = `COALESCE(
 // (FIXED_SEAT_SQL or FIXED_CANCEL_SQL). Only those are billed AHEAD; an
 // ad-hoc lesson in the coming month, like a holiday one, waits for the
 // following month's invoice once it has been ridden.
-const PERIOD_FOR_MODE = (mode, fixed = FIXED_SEAT_SQL) => mode === 'advance_month'
+const PERIOD_FOR_MODE = (mode, fixed = AHEAD_SEAT_SQL) => mode === 'advance_month'
     ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})
         OR (r.date >= $2 AND r.date <= $3 AND ${IN_TERM_SQL} AND ${fixed}
             AND payer.payment_terms = 'advance_monthly'))`
