@@ -2268,11 +2268,14 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         const series = parseSeriesBody(req.body);
         // A rider put on this ride with a reschedule credit: the credit is
         // spent in the same transaction as the seat it pays for.
-        const useCredit = (req.body || {}).use_credit_contact_id || null;
-        if (useCredit) {
-            if (!parsed.participants.some((p) => String(p.contact_id) === String(useCredit))) {
-                return res.status(400).json({ error: 'The rider using the credit is not on the ride.' });
-            }
+        // Several riders may be using one each (two make-ups on one lesson).
+        const useCredits = [...new Set([
+            (req.body || {}).use_credit_contact_id,
+            ...(Array.isArray((req.body || {}).use_credit_contact_ids) ? req.body.use_credit_contact_ids : [])
+        ].filter(Boolean).map(String))];
+        for (const useCredit of useCredits) {
+            const seat = parsed.participants.find((p) => String(p.contact_id) === useCredit);
+            if (!seat) return res.status(400).json({ error: 'The rider using the credit is not on the ride.' });
             const { rows: open } = await pool.query(
                 'SELECT 1 FROM reschedule_credits WHERE contact_id = $1 AND used_ride_id IS NULL LIMIT 1',
                 [useCredit]);
@@ -2481,7 +2484,13 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                 AND NOT EXISTS (SELECT 1 FROM ride_cancellations rc
                                  WHERE rc.ride_id = $1 AND rc.contact_id = cr.contact_id)`,
             [req.params.id]);
-        if (useCredit) await consumeCredit(client, useCredit, req.params.id);
+        for (const useCredit of useCredits) {
+            // already a make-up here (a re-save): one credit per seat, not per save
+            const { rows: have } = await client.query(
+                'SELECT 1 FROM reschedule_credits WHERE used_ride_id = $1 AND contact_id = $2',
+                [req.params.id, useCredit]);
+            if (!have[0]) await consumeCredit(client, useCredit, req.params.id);
+        }
         // "Change the whole series": push this ride's setup onto the template so
         // future weeks inherit it, and onto later occurrences that are not
         // invoiced yet. Riders are not touched here — they are handled by the

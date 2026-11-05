@@ -943,8 +943,9 @@
                 api('GET', '/api/credits')
             ]);
             dayRides = ridesData.rides;
+            state.credits = creditsData.credits || [];
             drawDayGrid(dayRides, date);
-            drawCreditBar(creditsData.credits || [], date, dayRides);
+            drawCreditBar(state.credits, date, dayRides);
             drawHolidayBar(date);
             drawDayNote(date);
         } catch (err) {
@@ -2728,9 +2729,45 @@
                 const lvlSel = document.getElementById('ride-level');
                 const c = contactById(e.target.value);
                 if (lvlSel && !lvlSel.value && c && c.experience) lvlSel.value = c.experience;
+                // A rider who is owed a make-up: offer it, rather than quietly
+                // adding a lesson that will be charged on top of the one they
+                // already paid for and missed.
+                const row = e.target.closest('.pick-row');
+                setCreditUse(row, false);
+                const owed = (state.credits || []).find((cr) => String(cr.contact_id) === String(e.target.value));
+                if (c && owed && owed.count > 0) {
+                    askConfirm(`${c.name} is owed ${owed.count} make-up lesson${owed.count === 1 ? '' : 's'}`,
+                        'Use one for this lesson? It is then not charged — the day that was missed already paid for it.',
+                        'Use the make-up', 'or add as an extra lesson, charged as usual')
+                        .then((yes) => { if (yes) { setCreditUse(row, true); markDirty(); } });
+                }
             }
             refreshOptions();
         });
+        // Marks a row as spending one of the rider's make-up credits on save.
+        function setCreditUse(row, on) {
+            if (!row) return;
+            let tag = row.querySelector('.credit-tag');
+            if (on) {
+                row.dataset.useCredit = '1';
+                if (!tag) {
+                    tag = document.createElement('span');
+                    tag.className = 'rider-makeup credit-tag';
+                    tag.title = 'Make-up lesson — the credit is used when you save';
+                    tag.textContent = '⟳ make-up (credit used on save)';
+                    row.appendChild(tag);
+                }
+            } else {
+                delete row.dataset.useCredit;
+                if (tag) tag.remove();
+            }
+        }
+        // The rider tapped in the make-up bar arrives already marked
+        if (isEdit && defaults.addContactId) {
+            $dialog.querySelectorAll('[data-kind="part"]').forEach((row) => {
+                if (row.querySelector('.pr-contact').value === String(defaults.addContactId)) setCreditUse(row, true);
+            });
+        }
         const repeatBox = document.getElementById('ride-repeat');
         const repeats = () => !!repeatBox && repeatBox.value === 'repeats';
         const syncFreqVisibility = () => {
@@ -2782,6 +2819,8 @@
             saveBtn.disabled = true;
             saveBtn.title = 'Nothing has changed yet';
         }
+        // arriving with a make-up rider already added IS the change
+        if (isEdit && defaults.addContactId) markDirty();
         $dialog.addEventListener('input', markDirty);
         $dialog.addEventListener('change', markDirty);
 
@@ -2851,7 +2890,8 @@
                     };
                 }).filter((g) => g.guide_id),
                 // the credit a make-up rider is using, spent with the seat it pays for
-                use_credit_contact_id: isEdit && defaults.addContactId ? defaults.addContactId : null,
+                use_credit_contact_ids: partRows.filter((row) => row.dataset.useCredit === '1')
+                    .map((row) => row.querySelector('.pr-contact').value).filter(Boolean),
                 series: {
                     repeat: document.getElementById('ride-repeat').value,
                     riders: seriesRiders,
@@ -2887,9 +2927,10 @@
                     seriesRides = res.series_rides || 0;
                 } else await api('POST', '/api/rides', body);
                 closeDialog();
+                const usedNames = body.use_credit_contact_ids.map((id) => (contactById(id) || {}).name).filter(Boolean);
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
-                    : defaults.addContactId ? 'Saved — reschedule credit used.'
+                    : usedNames.length ? `Saved — make-up used for ${usedNames.join(', ')}.`
                     : seriesRides ? `Saved. The weekly slot and ${seriesRides} later ride${seriesRides === 1 ? '' : 's'} were updated too.`
                     : typedSiblings ? `Saved. The ride type was also set on ${typedSiblings} other ride${typedSiblings === 1 ? '' : 's'} in this weekly series that had none.`
                     : 'Saved.');
