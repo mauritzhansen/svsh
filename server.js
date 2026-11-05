@@ -1861,7 +1861,8 @@ function parseRideBody(body) {
         .map((c) => ({
             contact_id: c.contact_id,
             kind: ['rescheduled', 'moved'].includes(c.kind) ? c.kind : 'cancelled',
-            from_series: c.kind !== 'moved' && !!c.from_series,
+            // on a move, from_series means "moved to another weekly lesson"
+            from_series: !!c.from_series,
             // a late cancellation is still owed for; see migration 031. A
             // move changes nothing about the money, so it is never billed.
             billed: c.kind !== 'moved' && !!c.billed,
@@ -2379,6 +2380,12 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // pointing at it is untouched and nothing about the money changes.
         // The horse comes along if it is free at the new time.
         for (const mv of moves) {
+            // A move already carried out earlier: the rider has no seat here
+            // any more, the marker is just being kept on a re-save.
+            const { rows: seated } = await client.query(
+                'SELECT 1 FROM ride_participants WHERE ride_id = $1 AND contact_id = $2',
+                [req.params.id, mv.contact_id]);
+            if (!seated[0]) continue;
             if (mv.to_recurring_id) {
                 mv.to_ride_id = await moveRiderToSeries(client, existing[0], mv.contact_id, mv.to_recurring_id);
                 mv.from_series = true;
@@ -2667,9 +2674,10 @@ async function moveSeat(client, ride, contactId, toRideId, anyDay = false) {
 // Mondays — after their term has been invoiced. The invoice must survive and
 // nothing may be billed twice, so this is the same-day move applied week by
 // week: every seat of theirs on the old slot from `ride.date` on, invoiced or
-// not, is carried to the new slot's lesson in that week (the next occurrence
-// of the new weekday on or after the old date, created if it does not exist
-// yet), with its invoice line and any spent credit. The old weeks keep a
+// not, is carried to the new slot's lesson in the SAME week (Monday to
+// Sunday — a Thursday lesson moving to Mondays goes to the Monday before it,
+// which is usually the day the rider actually rode; the lesson is created if
+// it is not on the calendar yet), with its invoice line and any spent credit. The old weeks keep a
 // "moved" marker, the template is updated, and the move leaves the rider
 // where the new slot will have them every week after.
 // Returns the id of the lesson this week's seat went to.
@@ -2690,7 +2698,8 @@ async function moveRiderToSeries(client, ride, contactId, toRecurringId) {
            JOIN ride_participants rp ON rp.ride_id = r.id AND rp.contact_id = $2
           WHERE r.recurring_id = $1 AND r.date >= $3 AND r.status = 'active'
           ORDER BY r.date`, [ride.recurring_id, contactId, ride.date]);
-    const shift = (tpl.weekday - isoWeekday(String(ride.date).slice(0, 10)) + 7) % 7;
+    // same ISO week: negative when the new day is earlier in the week
+    const shift = tpl.weekday - isoWeekday(String(ride.date).slice(0, 10));
     let thisWeekTarget = null, firstTarget = null;
     for (const s of seats) {
         const date = shiftDays(s.date, shift);
@@ -2729,6 +2738,8 @@ async function moveRiderToSeries(client, ride, contactId, toRecurringId) {
     // template: off the old slot from this week, onto the new one at the same cadence
     await leaveSeries(client, ride.recurring_id, contactId, String(ride.date).slice(0, 10));
     const start = firstTarget || shiftDays(String(ride.date).slice(0, 10), shift);
+    await client.query(
+        'UPDATE recurring_rides SET start_date = LEAST(start_date, $2::date) WHERE id = $1', [tpl.id, start]);
     const freq = member[0] ? member[0].frequency : 'weekly';
     await client.query(
         `INSERT INTO recurring_participants (recurring_id, contact_id, frequency, biweekly_anchor, start_date)

@@ -558,6 +558,13 @@ td.todo-cell { background: #faf3da; vertical-align: top; cursor: pointer; }
     padding: 18px 16px;
     width: 100%;
     max-width: 360px;
+    /* A long list of choices (every weekly lesson, say) must scroll inside
+       the box: the backdrop is fixed and centred, so an overflowing box was
+       cut off at both ends with no way to reach the rest. */
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 .timepick-value {
     text-align: center;
