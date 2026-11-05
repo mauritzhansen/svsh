@@ -4291,7 +4291,7 @@ const MONTH_NAMES_FULL = ['January', 'February', 'March', 'April', 'May', 'June'
 async function liveryLines(client, payerId, from, to) {
     // A customer can stable several horses, each on its own share.
     const { rows: horses } = await client.query(
-        `SELECT name, livery_share, livery_discount_cents FROM horses
+        `SELECT id, name, livery_share, livery_discount_cents FROM horses
           WHERE owner_contact_id = $1 AND livery_share IS NOT NULL
           ORDER BY sort_order, name`, [payerId]);
     if (!horses.length) return [];
