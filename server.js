@@ -1344,6 +1344,17 @@ app.put('/api/ride-types/:id', requireRole('helper'), async (req, res) => {
             return res.status(404).json({ error: 'Ride type not found.' });
         }
         const priceChanging = Number.isInteger(price_cents) && price_cents !== current[0].price_cents;
+        if (priceChanging && apply_to_past) {
+            // "Also past rides": the earlier price was wrong, so the seats
+            // stamped with it (by an earlier change that kept it) go back to
+            // following the type. Invoiced lines are snapshots and stay.
+            await client.query(
+                `UPDATE ride_participants rp SET price_cents = NULL
+                   FROM rides r
+                  WHERE rp.ride_id = r.id AND r.ride_type_id = $1 AND rp.price_cents IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)`,
+                [req.params.id]);
+        }
         if (priceChanging && !apply_to_past) {
             // A rider with their own rate for this type is not affected by the
             // standard price moving, and stamping the old standard price onto

@@ -6729,13 +6729,7 @@
                     <input id="rt-price" type="number" inputmode="decimal" step="0.01" value="${rt ? (rt.price_cents / 100).toFixed(2) : ''}">
                 </div>
             </div>
-            ${rt ? `<label>If the price changed, apply it to</label>
-            <select id="rt-scope">
-                <option value="future">Future rides only (past keep the old price)</option>
-                <option value="past">Also past rides that are not invoiced yet</option>
-            </select>
-            <p class="muted">Rides that are already on an invoice never change.</p>
-            <label>Active</label>
+            ${rt ? `<label>Active</label>
             <select id="rt-active"><option value="true" ${rt.active ? 'selected' : ''}>Yes</option><option value="false" ${rt.active ? '' : 'selected'}>No</option></select>` : ''}
             <div class="form-error"></div>
             <div class="form-actions">
@@ -6766,7 +6760,20 @@
             };
             if (rt) {
                 body.active = document.getElementById('rt-active').value === 'true';
-                body.apply_to_past = document.getElementById('rt-scope').value === 'past';
+                // A price change is asked about, not assumed: a rise usually
+                // starts from now, a correction usually means the old price was
+                // simply wrong and past lessons should follow.
+                if (body.price_cents !== rt.price_cents) {
+                    const scope = await askChoice(`Price ${money(rt.price_cents)} → ${money(body.price_cents)}`,
+                        'Which rides does the new price apply to? Rides already on an invoice never change.', [
+                            { key: 'future', label: 'From now on',
+                              hint: 'past rides keep the old price' },
+                            { key: 'past', label: 'Past rides too',
+                              hint: 'the old price was wrong — every ride not yet invoiced is repriced' }
+                        ]);
+                    if (!scope) return;
+                    body.apply_to_past = scope === 'past';
+                }
             }
             try {
                 if (rt) await api('PUT', `/api/ride-types/${rt.id}`, body);
