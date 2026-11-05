@@ -1627,12 +1627,14 @@ body.is-offline .ride-box { opacity: 0.92; }
    she rode. */
 .plain tr.ride-off td { color: var(--muted); }
 
-/* The fortnight picker — a restart is armed but nothing is written until
-   Save, so it has to look obviously set while it waits. */
-.pick-row .pr-anchor { flex: 0 0 auto; width: auto; }
-.pr-anchor.is-on {
-    background: var(--green); border-color: var(--green); color: #fff; font-weight: 600;
-}
+/* A rider row carries a long cadence label ("Every 2nd week — off week starts
+   here"): the rider and horse pickers keep their room, and on a narrow screen
+   the cadence drops to its own line rather than squashing them. */
+.pick-row[data-kind="part"] { flex-wrap: wrap; row-gap: 4px; margin-bottom: 10px; }
+.pick-row[data-kind="part"] .pr-contact,
+.pick-row[data-kind="part"] .pr-horse { flex: 2 1 150px; }
+.pick-row[data-kind="part"] .pr-freq { flex: 1 1 230px; }
+.pick-row[data-kind="part"] .pr-alt { flex: 1 1 150px; }
 
 /* A fortnightly rider on her off week: listed so the fortnight can be restarted
    around her, but greyed and inert until "Riding this week instead" is tapped. */

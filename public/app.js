@@ -2102,15 +2102,12 @@
                 <select class="pr-alt ${p && p.alt_horse_id ? '' : 'hidden'}" title="Alternative horse — instructor picks on the day">
                     ${altHorseOptions(p ? p.alt_horse_id : null, null, p ? p.contact_id : null)}
                 </select>
-                <select class="pr-freq hidden" title="How often this rider comes">
+                <select class="pr-freq hidden" title="How often this rider comes. The two 'starts here' choices restart the fortnight from this lesson.">
                     <option value="weekly" ${freq === 'biweekly' || freq === 'once' ? '' : 'selected'}>Every week</option>
                     <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
+                    <option value="biweekly_on">Every 2nd week — on week starts here</option>
+                    <option value="biweekly_off">Every 2nd week — off week starts here</option>
                     <option value="once" ${freq === 'once' ? 'selected' : ''}>This day only</option>
-                </select>
-                <select class="pr-anchor hidden" title="Which week of the fortnight is this lesson? Leave as is, or restart the count from here">
-                    <option value="">Fortnight as is</option>
-                    <option value="on">↺ On week starts here</option>
-                    <option value="off">↺ Off week starts here</option>
                 </select>
                 ${withResched ? `<button type="button" class="secondary small row-resched" title="Can't make it — give a reschedule credit">${ICON_ROTATE}</button>` : ''}
                 <button type="button" class="danger small row-x">${ICON_X}</button>
@@ -2325,6 +2322,8 @@
             const name = who ? `${who.name} — ` : '';
             tag.textContent = kind === 'rescheduled'
                 ? `⟳ ${name}rescheduled, gets a credit`
+                : kind === 'moved' && scope === 'series'
+                ? `→ ${name}moving to the ${row.dataset.moveToLabel || 'other'} lesson from this week on — invoices move with them`
                 : kind === 'moved'
                 ? `→ ${name}moving to the ${row.dataset.moveToLabel || 'other'} ride — nothing changes for billing`
                 : scope === 'series'
@@ -2340,20 +2339,28 @@
             row.setAttribute('data-kind', 'off');
             row.classList.add('off-week');
             row.querySelectorAll('select').forEach((sel) => { sel.disabled = true; });
-            row.querySelectorAll('.row-x, .row-resched, .pr-alt-toggle, .pr-anchor')
+            row.querySelectorAll('.row-x, .row-resched, .pr-alt-toggle')
                 .forEach((b) => { b.style.display = 'none'; });
+            // A fortnightly rider on her off week, or a weekly rider who for
+            // some reason has no seat this week (the week was created before
+            // she joined the slot, say): both are on the lesson, neither is on
+            // this day, and both can be put on it from here.
+            const fortnightly = o.frequency === 'biweekly';
             const tag = document.createElement('span');
             tag.className = 'removed-tag';
-            tag.textContent = `every 2nd week — off this week${o.next_date ? ', next ' + shortDate(o.next_date) : ''}`;
+            tag.textContent = (fortnightly ? 'every 2nd week — off this week' : 'on the weekly lesson — not on this week')
+                + (o.next_date ? ', next ' + shortDate(o.next_date) : '');
             row.appendChild(tag);
             const join = document.createElement('button');
             join.type = 'button';
             join.className = 'secondary small pr-join';
-            join.textContent = '↺ Riding this week instead';
-            join.title = 'Put her on this ride and count the fortnight from here — next week becomes the off week';
+            join.textContent = fortnightly ? '↺ Riding this week instead' : '＋ Riding this week';
+            join.title = fortnightly
+                ? 'Put her on this ride and count the fortnight from here — next week becomes the off week'
+                : 'Put her on this ride';
             row.appendChild(join);
             join.addEventListener('click', () => {
-                // Becomes an ordinary seat, fortnightly, re-anchored to today.
+                // Becomes an ordinary seat; a fortnightly one is re-anchored to today.
                 row.setAttribute('data-kind', 'part');
                 row.classList.remove('off-week');
                 row.querySelectorAll('select').forEach((sel) => { sel.disabled = false; });
@@ -2362,9 +2369,7 @@
                 tag.remove();
                 join.remove();
                 const freq = row.querySelector('.pr-freq');
-                if (freq) freq.value = 'biweekly';
-                const anchor = row.querySelector('.pr-anchor');
-                if (anchor) { anchor.style.display = ''; anchor.value = 'on'; }
+                if (freq) freq.value = fortnightly ? 'biweekly_on' : 'weekly';
                 refreshOptions();
                 syncFreqVisibility();
                 markDirty();
@@ -2377,6 +2382,7 @@
             delete row.dataset.removeKind;
             delete row.dataset.removeBilled;
             delete row.dataset.moveTo;
+            delete row.dataset.moveToSeries;
             delete row.dataset.moveToLabel;
             row.querySelectorAll('select').forEach((s) => { s.disabled = false; });
             const x = row.querySelector('.row-x');
@@ -2455,6 +2461,12 @@
                     options.push({ key: 'move', label: 'Move to another lesson today',
                                    hint: 'same day, nothing changes for invoicing or credits' });
                 }
+                // Their fixed lesson changes day or time for good. Every week
+                // from this one goes across, invoiced weeks included.
+                if (isEdit && ride.recurring_id && seriesFreq[String(cid)]) {
+                    options.push({ key: 'move-series', label: 'Move to another weekly lesson',
+                                   hint: 'from this week on; invoiced weeks move with them, nothing is billed twice' });
+                }
                 if (isEdit && ride.recurring_id) {
                     options.push({ key: 'series', label: 'Remove from the weekly schedule',
                                    hint: billedAlready
@@ -2464,6 +2476,28 @@
                 const choice = await askChoice(`Remove ${name}`,
                     isEdit && ride.recurring_id ? 'They are on the weekly fixed ride.' : '', options);
                 if (!choice) return;
+                if (choice === 'move-series') {
+                    let slots = [];
+                    try { slots = (await api('GET', '/api/recurring')).recurring; } catch (err) { return dialogError(err.message); }
+                    slots = slots.filter((t) => String(t.id) !== String(ride.recurring_id)
+                        && !t.participants.some((p) => String(p.contact_id) === String(cid)));
+                    if (!slots.length) return dialogError('There is no other weekly lesson to move to — make one first under Fixed rides.');
+                    const target = await askChoice(`Move ${name} to which weekly lesson?`,
+                        'From this week on. Each coming week goes to that lesson in the same week.',
+                        slots.map((t) => ({
+                            key: String(t.id),
+                            label: `${WEEKDAYS[t.weekday - 1]}s ${hhmm(t.start_time)}${t.ride_type_name ? ' · ' + t.ride_type_name : ''}`,
+                            hint: t.participants.filter((p) => p.contact_name).map((p) => shortName(p.contact_name)).join(', ') || 'no riders yet'
+                        })));
+                    if (!target) return;
+                    const t = slots.find((x) => String(x.id) === target);
+                    row.dataset.moveToSeries = target;
+                    row.dataset.moveToLabel = `${WEEKDAYS[t.weekday - 1]} ${hhmm(t.start_time)}`;
+                    markRemoved(row, 'series', 'moved', false);
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
                 if (choice === 'move') {
                     const target = await askChoice(`Move ${name} to…`, `Lessons on ${fmtDay(defaults.date)}:`,
                         moveTargets.map((r) => ({
@@ -2503,12 +2537,11 @@
             }
             const partSel = row.querySelector('.pr-contact');
             if (partSel) partSel.dataset.prev = partSel.value;
-            // The fortnight picker: "off week starts here" takes the rider off
-            // this lesson when it is saved, so say so where it is picked.
-            const anchorSel = row.querySelector('.pr-anchor');
-            if (anchorSel) anchorSel.addEventListener('change', () => {
-                anchorSel.classList.toggle('is-on', !!anchorSel.value);
-                if (anchorSel.value === 'off') {
+            // "Off week starts here" takes the rider off this lesson when it
+            // is saved, so say so where it is picked.
+            const freqSel = row.querySelector('.pr-freq');
+            if (freqSel) freqSel.addEventListener('change', () => {
+                if (freqSel.value === 'biweekly_off') {
                     const who = contactById((row.querySelector('.pr-contact') || {}).value);
                     dialogError(`${(who && who.name) || 'This rider'} will come off this lesson when you save — `
                         + 'it becomes their off week, and they ride next week.');
@@ -2656,10 +2689,11 @@
             // her greyed out, with that as the single action.
             const offNow = new Set([...riding, ...(ride.cancellations || []).map((c) => String(c.contact_id))]);
             (ride.off_riders || [])
-                .filter((o) => o.frequency === 'biweekly' && !offNow.has(String(o.contact_id)))
+                .filter((o) => !offNow.has(String(o.contact_id)))
                 .forEach((o) => {
                     addRow('ride-parts', participantRowHtml(
-                        { contact_id: o.contact_id, horse_id: null }, isEdit, 'biweekly'));
+                        { contact_id: o.contact_id, horse_id: null }, isEdit,
+                        o.frequency === 'biweekly' ? 'biweekly' : 'weekly'));
                     markOffWeek(document.getElementById('ride-parts').lastElementChild, o);
                 });
         }
@@ -2702,11 +2736,7 @@
         const syncFreqVisibility = () => {
             $dialog.querySelectorAll('[data-kind="part"]').forEach((row) => {
                 const freq = row.querySelector('.pr-freq');
-                const anchor = row.querySelector('.pr-anchor');
                 if (freq) freq.classList.toggle('hidden', !repeats());
-                // Only a fortnightly rider has a fortnight to restart.
-                if (anchor) anchor.classList.toggle('hidden',
-                    !repeats() || !freq || freq.value !== 'biweekly' || row.classList.contains('removed'));
             });
         };
         if (repeatBox) repeatBox.addEventListener('change', syncFreqVisibility);
@@ -2772,11 +2802,16 @@
             // WAS on the series and is now "this day only" leaves it from
             // here on, as does one struck off with "remove from the weekly
             // schedule".
-            const seriesRiders = partRows.map((row) => ({
-                contact_id: row.querySelector('.pr-contact').value || null,
-                frequency: row.querySelector('.pr-freq').value,
-                anchor: (row.querySelector('.pr-anchor') || {}).value || null
-            })).filter((p) => p.contact_id && p.frequency !== 'once');
+            // 'biweekly_on' / 'biweekly_off' are every-2nd-week with the
+            // fortnight restarted from this lesson (on or off week).
+            const seriesRiders = partRows.map((row) => {
+                const v = row.querySelector('.pr-freq').value;
+                return {
+                    contact_id: row.querySelector('.pr-contact').value || null,
+                    frequency: v.startsWith('biweekly') ? 'biweekly' : v,
+                    anchor: v === 'biweekly_on' ? 'on' : v === 'biweekly_off' ? 'off' : null
+                };
+            }).filter((p) => p.contact_id && p.frequency !== 'once');
             const leaving = partRows
                 .filter((row) => row.querySelector('.pr-freq').value === 'once'
                     && seriesFreq[String(row.querySelector('.pr-contact').value)])
@@ -2797,7 +2832,8 @@
                         kind: row.dataset.removeKind || 'cancelled',
                         from_series: row.dataset.removeScope === 'series',
                         billed: row.dataset.removeBilled === '1',
-                        to_ride_id: row.dataset.moveTo || null
+                        to_ride_id: row.dataset.moveTo || null,
+                        to_recurring_id: row.dataset.moveToSeries || null
                     })).filter((c) => c.contact_id),
                 participants: [...$dialog.querySelectorAll('[data-kind="part"]')]
                     .filter((row) => !row.classList.contains('removed'))
@@ -2822,7 +2858,7 @@
                     leave: [...new Set([
                         ...leaving,
                         ...[...$dialog.querySelectorAll('[data-kind="part"].removed')]
-                            .filter((row) => row.dataset.removeScope === 'series')
+                            .filter((row) => row.dataset.removeScope === 'series' && row.dataset.removeKind !== 'moved')
                             .map((row) => row.querySelector('.pr-contact').value)
                     ].filter(Boolean))]
                 }
@@ -6565,17 +6601,28 @@
                     // read the rate from the form, so an unsaved change previews too
                     const rate = parseMoneyCents(document.getElementById('g-rate').value) || 0;
                     $l.className = '';
+                    // A lesson pays when somebody rode it or cancelled too late
+                    // to be let off; one everybody rescheduled out of does not.
+                    const paid = rides.filter((r) => r.paid);
+                    const note = (r) => {
+                        const bits = [];
+                        if (r.rider_count) bits.push(`${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}`);
+                        if (r.late_cancelled) bits.push(`${r.late_cancelled} late cancellation${r.late_cancelled === 1 ? '' : 's'} — still charged`);
+                        if (!r.paid) bits.push(r.rider_count || r.late_cancelled ? 'not paid' : 'nobody rode — not paid');
+                        return bits.join(', ');
+                    };
                     $l.innerHTML = rides.length ? `<div class="table-wrap"><table class="plain">
                         <tr><th>Date</th><th>Lesson</th><th class="num">Pay</th></tr>
-                        ${rides.map((r) => `<tr>
+                        ${rides.map((r) => `<tr${r.paid ? '' : ' class="ride-off"'}>
                             <td>${esc(shortDate(r.date))} <span class="muted">${esc(r.start_time.slice(0, 5))}</span></td>
                             <td>${esc(r.ride_type_name || 'Lesson')}
-                                <span class="muted">${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}${
+                                <span class="muted">${esc(note(r))}${
                                     r.riders ? ' · ' + esc(r.riders) : ''}</span></td>
-                            <td class="num">${money(rate)}</td></tr>`).join('')}
+                            <td class="num">${r.paid ? money(rate) : '—'}</td></tr>`).join('')}
                         <tr><td><b>Total</b></td>
-                            <td><b>${rides.length} lesson${rides.length === 1 ? '' : 's'}</b></td>
-                            <td class="num"><b>${money(rides.length * rate)}</b></td></tr>
+                            <td><b>${paid.length} lesson${paid.length === 1 ? '' : 's'}</b>${
+                                paid.length !== rides.length ? ` <span class="muted">(${rides.length - paid.length} not paid)</span>` : ''}</td>
+                            <td class="num"><b>${money(paid.length * rate)}</b></td></tr>
                     </table></div>
                     ${rate ? '' : '<p class="no-parent">No pay per lesson set, so the total is zero.</p>'}
                     <div class="form-actions" style="justify-content:flex-start">
@@ -6587,7 +6634,7 @@
                     </div>` : 'No lessons in this month.';
                     const wa = document.getElementById('g-wa');
                     if (wa) wa.addEventListener('click', () =>
-                        sendStatementOnWhatsApp(guide, from, to, rides.length, rides.length * rate));
+                        sendStatementOnWhatsApp(guide, from, to, paid.length, paid.length * rate));
                 } catch (err) {
                     $l.textContent = err.message;
                 }

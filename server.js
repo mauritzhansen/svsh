@@ -1209,6 +1209,15 @@ app.get('/api/guides', requireAuth, async (req, res) => {
 
 // Every lesson an instructor leads in a period, past or planned. Used on the
 // instructor's dialog to check their work and what they are owed.
+// When does a lesson pay the instructor? When somebody rode it, or when a
+// rider cancelled too late to be let off paying — the instructor was there
+// either way. A lesson everyone rescheduled out of (or cancelled free, or
+// moved away from) never happened, and is not paid. Requires the alias r.
+const GUIDE_PAID_SQL = `(
+    EXISTS (SELECT 1 FROM ride_participants rp WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL)
+    OR EXISTS (SELECT 1 FROM ride_cancellations rc
+                WHERE rc.ride_id = r.id AND rc.kind = 'cancelled' AND rc.billed))`;
+
 app.get('/api/guides/:id/rides', requireAuth, async (req, res) => {
     try {
         const { from, to } = req.query;
@@ -1227,6 +1236,10 @@ app.get('/api/guides/:id/rides', requireAuth, async (req, res) => {
                     COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
                     (SELECT count(*)::int FROM ride_participants rp
                       WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL) AS rider_count,
+                    -- see GUIDE_PAID_SQL
+                    (SELECT count(*)::int FROM ride_cancellations rc
+                      WHERE rc.ride_id = r.id AND rc.kind = 'cancelled' AND rc.billed) AS late_cancelled,
+                    ${GUIDE_PAID_SQL} AS paid,
                     (SELECT string_agg(c.name, ', ' ORDER BY c.name)
                        FROM ride_participants rp JOIN contacts c ON c.id = rp.contact_id
                       WHERE rp.ride_id = r.id) AS riders
@@ -1656,6 +1669,21 @@ app.put('/api/recurring/:id', requireRole('helper'), async (req, res) => {
         }
 
         if (before[0].weekday !== parsed.weekday) {
+            // Rebuilding keeps invoiced weeks on the old day and creates the
+            // new day beside them — two lessons for one invoice. Those riders
+            // are moved one by one from the ride dialog instead.
+            const { rows: pinned } = await client.query(
+                `SELECT DISTINCT c.name FROM rides r
+                   JOIN ride_participants rp ON rp.ride_id = r.id
+                   JOIN invoice_lines il ON il.participant_id = rp.id
+                   JOIN contacts c ON c.id = rp.contact_id
+                  WHERE r.recurring_id = $1 AND r.date >= CURRENT_DATE AND r.status = 'active'
+                  ORDER BY c.name`, [id]);
+            if (pinned.length) {
+                throw new UserError(`${pinned.map((p) => p.name).join(', ')} ${pinned.length === 1 ? 'is' : 'are'} `
+                    + 'already invoiced for coming weeks on this day. Open one of their lessons and use '
+                    + '"Move to another weekly lesson" instead, which carries the invoice across.');
+            }
             await dropFutureOccurrences(client, id);
         } else {
             // The weeks already on the calendar follow the new setup in place —
@@ -1837,9 +1865,11 @@ function parseRideBody(body) {
             // a late cancellation is still owed for; see migration 031. A
             // move changes nothing about the money, so it is never billed.
             billed: c.kind !== 'moved' && !!c.billed,
-            to_ride_id: c.kind === 'moved' ? (c.to_ride_id || null) : null
+            to_ride_id: c.kind === 'moved' ? (c.to_ride_id || null) : null,
+            // a move to another WEEKLY lesson, this week and every week after
+            to_recurring_id: c.kind === 'moved' ? (c.to_recurring_id || null) : null
         }));
-    if (cancellations.some((c) => c.kind === 'moved' && !c.to_ride_id)) {
+    if (cancellations.some((c) => c.kind === 'moved' && !c.to_ride_id && !c.to_recurring_id)) {
         return { error: 'Pick the lesson the rider is moving to.' };
     }
     // Nobody can be on the ride twice, and riding while also taken off it is
@@ -2173,6 +2203,7 @@ app.post('/api/rides', requireAuth, async (req, res) => {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
             [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes, parsed.instructor_notes]);
         await insertRideChildren(client, rows[0].id, parsed.participants, parsed.guides);
+        if (parsed.cancellations.length) await replaceCancellations(client, rows[0].id, parsed.cancellations);
         await applySeriesChanges(client, rows[0].id, parseSeriesBody(req.body));
         await client.query('COMMIT');
         notifyScheduleChanged(parsed.date);
@@ -2347,7 +2378,14 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // them — the row itself moves, so an invoice line or a spent credit
         // pointing at it is untouched and nothing about the money changes.
         // The horse comes along if it is free at the new time.
-        for (const mv of moves) await moveSeat(client, existing[0], mv.contact_id, mv.to_ride_id);
+        for (const mv of moves) {
+            if (mv.to_recurring_id) {
+                mv.to_ride_id = await moveRiderToSeries(client, existing[0], mv.contact_id, mv.to_recurring_id);
+                mv.from_series = true;
+            } else {
+                await moveSeat(client, existing[0], mv.contact_id, mv.to_ride_id);
+            }
+        }
         // Cancellations are written first so an invoiced seat that is coming
         // off the ride has something to hand its invoice line to.
         await replaceCancellations(client, req.params.id, parsed.cancellations);
@@ -2585,7 +2623,7 @@ async function syncSeriesCadence(client, recurringId) {
 }
 
 // Move one rider's seat from `ride` to another lesson on the same day.
-async function moveSeat(client, ride, contactId, toRideId) {
+async function moveSeat(client, ride, contactId, toRideId, anyDay = false) {
     const { rows: target } = await client.query(
         `SELECT r.*, COALESCE(r.duration_min, rt.duration_min, 60) AS eff_duration
            FROM rides r LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
@@ -2593,7 +2631,7 @@ async function moveSeat(client, ride, contactId, toRideId) {
     const to = target[0];
     if (!to || to.is_block) throw new UserError('The lesson to move to no longer exists.');
     if (String(to.id) === String(ride.id)) throw new UserError('That is the same lesson.');
-    if (String(to.date).slice(0, 10) !== String(ride.date).slice(0, 10)) {
+    if (!anyDay && String(to.date).slice(0, 10) !== String(ride.date).slice(0, 10)) {
         throw new UserError('A rider can only be moved to another lesson on the same day — use ⟳ reschedule for another day.');
     }
     const { rows: seat } = await client.query(
@@ -2616,9 +2654,91 @@ async function moveSeat(client, ride, contactId, toRideId) {
     await client.query(
         'UPDATE reschedule_credits SET used_ride_id = $2 WHERE used_ride_id = $1 AND contact_id = $3',
         [ride.id, to.id, contactId]);
+    // An invoice line on the seat keeps its amount but names the new day —
+    // the invoice listed the lesson by date, and that date has changed.
+    await client.query(
+        'UPDATE invoice_lines SET ride_date = $2 WHERE participant_id = $1', [seat[0].id, to.date]);
     // the rider was never "off" the lesson they are moving to
     await client.query(
         'DELETE FROM ride_cancellations WHERE ride_id = $1 AND contact_id = $2', [to.id, contactId]);
+}
+
+// A rider's fixed lesson changes day or time for good — Thursdays become
+// Mondays — after their term has been invoiced. The invoice must survive and
+// nothing may be billed twice, so this is the same-day move applied week by
+// week: every seat of theirs on the old slot from `ride.date` on, invoiced or
+// not, is carried to the new slot's lesson in that week (the next occurrence
+// of the new weekday on or after the old date, created if it does not exist
+// yet), with its invoice line and any spent credit. The old weeks keep a
+// "moved" marker, the template is updated, and the move leaves the rider
+// where the new slot will have them every week after.
+// Returns the id of the lesson this week's seat went to.
+async function moveRiderToSeries(client, ride, contactId, toRecurringId) {
+    if (!ride.recurring_id) throw new UserError('This ride is not a weekly lesson.');
+    if (String(ride.recurring_id) === String(toRecurringId)) throw new UserError('That is the same weekly lesson.');
+    const { rows: tpls } = await client.query(
+        'SELECT * FROM recurring_rides WHERE id = $1 AND active', [toRecurringId]);
+    const tpl = tpls[0];
+    if (!tpl) throw new UserError('The weekly lesson to move to no longer exists.');
+    const { rows: tplGuides } = await client.query(
+        'SELECT * FROM recurring_guides WHERE recurring_id = $1', [tpl.id]);
+    const { rows: member } = await client.query(
+        'SELECT * FROM recurring_participants WHERE recurring_id = $1 AND contact_id = $2',
+        [ride.recurring_id, contactId]);
+    const { rows: seats } = await client.query(
+        `SELECT r.id, r.date::text AS date FROM rides r
+           JOIN ride_participants rp ON rp.ride_id = r.id AND rp.contact_id = $2
+          WHERE r.recurring_id = $1 AND r.date >= $3 AND r.status = 'active'
+          ORDER BY r.date`, [ride.recurring_id, contactId, ride.date]);
+    const shift = (tpl.weekday - isoWeekday(String(ride.date).slice(0, 10)) + 7) % 7;
+    let thisWeekTarget = null, firstTarget = null;
+    for (const s of seats) {
+        const date = shiftDays(s.date, shift);
+        if (tpl.end_date && date > String(tpl.end_date).slice(0, 10)) break;
+        const { rows: ins } = await client.query(
+            `INSERT INTO rides (date, start_time, duration_min, ride_type_id, recurring_id, level, venue, notes, instructor_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (recurring_id, date) DO NOTHING RETURNING id`,
+            [date, tpl.start_time, tpl.duration_min, tpl.ride_type_id, tpl.id, tpl.level,
+             tpl.venue || 'instructor', tpl.notes || '', tpl.instructor_notes || '']);
+        if (ins[0]) {
+            for (const g of tplGuides) {
+                await client.query(
+                    `INSERT INTO ride_guides (ride_id, guide_id, mode, horse_id) VALUES ($1, $2, $3, $4)`,
+                    [ins[0].id, g.guide_id, g.mode, g.mode === 'horse' ? g.horse_id : null]);
+            }
+        }
+        const { rows: tr } = await client.query(
+            `SELECT id, status FROM rides WHERE recurring_id = $1 AND date = $2`, [tpl.id, date]);
+        // a week the new slot was deleted on: nothing to move into, the seat
+        // stays where it is and the old week is simply kept
+        if (!tr[0] || tr[0].status !== 'active') continue;
+        await moveSeat(client, { id: s.id, date: s.date }, contactId, tr[0].id, true);
+        await client.query(
+            'UPDATE ride_participants SET from_recurring = true WHERE ride_id = $1 AND contact_id = $2',
+            [tr[0].id, contactId]);
+        await client.query(
+            `INSERT INTO ride_cancellations (ride_id, contact_id, kind, from_series, moved_to_ride_id)
+             VALUES ($1, $2, 'moved', true, $3)
+             ON CONFLICT (ride_id, contact_id) DO UPDATE
+                 SET kind = 'moved', from_series = true, billed = false, moved_to_ride_id = EXCLUDED.moved_to_ride_id`,
+            [s.id, contactId, tr[0].id]);
+        if (!firstTarget) firstTarget = date;
+        if (String(s.id) === String(ride.id)) thisWeekTarget = tr[0].id;
+    }
+    // template: off the old slot from this week, onto the new one at the same cadence
+    await leaveSeries(client, ride.recurring_id, contactId, String(ride.date).slice(0, 10));
+    const start = firstTarget || shiftDays(String(ride.date).slice(0, 10), shift);
+    const freq = member[0] ? member[0].frequency : 'weekly';
+    await client.query(
+        `INSERT INTO recurring_participants (recurring_id, contact_id, frequency, biweekly_anchor, start_date)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [tpl.id, contactId, freq, freq === 'biweekly' ? start : null, start]);
+    await client.query(
+        'UPDATE contacts SET is_prospect = false WHERE id = $1 AND is_prospect', [contactId]);
+    await syncSeriesCadence(client, tpl.id);
+    if (!thisWeekTarget) throw new UserError('This week could not be moved: the other lesson is not on the calendar that week.');
+    return thisWeekTarget;
 }
 
 // ---- the weekly series, as transaction helpers ----
@@ -4882,6 +5002,16 @@ function drawInvoicePage(doc, inv, lines, settings) {
     }
 }
 
+// "3 riders", "1 late cancellation — paid", "all rescheduled — not paid":
+// what the lesson was, and why it does or does not pay.
+function guideLessonNote(r) {
+    const bits = [];
+    if (r.rider_count) bits.push(`${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}`);
+    if (r.late_cancelled) bits.push(`${r.late_cancelled} late cancellation${r.late_cancelled === 1 ? '' : 's'}`);
+    if (!r.paid) bits.push(r.late_cancelled || r.rider_count ? 'not paid' : 'nobody rode — not paid');
+    return bits.join(', ');
+}
+
 // An instructor's own statement: every lesson they led in a period, what each
 // one pays, and the total. Same shape as an invoice, but running the other way
 // — from the instructor to the school.
@@ -4931,17 +5061,18 @@ function drawGuideStatement(doc, guide, rides, from, to, settings) {
     drawRow('Date', 'Lesson', 'Pay', true);
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
+    const paid = rides.filter((r) => r.paid);
     for (const r of rides) {
         if (doc.y > doc.page.height - 120) doc.addPage();
         const what = [r.start_time.slice(0, 5), r.ride_type_name || 'Lesson',
-            r.rider_count ? `${r.rider_count} rider${r.rider_count === 1 ? '' : 's'}` : 'no riders']
-            .filter(Boolean).join(' · ');
-        drawRow(fmtDay(r.date), what, money(rate), false);
+            guideLessonNote(r)].filter(Boolean).join(' · ');
+        drawRow(fmtDay(r.date), what, r.paid ? money(rate) : '—', false);
     }
     doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#999999').stroke();
     doc.moveDown(0.4);
-    drawRow('', `Total — ${rides.length} lesson${rides.length === 1 ? '' : 's'}`,
-        money(rides.length * rate), true);
+    drawRow('', `Total — ${paid.length} lesson${paid.length === 1 ? '' : 's'}`
+        + (paid.length !== rides.length ? ` (${rides.length - paid.length} not paid)` : ''),
+        money(paid.length * rate), true);
     if (!rate) {
         doc.moveDown(1);
         doc.fontSize(9).font('Helvetica').fillColor('#a8541c')
@@ -4964,7 +5095,11 @@ app.get('/api/guides/:id/statement.pdf', requireRole('helper'), async (req, res)
             `SELECT r.date::text AS date, r.start_time::text AS start_time,
                     COALESCE(rt.name, r.ride_type_name) AS ride_type_name,
                     (SELECT count(*)::int FROM ride_participants rp
-                      WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL) AS rider_count
+                      WHERE rp.ride_id = r.id AND rp.contact_id IS NOT NULL) AS rider_count,
+                    -- see GUIDE_PAID_SQL
+                    (SELECT count(*)::int FROM ride_cancellations rc
+                      WHERE rc.ride_id = r.id AND rc.kind = 'cancelled' AND rc.billed) AS late_cancelled,
+                    ${GUIDE_PAID_SQL} AS paid
                FROM ride_guides rg
                JOIN rides r ON r.id = rg.ride_id
                LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
