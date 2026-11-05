@@ -3671,6 +3671,27 @@ const FIXED_CANCEL_SQL = `(r.recurring_id IS NOT NULL AND EXISTS (
 const AHEAD_SEAT_SQL = `(${FIXED_SEAT_SQL} OR r.date < CURRENT_DATE)`;
 const AHEAD_CANCEL_SQL = `(${FIXED_CANCEL_SQL} OR r.date < CURRENT_DATE)`;
 
+// Does this rider have a fixed lesson, not yet invoiced, inside the term
+// [from, to]? That is what a term invoice is about; a rider with none is
+// billed through the monthly runs alone, so one lesson is never offered by
+// both. `who` names the rider column (rp.contact_id or rc.contact_id).
+const TERM_RIDER_SQL = (who, from, to) => `EXISTS (
+    SELECT 1 FROM rides r2 JOIN ride_participants rp2 ON rp2.ride_id = r2.id
+     WHERE rp2.contact_id = ${who} AND r2.status = 'active'
+       AND r2.date BETWEEN ${from} AND ${to} AND r2.recurring_id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM recurring_participants fx
+                    WHERE fx.recurring_id = r2.recurring_id AND fx.contact_id = rp2.contact_id)
+       AND NOT EXISTS (SELECT 1 FROM invoice_lines il2 WHERE il2.participant_id = rp2.id))`;
+
+// The term run owns this lesson: a per-term payer, the lesson falls inside
+// one of the school's terms, and the rider has an unbilled fixed lesson in
+// that term. The monthly run leaves it alone. Requires aliases r and payer.
+const TERM_OWNED_SQL = (who) => `(payer.payment_terms = 'advance_term' AND EXISTS (
+    SELECT 1 FROM school_terms st
+     WHERE st.school_id = payer.school_id
+       AND r.date BETWEEN st.period_start AND st.period_end
+       AND ${TERM_RIDER_SQL(who, 'st.period_start', 'st.period_end')}))`;
+
 // The other half of the reschedule rule: the seat the credit was spent on is
 // free, because the missed day carried the charge. Requires aliases r (rides)
 // and rp (ride_participants).
@@ -3817,6 +3838,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                        JOIN contacts p2 ON p2.id = COALESCE(rider.parent_id, rider.id)
                        LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
                       WHERE ((r.date BETWEEN $1 AND $2 AND ${AHEAD_SEAT_SQL}) OR ${PREV_MONTH_SQL('$1')})
+                        AND ${TERM_RIDER_SQL('rp.contact_id', '$1', '$2')}
                         AND p2.school_id = $3
                         AND p2.payment_terms = 'advance_term'
                         AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)
@@ -3824,6 +3846,7 @@ app.get('/api/invoices/term-overview', requireRole('helper'), async (req, res) =
                      UNION ALL
                      ${cancelledSeatsSQL({ where: `
                         AND ((r.date BETWEEN $1 AND $2 AND ${AHEAD_CANCEL_SQL}) OR ${PREV_MONTH_SQL('$1')})
+                        AND ${TERM_RIDER_SQL('rc.contact_id', '$1', '$2')}
                         AND payer.school_id = $3
                         AND payer.payment_terms = 'advance_term'` })}
                  )
@@ -3967,7 +3990,8 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                         -- invoiced once, by the term run, leftovers included
                         (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
                         ${IN_TERM_SQL} AS in_term,
-                        ${AHEAD_SEAT_SQL} AS fixed
+                        ${AHEAD_SEAT_SQL} AS fixed,
+                        ${TERM_OWNED_SQL('rp.contact_id')} AS term_owned
                    FROM ride_participants rp
                    JOIN rides r ON r.id = rp.ride_id AND r.status = 'active' AND NOT r.is_block
                    JOIN contacts rider ON rider.id = rp.contact_id AND NOT rider.archived
@@ -3986,7 +4010,8 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                         payer.payment_terms AS terms,
                         (payer.payment_terms = 'advance_term' AND ${TERM_STARTS_SQL}) AS term_month,
                         ${IN_TERM_SQL} AS in_term,
-                        ${AHEAD_CANCEL_SQL} AS fixed`,
+                        ${AHEAD_CANCEL_SQL} AS fixed,
+                        ${TERM_OWNED_SQL('rc.contact_id')} AS term_owned`,
                      where: `
                         AND r.date <= $2
                         AND payer.payment_terms ${termsFilter}` })}
@@ -4007,7 +4032,7 @@ function advanceBillableCTE(termsFilter = "IN ('advance_monthly', 'advance_term'
                  -- invoices for one lesson.
                  SELECT * FROM seats
                   WHERE NOT term_month
-                    AND ((NOT in_month AND in_reach)
+                    AND ((NOT in_month AND in_reach AND NOT term_owned)
                          OR (in_month AND in_term AND fixed AND terms = 'advance_monthly'
                              AND $1::date >= date_trunc('month', CURRENT_DATE)))
              )`;
@@ -4418,7 +4443,7 @@ async function cancelledLines(client, payerId, from, to, soleRider, mode) {
            JOIN contacts payer ON payer.id = COALESCE(rider.parent_id, rider.id)
            LEFT JOIN ride_types rt ON rt.id = r.ride_type_id
           WHERE ${BILLABLE_CANCELLATION_SQL} AND COALESCE(c.parent_id, c.id) = $1
-            AND ${PERIOD_FOR_MODE(mode, AHEAD_CANCEL_SQL)}
+            AND ${PERIOD_FOR_MODE(mode, AHEAD_CANCEL_SQL, 'rc.contact_id')}
             AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.cancellation_id = rc.id)
           ORDER BY r.date`, [payerId, from, to]);
     return rows.map((r) => ({
@@ -4516,12 +4541,13 @@ const CANCELLATION_PRICE_SQL = `COALESCE(
 // (FIXED_SEAT_SQL or FIXED_CANCEL_SQL). Only those are billed AHEAD; an
 // ad-hoc lesson in the coming month, like a holiday one, waits for the
 // following month's invoice once it has been ridden.
-const PERIOD_FOR_MODE = (mode, fixed = AHEAD_SEAT_SQL) => mode === 'advance_month'
-    ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK})
+const PERIOD_FOR_MODE = (mode, fixed = AHEAD_SEAT_SQL, who = 'rp.contact_id') => mode === 'advance_month'
+    ? `((r.date < $2 AND r.date >= $2::date - ${CARRY_BACK} AND NOT ${TERM_OWNED_SQL(who)})
         OR (r.date >= $2 AND r.date <= $3 AND ${IN_TERM_SQL} AND ${fixed}
             AND payer.payment_terms = 'advance_monthly'))`
     : mode === 'term'
-    ? `((r.date BETWEEN $2 AND $3 AND ${fixed}) OR ${PREV_MONTH_SQL('$2')})`
+    ? `(((r.date BETWEEN $2 AND $3 AND ${fixed}) OR ${PREV_MONTH_SQL('$2')})
+        AND ${TERM_RIDER_SQL(who, '$2', '$3')})`
     : 'r.date BETWEEN $2 AND $3';
 
 // The next number for the year, from a counter that only ever goes up. The
