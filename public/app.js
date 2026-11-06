@@ -2575,10 +2575,10 @@
             ${locked ? `<div class="warn-bar">🧾 <b>Already invoiced.</b>
                 ${(ride.invoiced_riders || []).map((r) =>
                     `${esc(r.name || 'A rider')} on ${esc(r.number || 'an invoice')}`).join(', ')}.
-                The ride itself — time, type, length — is fixed until that invoice is
-                deleted. The riders can still be taken off: cancelled-and-charged or
-                rescheduled leave the invoice as it stands, and cancelling an invoiced
-                rider creates a refund — a discount on their next invoice.</div>` : ''}
+                That invoice stands as it is — changing the time, type or length here
+                only affects riders not yet billed. Invoiced riders can still be taken
+                off: cancelled-and-charged or rescheduled leave the invoice as it stands,
+                and cancelling without charge creates a refund on their next invoice.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
             <label>Once-off or weekly? <span class="req">*</span></label>
             <select id="ride-repeat" style="width:auto;min-width:240px;margin-bottom:14px">
@@ -2700,9 +2700,9 @@
         }
         (isEdit ? ride.guides : []).forEach((g) => addRow('ride-guides', guideRowHtml(g)));
         document.getElementById('part-add').addEventListener('click', () => {
-            addRow('ride-parts', participantRowHtml(null, isEdit, onSeries ? 'once' : 'weekly'));
-            // show the cadence box at once: on a weekly ride the new row
-            // starts as "this day only", and that has to be visible to change
+            // A rider added to a weekly lesson is usually joining it, so the
+            // row starts as every week; "this day only" is a tap away.
+            addRow('ride-parts', participantRowHtml(null, isEdit, 'weekly'));
             syncFreqVisibility();
         });
         document.getElementById('guide-add').addEventListener('click', () =>
@@ -2739,7 +2739,14 @@
                     askConfirm(`${c.name} is owed ${owed.count} make-up lesson${owed.count === 1 ? '' : 's'}`,
                         'Use one for this lesson? It is then not charged — the day that was missed already paid for it.',
                         'Use the make-up', 'or add as an extra lesson, charged as usual')
-                        .then((yes) => { if (yes) { setCreditUse(row, true); markDirty(); } });
+                        .then((yes) => {
+                            if (!yes) return;
+                            setCreditUse(row, true);
+                            // a make-up is for this day; it does not join the weekly lesson
+                            const freq = row.querySelector('.pr-freq');
+                            if (freq) freq.value = 'once';
+                            markDirty();
+                        });
                 }
             }
             refreshOptions();
@@ -2788,16 +2795,8 @@
         if (locked) lockInvoicedParts();
 
         function lockInvoicedParts() {
-            // Ride-level settings describe every seat, the billed ones too, so
-            // none of them can move while an invoice points here.
-            ['ride-time', 'ride-type', 'ride-level', 'ride-duration', 'ride-venue', 'ride-repeat']
-                .forEach((id) => {
-                    const el = document.getElementById(id);
-                    if (el) {
-                        el.disabled = true;
-                        el.title = 'Already invoiced — the ride itself cannot be changed';
-                    }
-                });
+            // Invoice lines are snapshots, so the ride's own settings may
+            // still change — only the invoiced rider's seat itself is fixed.
             $dialog.querySelectorAll('[data-kind="part"][data-invoiced="1"]').forEach((row) => {
                 // Swapping the rider would move someone else's charge onto
                 // this invoice, so that one select is fixed. Taking them off

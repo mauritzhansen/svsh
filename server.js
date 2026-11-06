@@ -1702,9 +1702,6 @@ app.put('/api/recurring/:id', requireRole('helper'), async (req, res) => {
             const { rows: later } = await client.query(
                 `UPDATE rides r SET start_time = $2, duration_min = $3, ride_type_id = $4, level = $5
                   WHERE r.recurring_id = $1 AND r.date >= CURRENT_DATE AND r.status = 'active'
-                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
-                                     JOIN invoice_lines il ON il.participant_id = rp.id
-                                    WHERE rp.ride_id = r.id)
                   RETURNING r.id`,
                 [id, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.level]);
             for (const l of later) {
@@ -2327,24 +2324,16 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // pg hands back a Date for a date column unless told otherwise; both
         // sides are normalised before comparing.
         const day = (v) => (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
-        // The ride's own settings describe every seat on it, the billed ones
-        // included, so none of them may move while an invoice points here —
-        // re-timing or re-typing a lesson someone has already paid for would
-        // silently change what they were charged for. The UI disables these,
-        // so reaching this is a stale page or a direct call.
-        if (invoicedSeats.length) {
-            // Only the two the invoice itself is built from: it lists each
-            // lesson by date and prices it by ride type.
-            const frozen = [
-                ['date', day(existing[0].date), day(parsed.date)],
-                ['ride type', String(existing[0].ride_type_id ?? ''), String(parsed.ride_type_id ?? '')]
-            ].filter(([, was, now]) => was !== now).map(([what]) => what);
-            if (frozen.length) {
-                return res.status(400).json({
-                    error: `This ride is on invoice ${[...new Set(invoicedSeats.map((s) => s.number))].join(', ')}, `
-                        + `so its ${frozen.join(' and ')} cannot be changed. `
-                        + 'Delete that invoice first, or change only the riders who are not on it.' });
-            }
+        // An invoice line is a snapshot — amount and heading are written on
+        // the line — so re-typing or re-timing a lesson changes nothing for
+        // the riders already billed, and it is the only way the riders NOT
+        // yet billed get the right price. The one thing that stays put is
+        // the date: the invoice lists the lesson by it, and a lesson that
+        // moves day is a different thing (see the move options).
+        if (invoicedSeats.length && day(existing[0].date) !== parsed.date) {
+            return res.status(400).json({
+                error: `This ride is on invoice ${[...new Set(invoicedSeats.map((s) => s.number))].join(', ')}, `
+                    + 'so its date cannot be changed. Move the riders to another lesson instead.' });
         }
         const conflicts = await findConflicts(parsed.date, parsed.start_time,
             parsed.horseIds, req.params.id, parsed.allDay,
@@ -2518,10 +2507,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                 `UPDATE rides r SET start_time = $2, duration_min = $3, ride_type_id = $4,
                         level = $5, venue = $6, instructor_notes = $7
                   WHERE r.recurring_id = $1 AND r.id <> $8 AND r.date > $9
-                    AND r.status = 'active' AND NOT r.is_block
-                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
-                                     JOIN invoice_lines il ON il.participant_id = rp.id
-                                    WHERE rp.ride_id = r.id)`,
+                    AND r.status = 'active' AND NOT r.is_block`,
                 [recurringId, parsed.start_time, parsed.duration_min,
                  parsed.ride_type_id, parsed.level, parsed.venue, parsed.instructor_notes,
                  req.params.id, parsed.date]);
@@ -2537,14 +2523,11 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                      VALUES ($1, $2, $3, $4)`,
                     [recurringId, g.guide_id, g.mode, g.mode === 'horse' ? g.horse_id : null]);
             }
-            // and onto the weeks already created, same exclusions as above
+            // and onto the weeks already created
             const { rows: later } = await client.query(
                 `SELECT r.id FROM rides r
                   WHERE r.recurring_id = $1 AND r.id <> $2 AND r.date > $3
-                    AND r.status = 'active' AND NOT r.is_block
-                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
-                                     JOIN invoice_lines il ON il.participant_id = rp.id
-                                    WHERE rp.ride_id = r.id)`,
+                    AND r.status = 'active' AND NOT r.is_block`,
                 [recurringId, req.params.id, parsed.date]);
             for (const l of later) {
                 await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [l.id]);
@@ -2570,10 +2553,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
                 `UPDATE rides r SET ride_type_id = $2
                   WHERE r.recurring_id = $1 AND r.id <> $3
                     AND r.ride_type_id IS NULL AND r.ride_type_name IS NULL
-                    AND r.status = 'active' AND NOT r.is_block
-                    AND NOT EXISTS (SELECT 1 FROM ride_participants rp
-                                     JOIN invoice_lines il ON il.participant_id = rp.id
-                                    WHERE rp.ride_id = r.id)`,
+                    AND r.status = 'active' AND NOT r.is_block`,
                 [recurringId, parsed.ride_type_id, req.params.id]);
             typedSiblings = rowCount;
         }
