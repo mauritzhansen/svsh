@@ -5185,11 +5185,12 @@
     const invList = { items: [], prefs: loadInvoiceListPrefs() };
 
     function loadInvoiceListPrefs() {
-        const prefs = { show: { draft: true, sent: true, paid: false }, view: 'list', q: '' };
+        const prefs = { show: { draft: true, sent: true, paid: false }, view: 'list', q: '', tab: 'todo' };
         try {
             const saved = JSON.parse(localStorage.getItem('svsh.invoiceList') || 'null');
             if (saved && saved.show) prefs.show = { ...prefs.show, ...saved.show };
             if (saved && ['list', 'payer'].includes(saved.view)) prefs.view = saved.view;
+            if (saved && ['todo', 'created'].includes(saved.tab)) prefs.tab = saved.tab;
         } catch (err) { /* private window etc. — defaults are fine */ }
         return prefs;
     }
@@ -5197,9 +5198,11 @@
     function saveInvoiceListPrefs() {
         try {
             localStorage.setItem('svsh.invoiceList',
-                JSON.stringify({ show: invList.prefs.show, view: invList.prefs.view }));
+                JSON.stringify({ show: invList.prefs.show, view: invList.prefs.view, tab: invList.prefs.tab }));
         } catch (err) { /* not remembered, still works */ }
     }
+
+    function invTab() { return invList.prefs.tab === 'created' ? 'created' : 'todo'; }
 
     // "1–30 Nov 2026", "6 Oct – 9 Dec 2026", "12 Nov 2026"
     function invoicePeriodLabel(inv) {
@@ -5291,6 +5294,9 @@
             if (el) el.textContent = matches.filter((i) => i.status === st).length;
         });
         const shown = matches.filter((i) => show[i.status]);
+        const drafts = invList.items.filter((i) => i.status === 'draft').length;
+        const $db = document.getElementById('inv-draft-badge');
+        if ($db) { $db.textContent = drafts; $db.classList.toggle('hidden', !drafts); }
         if (!invList.items.length) { $t.className = 'muted'; $t.innerHTML = 'No invoices yet.'; return; }
         if (!shown.length) { $t.className = 'muted'; $t.innerHTML = 'No invoices match — tick another status above.'; return; }
         $t.className = '';
@@ -5497,6 +5503,12 @@
         });
         $view.innerHTML = `
             <h1>🧾 Invoices</h1>
+            <div class="month-pills inv-tabs">
+                <button class="month-pill ${invTab() === 'todo' ? 'active' : ''}" data-inv-tab="todo">To be created</button>
+                <button class="month-pill ${invTab() === 'created' ? 'active' : ''}" data-inv-tab="created">Created
+                    <span class="pill-badge hidden" id="inv-draft-badge" title="Drafts not sent yet"></span></button>
+            </div>
+            <div id="inv-tab-todo" class="${invTab() === 'todo' ? '' : 'hidden'}">
             <div id="inv-untyped-warn" class="warn-bar hidden"></div>
             <h2>In advance — per month</h2>
             <p class="muted">Riders whose payer is set to <b>In advance, per month</b>.
@@ -5555,9 +5567,21 @@
                    so they appear in neither run above.</p>
                 <div id="inv-unset"></div>
             </div>
-            <h2>Created invoices</h2>
-            <div class="card" id="inv-list">${invoiceListShellHtml()}</div>`;
+            </div>
+            <div id="inv-tab-created" class="${invTab() === 'created' ? '' : 'hidden'}">
+                <div class="card" id="inv-list">${invoiceListShellHtml()}</div>
+            </div>`;
         wireInvoiceListShell();
+        // Two tabs so neither half shifts the other up and down as it grows:
+        // the runs still to invoice, and the invoices already made.
+        document.querySelectorAll('[data-inv-tab]').forEach((b) => b.addEventListener('click', () => {
+            const tab = b.getAttribute('data-inv-tab');
+            invList.prefs.tab = tab;
+            saveInvoiceListPrefs();
+            document.querySelectorAll('[data-inv-tab]').forEach((x) => x.classList.toggle('active', x === b));
+            document.getElementById('inv-tab-todo').classList.toggle('hidden', tab !== 'todo');
+            document.getElementById('inv-tab-created').classList.toggle('hidden', tab !== 'created');
+        }));
         document.querySelectorAll('[data-ty]').forEach((b) => b.addEventListener('click', () => {
             state.termYear = Number(b.getAttribute('data-ty'));
             renderInvoices();
