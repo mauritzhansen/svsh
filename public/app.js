@@ -2724,33 +2724,93 @@
                     openNewRiderForRow(e.target.closest('.pick-row'));
                     return;
                 }
+                const before = e.target.dataset.prev || '';
                 e.target.dataset.prev = e.target.value;
                 // Picking a rider defaults the ride's level to their experience
                 const lvlSel = document.getElementById('ride-level');
                 const c = contactById(e.target.value);
                 if (lvlSel && !lvlSel.value && c && c.experience) lvlSel.value = c.experience;
-                // A rider who is owed a make-up: offer it, rather than quietly
-                // adding a lesson that will be charged on top of the one they
-                // already paid for and missed.
                 const row = e.target.closest('.pick-row');
                 setCreditUse(row, false);
-                const owed = (state.credits || []).find((cr) => String(cr.contact_id) === String(e.target.value));
-                if (c && owed && owed.count > 0) {
-                    askConfirm(`${c.name} is owed ${owed.count} make-up lesson${owed.count === 1 ? '' : 's'}`,
-                        'Use one for this lesson? It is then not charged — the day that was missed already paid for it.',
-                        'Use the make-up', 'or add as an extra lesson, charged as usual')
-                        .then((yes) => {
-                            if (!yes) return;
-                            setCreditUse(row, true);
-                            // a make-up is for this day; it does not join the weekly lesson
-                            const freq = row.querySelector('.pr-freq');
-                            if (freq) freq.value = 'once';
-                            markDirty();
-                        });
-                }
+                setMoveFrom(row, null);
+                riderPicked(row, e.target, c, before);
             }
             refreshOptions();
         });
+        // The questions a freshly picked rider raises, in order. Already on
+        // another lesson today: is this a second ride, or are they moving
+        // across? Moving carries the seat over, so there is nothing more to
+        // ask. Otherwise, a rider owed a make-up is offered it, rather than
+        // quietly getting a lesson charged on top of the one they missed.
+        async function riderPicked(row, select, c, before) {
+            if (!c) return;
+            const cid = String(select.value);
+            const elsewhere = dayRides.find((r) => !r.is_block && !r.all_day && r.status !== 'cancelled'
+                && !(isEdit && String(r.id) === String(ride.id))
+                && (r.participants || []).some((p) => String(p.contact_id) === cid));
+            if (elsewhere) {
+                const at = hhmm(elsewhere.start_time);
+                const choice = await askChoice(`${c.name} is already riding today`,
+                    `They are on the ${at} lesson${elsewhere.ride_type_name ? ' (' + elsewhere.ride_type_name + ')' : ''}.`, [
+                        { key: 'move', label: `Move them from the ${at} lesson`,
+                          hint: 'the seat comes across; nothing changes for invoicing or credits' },
+                        { key: 'extra', label: 'A second lesson today',
+                          hint: 'added on top of the other one, charged as usual' }
+                    ]);
+                if (!choice) {
+                    // thought better of it — put the row back as it was
+                    select.value = before;
+                    select.dataset.prev = before;
+                    refreshOptions();
+                    return;
+                }
+                if (choice === 'move') {
+                    setMoveFrom(row, elsewhere);
+                    const freq = row.querySelector('.pr-freq');
+                    if (freq) freq.value = 'once';
+                    // their horse comes along when it is free at this time
+                    const seat = elsewhere.participants.find((p) => String(p.contact_id) === cid);
+                    const horseSel = row.querySelector('.pr-horse');
+                    if (seat && seat.horse_id && horseSel && !horseSel.value
+                        && [...horseSel.options].some((o) => o.value === String(seat.horse_id) && !o.disabled)) {
+                        horseSel.value = String(seat.horse_id);
+                    }
+                    markDirty();
+                    refreshOptions();
+                    return;
+                }
+            }
+            const owed = (state.credits || []).find((cr) => String(cr.contact_id) === cid);
+            if (owed && owed.count > 0) {
+                const yes = await askConfirm(`${c.name} is owed ${owed.count} make-up lesson${owed.count === 1 ? '' : 's'}`,
+                    'Use one for this lesson? It is then not charged — the day that was missed already paid for it.',
+                    'Use the make-up', 'or add as an extra lesson, charged as usual');
+                if (!yes) return;
+                setCreditUse(row, true);
+                // a make-up is for this day; it does not join the weekly lesson
+                const freq = row.querySelector('.pr-freq');
+                if (freq) freq.value = 'once';
+                markDirty();
+            }
+        }
+        // Marks a row as a rider coming across from another lesson today.
+        function setMoveFrom(row, fromRide) {
+            if (!row) return;
+            let tag = row.querySelector('.move-tag');
+            if (fromRide) {
+                row.dataset.moveFrom = String(fromRide.id);
+                if (!tag) {
+                    tag = document.createElement('span');
+                    tag.className = 'rider-makeup move-tag';
+                    row.appendChild(tag);
+                }
+                tag.title = 'Moved from another lesson today — the seat comes across when you save';
+                tag.textContent = `← moved from the ${hhmm(fromRide.start_time)} lesson`;
+            } else {
+                delete row.dataset.moveFrom;
+                if (tag) tag.remove();
+            }
+        }
         // Marks a row as spending one of the rider's make-up credits on save.
         function setCreditUse(row, on) {
             if (!row) return;
@@ -2891,6 +2951,10 @@
                 // the credit a make-up rider is using, spent with the seat it pays for
                 use_credit_contact_ids: partRows.filter((row) => row.dataset.useCredit === '1')
                     .map((row) => row.querySelector('.pr-contact').value).filter(Boolean),
+                // riders coming across from another lesson today, seat and all
+                move_in: partRows.filter((row) => row.dataset.moveFrom)
+                    .map((row) => ({ contact_id: row.querySelector('.pr-contact').value, from_ride_id: row.dataset.moveFrom }))
+                    .filter((m) => m.contact_id),
                 series: {
                     repeat: document.getElementById('ride-repeat').value,
                     riders: seriesRiders,
@@ -2927,9 +2991,11 @@
                 } else await api('POST', '/api/rides', body);
                 closeDialog();
                 const usedNames = body.use_credit_contact_ids.map((id) => (contactById(id) || {}).name).filter(Boolean);
+                const movedNames = body.move_in.map((m) => (contactById(m.contact_id) || {}).name).filter(Boolean);
                 toast(credits.length
                     ? `Saved. ${credits.map((pc) => pc.name).join(', ')} got a reschedule credit.`
                     : usedNames.length ? `Saved — make-up used for ${usedNames.join(', ')}.`
+                    : movedNames.length ? `Saved — ${movedNames.join(', ')} moved across from the other lesson.`
                     : seriesRides ? `Saved. The weekly slot and ${seriesRides} later ride${seriesRides === 1 ? '' : 's'} were updated too.`
                     : typedSiblings ? `Saved. The ride type was also set on ${typedSiblings} other ride${typedSiblings === 1 ? '' : 's'} in this weekly series that had none.`
                     : 'Saved.');
@@ -5051,8 +5117,15 @@
                     // Update in place rather than re-rendering — a full redraw
                     // loses your place in a long list, badly so on a phone.
                     const row = btn.closest('tr');
+                    const table = row && row.closest('table');
                     if (row) row.remove();
+                    // the last row gone: say so, rather than leave a bare heading
+                    if (table && !table.querySelector('[data-inv-contact]')) {
+                        const holder = table.closest('.table-wrap') || table;
+                        holder.outerHTML = '<span class="muted">Nothing left to invoice here.</span>';
+                    }
                     addInvoiceToList(res.invoice);
+                    refreshAdvancePills();
                     openInvoiceCreatedDialog(res.invoice, res.riders || 1);
                 } catch (err) {
                     btn.disabled = false;
@@ -5062,14 +5135,34 @@
         });
     }
 
+    // The month pills carry how many payers are still to invoice. One invoice
+    // can change more than the month it was raised for (an advance invoice
+    // sweeps up the month before), so the counts come fresh from the server
+    // and are patched into the pills in place — no page redraw.
+    async function refreshAdvancePills() {
+        let months = [];
+        try { months = (await api('GET', '/api/invoices/advance-outstanding')).months; } catch (err) { return; }
+        months.forEach((m) => {
+            const pill = document.querySelector(`.adv-pill[data-adv="${m.month}"]`);
+            if (!pill) return;
+            const badge = pill.querySelector('.pill-badge');
+            if (m.riders) {
+                if (badge) badge.textContent = m.riders;
+                else {
+                    pill.textContent = pill.textContent.replace(/\s*✓\s*$/, '');
+                    pill.insertAdjacentHTML('beforeend', ` <span class="pill-badge">${m.riders}</span>`);
+                }
+            } else if (badge) {
+                badge.remove();
+                pill.insertAdjacentText('beforeend', ' ✓');
+            }
+        });
+    }
+
     // Slot a newly created invoice into the created list without a page redraw
     function addInvoiceToList(inv) {
-        const $list = document.getElementById('inv-list');
-        if (!$list) return;
-        if (!$list.querySelector('.list-item')) $list.innerHTML = '';
-        $list.classList.remove('muted');
-        $list.insertAdjacentHTML('afterbegin', invoiceRowHtml(inv));
-        wireInvoiceRow($list.firstElementChild, inv);
+        invList.items.unshift(inv);
+        drawInvoiceList();
     }
 
     // ---------- Invoices ----------
@@ -5085,33 +5178,164 @@
         return `${m} item${m === 1 ? '' : 's'}`;
     }
 
-    // One created-invoice row. Extracted so a freshly created invoice can be
-    // slipped into the list without re-rendering (and re-scrolling) the page.
-    function invoiceRowHtml(inv) {
-        return `<div class="list-item" data-inv-row="${inv.id}">
-            <div class="li-main">
-                <div class="li-title">${esc(inv.number)} — ${esc(inv.contact_name)}
-                    ${inv.kind === 'advance' ? '<span class="chip" style="background:#e8e2f5;color:#5b4ab8">in advance</span>' : ''}</div>
-                <div class="li-sub">${inv.rider_name && inv.rider_name !== inv.contact_name ? `for ${esc(inv.rider_name)} · ` : ''}${
-                    esc(fmtDay(inv.period_start))} – ${esc(fmtDay(inv.period_end))} · ${
-                    invoiceCountLabel(inv)} · ${money(inv.total_cents)}</div>
+    // ---- Created invoices: one compact table line per invoice ----
+    // Which statuses are shown and whether the list is grouped by payer are
+    // remembered per browser; the invoices themselves come from the server.
+    const INVOICE_STATUSES = ['draft', 'sent', 'paid'];
+    const invList = { items: [], prefs: loadInvoiceListPrefs() };
+
+    function loadInvoiceListPrefs() {
+        const prefs = { show: { draft: true, sent: true, paid: false }, view: 'list', q: '' };
+        try {
+            const saved = JSON.parse(localStorage.getItem('svsh.invoiceList') || 'null');
+            if (saved && saved.show) prefs.show = { ...prefs.show, ...saved.show };
+            if (saved && ['list', 'payer'].includes(saved.view)) prefs.view = saved.view;
+        } catch (err) { /* private window etc. — defaults are fine */ }
+        return prefs;
+    }
+
+    function saveInvoiceListPrefs() {
+        try {
+            localStorage.setItem('svsh.invoiceList',
+                JSON.stringify({ show: invList.prefs.show, view: invList.prefs.view }));
+        } catch (err) { /* not remembered, still works */ }
+    }
+
+    // "1–30 Nov 2026", "6 Oct – 9 Dec 2026", "12 Nov 2026"
+    function invoicePeriodLabel(inv) {
+        if (!inv.period_start) return '';
+        const a = new Date(String(inv.period_start).slice(0, 10) + 'T00:00:00');
+        const b = new Date(String(inv.period_end || inv.period_start).slice(0, 10) + 'T00:00:00');
+        const mon = (d) => d.toLocaleDateString('en-GB', { month: 'short' });
+        if (a.getTime() === b.getTime()) return fmtDay(inv.period_start);
+        if (a.getFullYear() !== b.getFullYear()) return `${fmtDay(inv.period_start)} – ${fmtDay(inv.period_end)}`;
+        if (a.getMonth() === b.getMonth()) return `${a.getDate()}–${b.getDate()} ${mon(b)} ${b.getFullYear()}`;
+        return `${a.getDate()} ${mon(a)} – ${b.getDate()} ${mon(b)} ${b.getFullYear()}`;
+    }
+
+    // The section's toolbar and table holder. Drawn once with the page; the
+    // table under it is redrawn on its own whenever the list or a filter changes.
+    function invoiceListShellHtml() {
+        const p = invList.prefs;
+        return `
+            <div class="inv-toolbar">
+                <div class="inv-filters">
+                    ${INVOICE_STATUSES.map((st) => `
+                        <label class="inv-check st-${st}">
+                            <input type="checkbox" data-inv-show="${st}" ${p.show[st] ? 'checked' : ''}>
+                            ${st[0].toUpperCase() + st.slice(1)} <span class="inv-count" data-inv-count="${st}"></span>
+                        </label>`).join('')}
+                </div>
+                <input type="search" id="inv-search" placeholder="Search name or number" value="${esc(p.q)}">
+                <div class="seg">
+                    <button type="button" data-inv-view="list" class="${p.view === 'list' ? 'active' : ''}">List</button>
+                    <button type="button" data-inv-view="payer" class="${p.view === 'payer' ? 'active' : ''}">By payer</button>
+                </div>
             </div>
-            <select class="inv-status" data-inv-id="${inv.id}" style="width:auto">
-                ${['draft', 'sent', 'paid'].map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
-            </select>
-            <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf"
-               target="_blank" rel="noopener" title="Open in a new tab">View</a>
-            <a class="btn secondary small" href="/api/invoices/${inv.id}/pdf?download=1"
-               download title="Save the PDF to this device">⬇ PDF</a>
-            ${waNumber(inv.contact_phone)
-                ? `<button class="secondary small" data-inv-wa="${inv.id}">💬 Send</button>`
-                : '<span class="muted" style="font-size:12px" title="No phone number on this contact">no number</span>'}
-            ${inv.status === 'draft'
-                ? `<button class="danger small" data-inv-del="${inv.id}" data-inv-num="${esc(inv.number)}"
-                           title="Delete this draft — its rides can then be invoiced again">✕</button>`
-                : `<button class="danger small" disabled
-                           title="Only drafts can be deleted; this one is marked ${esc(inv.status)}">✕</button>`}
-        </div>`;
+            <div id="inv-table" class="muted">Loading…</div>`;
+    }
+
+    function wireInvoiceListShell() {
+        document.querySelectorAll('[data-inv-show]').forEach((cb) => cb.addEventListener('change', () => {
+            invList.prefs.show[cb.getAttribute('data-inv-show')] = cb.checked;
+            saveInvoiceListPrefs();
+            drawInvoiceList();
+        }));
+        document.querySelectorAll('[data-inv-view]').forEach((b) => b.addEventListener('click', () => {
+            invList.prefs.view = b.getAttribute('data-inv-view');
+            document.querySelectorAll('[data-inv-view]').forEach((x) => x.classList.toggle('active', x === b));
+            saveInvoiceListPrefs();
+            drawInvoiceList();
+        }));
+        const q = document.getElementById('inv-search');
+        if (q) q.addEventListener('input', () => { invList.prefs.q = q.value; drawInvoiceList(); });
+    }
+
+    function invoiceRowHtml(inv, grouped) {
+        const forRider = inv.rider_name && inv.rider_name !== inv.contact_name;
+        return `<tr data-inv-row="${inv.id}" class="inv-row st-${inv.status}">
+            <td class="nowrap c-num"><b>${esc(inv.number.replace(/^INV-/, ''))}</b>${
+                inv.kind === 'advance' ? ' <span class="inv-adv" title="Billed in advance">adv</span>' : ''}</td>
+            ${grouped
+                ? `<td class="inv-who c-who">${forRider ? esc(inv.rider_name) : '<span class="muted">—</span>'}</td>`
+                : `<td class="inv-who c-who"><a href="#/contacts/${inv.contact_id}">${esc(inv.contact_name)}</a>${
+                    forRider ? ` <span class="muted">· ${esc(inv.rider_name)}</span>` : ''}</td>`}
+            <td class="nowrap muted c-period">${esc(invoicePeriodLabel(inv))}</td>
+            <td class="num nowrap muted c-rides">${invoiceCountLabel(inv)}</td>
+            <td class="num nowrap c-total"><b>${money(inv.total_cents)}</b></td>
+            <td class="c-status"><select class="inv-status st-${inv.status}" data-inv-id="${inv.id}">
+                ${INVOICE_STATUSES.map((s) => `<option value="${s}" ${inv.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+            </select></td>
+            <td class="inv-actions nowrap c-act">
+                <a class="icon-btn" href="/api/invoices/${inv.id}/pdf" target="_blank" rel="noopener" title="View the invoice">👁</a>
+                <a class="icon-btn" href="/api/invoices/${inv.id}/pdf?download=1" download title="Download the PDF">⬇</a>
+                ${waNumber(inv.contact_phone)
+                    ? `<button type="button" class="icon-btn" data-inv-wa="${inv.id}" title="Send on WhatsApp">💬</button>`
+                    : '<span class="icon-btn disabled" title="No phone number on this contact">💬</span>'}
+                <button type="button" class="icon-btn danger" data-inv-del="${inv.id}" ${inv.status === 'draft' ? ''
+                    : 'disabled'} title="${inv.status === 'draft' ? 'Delete this draft — its rides can then be invoiced again'
+                    : 'Only drafts can be deleted'}">✕</button>
+            </td>
+        </tr>`;
+    }
+
+    function drawInvoiceList() {
+        const $t = document.getElementById('inv-table');
+        if (!$t) return;
+        const { show, view } = invList.prefs;
+        const q = (invList.prefs.q || '').trim().toLowerCase();
+        const matches = invList.items.filter((i) => !q || [i.number, i.contact_name, i.rider_name]
+            .some((v) => String(v || '').toLowerCase().includes(q)));
+        INVOICE_STATUSES.forEach((st) => {
+            const el = document.querySelector(`[data-inv-count="${st}"]`);
+            if (el) el.textContent = matches.filter((i) => i.status === st).length;
+        });
+        const shown = matches.filter((i) => show[i.status]);
+        if (!invList.items.length) { $t.className = 'muted'; $t.innerHTML = 'No invoices yet.'; return; }
+        if (!shown.length) { $t.className = 'muted'; $t.innerHTML = 'No invoices match — tick another status above.'; return; }
+        $t.className = '';
+        const head = (grouped) => `<tr class="inv-head"><th>Invoice</th><th>${grouped ? 'Rider' : 'Payer'}</th><th>Period</th>
+            <th class="num">Rides</th><th class="num">Total</th><th>Status</th><th></th></tr>`;
+        let body;
+        if (view === 'payer') {
+            const groups = new Map();
+            shown.forEach((i) => {
+                const k = String(i.contact_id);
+                if (!groups.has(k)) groups.set(k, { name: i.contact_name, id: i.contact_id, items: [] });
+                groups.get(k).items.push(i);
+            });
+            body = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)).map((g) => {
+                const unpaid = g.items.filter((i) => i.status !== 'paid').reduce((n, i) => n + (i.total_cents || 0), 0);
+                const total = g.items.reduce((n, i) => n + (i.total_cents || 0), 0);
+                return `<tr class="inv-group"><td colspan="7">
+                        <a href="#/contacts/${g.id}">${esc(g.name)}</a>
+                        <span class="muted">· ${g.items.length} invoice${g.items.length === 1 ? '' : 's'} · ${money(total)}</span>
+                        ${unpaid ? `<span class="inv-unpaid">${money(unpaid)} unpaid</span>` : ''}
+                    </td></tr>${g.items.map((i) => invoiceRowHtml(i, true)).join('')}`;
+            }).join('');
+        } else {
+            body = shown.map((i) => invoiceRowHtml(i, false)).join('');
+        }
+        const sum = shown.reduce((n, i) => n + (i.total_cents || 0), 0);
+        $t.innerHTML = `<div class="table-wrap"><table class="plain inv-table">
+            ${head(view === 'payer')}${body}
+            <tr class="inv-foot"><td colspan="4">${shown.length} invoice${shown.length === 1 ? '' : 's'}</td>
+                <td class="num nowrap"><b>${money(sum)}</b></td><td colspan="2"></td></tr>
+        </table></div>`;
+        $t.querySelectorAll('tr[data-inv-row]').forEach((el) =>
+            wireInvoiceRow(el, invList.items.find((i) => String(i.id) === el.getAttribute('data-inv-row'))));
+    }
+
+    // A status set here or in the "created" dialog: the list follows, and if
+    // the new status is filtered out the row leaves — so say where it went.
+    async function setInvoiceStatus(inv, status) {
+        await api('PUT', `/api/invoices/${inv.id}`, { status });
+        inv.status = status;
+        const mine = invList.items.find((i) => String(i.id) === String(inv.id));
+        if (mine) mine.status = status;
+        drawInvoiceList();
+        toast(invList.prefs.show[status] ? 'Status updated.'
+            : `${inv.number} marked ${status} — tick “${status}” above to see it.`);
     }
 
     function wireInvoiceRow(el, inv) {
@@ -5120,18 +5344,12 @@
         if (wa) wa.addEventListener('click', () => sendInvoiceOnWhatsApp(inv));
         const sel = el.querySelector('.inv-status');
         if (sel) sel.addEventListener('change', async () => {
-            try {
-                await api('PUT', `/api/invoices/${inv.id}`, { status: sel.value });
-                inv.status = sel.value;
-                toast('Status updated.');
-                // only drafts may be deleted, so the ✕ has to follow the status
-                const del = el.querySelector('[data-inv-del], [data-inv-del] , button.danger');
-                if (del) del.disabled = sel.value !== 'draft';
-            } catch (err) {
+            try { await setInvoiceStatus(inv, sel.value); } catch (err) {
+                sel.value = inv.status;
                 toast(err.message, true);
             }
         });
-        const del = el.querySelector('[data-inv-del]');
+        const del = el.querySelector('[data-inv-del]:not([disabled])');
         if (del) del.addEventListener('click', async () => {
             if (!await askConfirm(`Delete invoice ${inv.number}?`,
                 'Its rides go back to the to-invoice list and can be invoiced again.',
@@ -5166,14 +5384,8 @@
             </div>`);
         const statusSel = overlay.querySelector('#ic-status');
         statusSel.addEventListener('change', async () => {
-            try {
-                await api('PUT', `/api/invoices/${inv.id}`, { status: statusSel.value });
-                inv.status = statusSel.value;
-                // keep the row in the list in step
-                const row = document.querySelector(`[data-inv-row="${inv.id}"] .inv-status`);
-                if (row) row.value = statusSel.value;
-                toast('Status updated.');
-            } catch (err) { toast(err.message, true); }
+            // the list underneath follows
+            try { await setInvoiceStatus(inv, statusSel.value); } catch (err) { toast(err.message, true); }
         });
         const send = overlay.querySelector('#ic-send');
         if (send) send.addEventListener('click', () => sendInvoiceOnWhatsApp(inv));
@@ -5344,7 +5556,8 @@
                 <div id="inv-unset"></div>
             </div>
             <h2>Created invoices</h2>
-            <div id="inv-list" class="muted">Loading…</div>`;
+            <div class="card" id="inv-list">${invoiceListShellHtml()}</div>`;
+        wireInvoiceListShell();
         document.querySelectorAll('[data-ty]').forEach((b) => b.addEventListener('click', () => {
             state.termYear = Number(b.getAttribute('data-ty'));
             renderInvoices();
@@ -5438,15 +5651,8 @@
                 </table></div>`;
                 wireCreateInvoiceButtons($ov, arrRange);
             }
-            const $list = document.getElementById('inv-list');
-            if (!invs.invoices.length) {
-                $list.innerHTML = '<div class="card muted">No invoices yet.</div>';
-            } else {
-                $list.classList.remove('muted');
-                $list.innerHTML = invs.invoices.map(invoiceRowHtml).join('');
-                $list.querySelectorAll('.list-item[data-inv-row]').forEach((el) =>
-                    wireInvoiceRow(el, invs.invoices.find((i) => String(i.id) === el.getAttribute('data-inv-row'))));
-            }
+            invList.items = invs.invoices;
+            drawInvoiceList();
         } catch (err) {
             document.getElementById('inv-overview').textContent = err.message;
         }

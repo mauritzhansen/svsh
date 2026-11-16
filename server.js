@@ -1898,6 +1898,12 @@ function parseRideBody(body) {
         return { error: isBlock ? 'Pick at least one horse to block.'
             : 'A ride needs at least one rider, horse or instructor.' };
     }
+    // Riders arriving from another lesson the same day — the mirror image of
+    // a 'moved' cancellation, seen from the lesson they are moving TO. Each
+    // one must also be among the participants (that row says which horse).
+    const moveIn = (Array.isArray((body || {}).move_in) ? body.move_in : [])
+        .filter((m) => m && m.contact_id && m.from_ride_id && contactsUsed.has(String(m.contact_id)))
+        .map((m) => ({ contact_id: m.contact_id, from_ride_id: m.from_ride_id }));
     return {
         date, start_time, isBlock, allDay,
         level: rideLevel,
@@ -1906,7 +1912,7 @@ function parseRideBody(body) {
         ride_type_id: ride_type_id || null,
         notes: notes || '',
         instructor_notes: instructor_notes || '',
-        participants, guides, cancellations,
+        participants, guides, cancellations, moveIn,
         horseIds: [...horsesUsed]
     };
 }
@@ -2211,8 +2217,18 @@ app.post('/api/rides', requireAuth, async (req, res) => {
             `INSERT INTO rides (date, start_time, duration_min, ride_type_id, is_block, all_day, level, venue, notes, instructor_notes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
             [parsed.date, parsed.start_time, parsed.duration_min, parsed.ride_type_id, parsed.isBlock, parsed.allDay, parsed.level, parsed.venue, parsed.notes, parsed.instructor_notes]);
-        await insertRideChildren(client, rows[0].id, parsed.participants, parsed.guides);
+        const arriving = await pendingMoveIns(client, rows[0].id, parsed.moveIn);
+        await insertRideChildren(client, rows[0].id,
+            parsed.participants.filter((p) => !arriving.has(String(p.contact_id))), parsed.guides);
+        await carryMoveIns(client, rows[0].id, arriving, parsed.participants);
         if (parsed.cancellations.length) await replaceCancellations(client, rows[0].id, parsed.cancellations);
+        // a make-up on a brand-new lesson spends its credit with the seat
+        for (const cid of useCreditIds(req.body)) {
+            if (!parsed.participants.some((p) => String(p.contact_id) === cid)) {
+                throw new UserError('The rider using the credit is not on the ride.');
+            }
+            await consumeCredit(client, cid, rows[0].id);
+        }
         await applySeriesChanges(client, rows[0].id, parseSeriesBody(req.body));
         await client.query('COMMIT');
         notifyScheduleChanged(parsed.date);
@@ -2277,10 +2293,7 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
         // A rider put on this ride with a reschedule credit: the credit is
         // spent in the same transaction as the seat it pays for.
         // Several riders may be using one each (two make-ups on one lesson).
-        const useCredits = [...new Set([
-            (req.body || {}).use_credit_contact_id,
-            ...(Array.isArray((req.body || {}).use_credit_contact_ids) ? req.body.use_credit_contact_ids : [])
-        ].filter(Boolean).map(String))];
+        const useCredits = useCreditIds(req.body);
         for (const useCredit of useCredits) {
             const seat = parsed.participants.find((p) => String(p.contact_id) === useCredit);
             if (!seat) return res.status(400).json({ error: 'The rider using the credit is not on the ride.' });
@@ -2431,9 +2444,14 @@ app.put('/api/rides/:id', requireAuth, async (req, res) => {
               AND NOT EXISTS (SELECT 1 FROM invoice_lines il WHERE il.participant_id = rp.id)`,
             [req.params.id]);
         await client.query('DELETE FROM ride_guides WHERE ride_id = $1', [req.params.id]);
+        // Riders coming across from another lesson today bring their own seat
+        // (see carryMoveIns), so they are not inserted fresh here.
+        const arriving = await pendingMoveIns(client, req.params.id, parsed.moveIn);
         await insertRideChildren(client, req.params.id,
-            parsed.participants.filter((p) => !billedContacts.has(String(p.contact_id))),
+            parsed.participants.filter((p) => !billedContacts.has(String(p.contact_id))
+                && !arriving.has(String(p.contact_id))),
             parsed.guides);
+        await carryMoveIns(client, req.params.id, arriving, parsed.participants);
         // a preserved seat can still have its horse changed
         for (const seat of invoicedSeats) {
             const p = parsed.participants.find((x) => String(x.contact_id) === String(seat.contact_id));
@@ -2670,6 +2688,48 @@ async function moveSeat(client, ride, contactId, toRideId, anyDay = false) {
         'DELETE FROM ride_cancellations WHERE ride_id = $1 AND contact_id = $2', [to.id, contactId]);
 }
 
+// The riders a save says are coming across from another lesson the same day,
+// narrowed to the ones that still need carrying: a rider already seated here,
+// or no longer seated on the lesson they are said to come from, was moved by
+// an earlier save and the marker is just being re-sent.
+async function pendingMoveIns(client, rideId, moveIn) {
+    const arriving = new Map();
+    for (const m of moveIn || []) {
+        const { rows: here } = await client.query(
+            'SELECT 1 FROM ride_participants WHERE ride_id = $1 AND contact_id = $2', [rideId, m.contact_id]);
+        if (here[0]) continue;
+        const { rows: there } = await client.query(
+            'SELECT 1 FROM ride_participants WHERE ride_id = $1 AND contact_id = $2', [m.from_ride_id, m.contact_id]);
+        if (!there[0]) continue;
+        arriving.set(String(m.contact_id), m.from_ride_id);
+    }
+    return arriving;
+}
+
+// Carries those seats across: the same move as taking the rider off the other
+// lesson with "Move to another lesson today", only started from this end. The
+// seat row moves with its invoice line and credit, the other lesson keeps a
+// "moved" marker, and the horse becomes whatever this dialog picked.
+async function carryMoveIns(client, rideId, arriving, participants) {
+    for (const [cid, fromRideId] of arriving) {
+        const { rows: src } = await client.query('SELECT * FROM rides WHERE id = $1', [fromRideId]);
+        if (!src[0]) throw new UserError('The lesson the rider is moving from no longer exists.');
+        await moveSeat(client, src[0], cid, rideId);
+        const p = participants.find((x) => String(x.contact_id) === cid);
+        if (p) {
+            await client.query(
+                'UPDATE ride_participants SET horse_id = $3, alt_horse_id = $4 WHERE ride_id = $1 AND contact_id = $2',
+                [rideId, cid, p.horse_id || null, p.alt_horse_id || null]);
+        }
+        await client.query(
+            `INSERT INTO ride_cancellations (ride_id, contact_id, kind, from_series, billed, moved_to_ride_id)
+             VALUES ($1, $2, 'moved', false, false, $3)
+             ON CONFLICT (ride_id, contact_id) DO UPDATE
+                 SET kind = 'moved', from_series = false, billed = false, moved_to_ride_id = EXCLUDED.moved_to_ride_id`,
+            [fromRideId, cid, rideId]);
+    }
+}
+
 // A rider's fixed lesson changes day or time for good — Thursdays become
 // Mondays — after their term has been invoiced. The invoice must survive and
 // nothing may be billed twice, so this is the same-day move applied week by
@@ -2891,6 +2951,15 @@ async function stopRepeat(client, ride) {
 }
 
 // Marks the contact's oldest open credit as used on the given ride.
+// The riders a save says are using a make-up credit, in either form the
+// dialog has sent it (one id, or a list).
+function useCreditIds(body) {
+    return [...new Set([
+        (body || {}).use_credit_contact_id,
+        ...(Array.isArray((body || {}).use_credit_contact_ids) ? body.use_credit_contact_ids : [])
+    ].filter(Boolean).map(String))];
+}
+
 async function consumeCredit(client, contactId, rideId) {
     const { rows } = await client.query(
         `UPDATE reschedule_credits SET used_at = now(), used_ride_id = $2
@@ -4197,7 +4266,7 @@ app.get('/api/invoices', requireRole('helper'), async (req, res) => {
                FROM invoices i JOIN contacts c ON c.id = i.contact_id
                LEFT JOIN contacts rc ON rc.id = i.rider_contact_id
               ${where}
-              ORDER BY i.created_at DESC LIMIT 200`, params);
+              ORDER BY i.created_at DESC LIMIT 2000`, params);
         res.json({ invoices: rows });
     } catch (err) {
         handleError(res, err, 'Loading invoices');
