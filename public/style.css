@@ -1637,11 +1637,23 @@ body.is-offline .ride-box { opacity: 0.92; }
 /* A rider row carries a long cadence label ("Every 2nd week — off week starts
    here"): the rider and horse pickers keep their room, and on a narrow screen
    the cadence drops to its own line rather than squashing them. */
-.pick-row[data-kind="part"] { flex-wrap: wrap; row-gap: 4px; margin-bottom: 10px; }
-.pick-row[data-kind="part"] .pr-contact,
-.pick-row[data-kind="part"] .pr-horse { flex: 2 1 150px; }
-.pick-row[data-kind="part"] .pr-freq { flex: 1 1 230px; }
-.pick-row[data-kind="part"] .pr-alt { flex: 1 1 150px; }
+/* One line per rider: name | horse | alt | how often | ⟳ | ✕. min-width 0
+   lets a select shrink below its longest option instead of wrapping the row. */
+.pick-row[data-kind="part"] { flex-wrap: wrap; row-gap: 4px; margin-bottom: 6px; }
+.pick-row[data-kind="part"] select { min-width: 0; padding: 8px 2px 8px 6px; text-overflow: ellipsis; }
+@media (max-width: 480px) {
+    .pick-row[data-kind="part"] { gap: 4px; }
+    .pick-row[data-kind="part"] select { font-size: 14px; padding: 7px 0 7px 4px; }
+    .pick-row[data-kind="part"] > button.small { padding: 6px 7px; }
+    .pick-row[data-kind="part"] .pr-alt-toggle { padding: 6px 5px; }
+}
+.pick-row[data-kind="part"] .pr-contact { flex: 3 1 0; }
+.pick-row[data-kind="part"] .pr-horse { flex: 3 1 0; }
+.pick-row[data-kind="part"] .pr-freq { flex: 2 1 0; }
+.pick-row[data-kind="part"] .pr-alt { flex: 1 1 100%; order: 5; }
+/* make-up / moved notes sit on their own line under the row, as plain text */
+.pick-row[data-kind="part"] .rider-makeup { flex: 1 1 100%; order: 6; background: none; padding: 0 2px; }
+.pick-row[data-kind="part"] > button { flex: 0 0 auto; }
 
 /* A fortnightly rider on her off week: listed so the fortnight can be restarted
    around her, but greyed and inert until "Riding this week instead" is tapped. */
@@ -1741,4 +1753,34 @@ tr.inv-foot td { border-bottom: none; color: var(--muted); }
     table.inv-table tr.inv-foot td:empty { display: none; }
     table.inv-table tr.inv-foot td.num { text-align: left; padding-top: 0; }
     .inv-unpaid { float: none; display: inline-block; margin-left: 6px; }
+}
+
+/* ---- Contacts: same compact table as the created invoices ---- */
+.ct-card { padding: 6px 14px; }
+table.ct-table td, table.ct-table th { padding: 7px 8px; vertical-align: middle; }
+table.ct-table tr.ct-row { cursor: pointer; }
+table.ct-table tr.ct-row:hover td { background: var(--bg); }
+table.ct-table .c-name { white-space: nowrap; }
+table.ct-table .c-name .role-tag { margin-left: 6px; }
+table.ct-table .c-sub { font-size: 13.5px; min-width: 180px; }
+table.ct-table .c-slots .fixed-slots { justify-content: flex-start; max-width: 260px; }
+table.ct-table .c-act { text-align: right; }
+table.ct-table .nowrap { white-space: nowrap; }
+table.ct-table tr.ct-foot td { border-bottom: none; color: var(--muted); }
+@media (max-width: 600px) {
+    table.ct-table, table.ct-table tbody { display: block; }
+    table.ct-table tr.ct-head { display: none; }
+    table.ct-table tr.ct-row {
+        display: grid; grid-template-columns: 1fr auto; column-gap: 10px;
+        grid-template-areas: "name act" "sub sub" "level rides";
+        padding: 8px 0; border-bottom: 1px solid var(--border);
+    }
+    table.ct-table tr.ct-row td { border: none; padding: 1px 0; min-width: 0; }
+    table.ct-table .c-name { grid-area: name; white-space: normal; }
+    table.ct-table .c-sub { grid-area: sub; }
+    table.ct-table .c-slots { display: none; }
+    table.ct-table .c-level { grid-area: level; padding-top: 4px; }
+    table.ct-table .c-rides { grid-area: rides; padding-top: 4px; }
+    table.ct-table .c-act { grid-area: act; }
+    table.ct-table tr.ct-foot, table.ct-table tr.ct-foot td { display: block; }
 }

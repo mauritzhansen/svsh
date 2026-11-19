@@ -2020,7 +2020,7 @@
         // may still want one if the other ride frees up. Primary picks hide them.
         const inUse = (h) => busy && busy.has(String(h.id)) && String(h.id) !== String(selectedId);
         const opt = (h, pre) => `<option value="${h.id}" ${String(selectedId) === String(h.id) ? 'selected' : ''}>${pre}${esc(h.name)}${opts.markInUse && inUse(h) ? ' — in use' : ''}</option>`;
-        let head = `<option value="">${opts.placeholder || '(no horse yet)'}</option>`;
+        let head = `<option value="">${opts.placeholder || '(no horse)'}</option>`;
         const avail = activeHorses().filter((h) => opts.markInUse || keepOption(h.id, selectedId, busy))
             .sort((a, b) => a.name.localeCompare(b.name));
         // "Theirs" covers the rider and anyone their payer pays for, so a parent's
@@ -2062,7 +2062,7 @@
     // ride whose rider is not flagged as one would blank the picker and saving
     // would drop them; those are labelled so the contact can be corrected.
     function partContactOptions(selectedId, busy, weekday, startMin, durMin) {
-        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.experience ? ' · ' + LEVEL_LABELS[c.experience] : ''}${c.is_prospect ? ' (interested)' : ''}${!c.is_rider ? ' — not marked as a rider' : ''}</option>`;
+        const opt = (c, pre) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? 'selected' : ''}>${pre}${esc(c.name)}${c.is_prospect ? ' (interested)' : ''}${!c.is_rider ? ' — not marked as a rider' : ''}</option>`;
         const avail = state.contacts.filter((c) => keepOption(c.id, selectedId, busy))
             .filter((c) => c.is_rider || String(c.id) === String(selectedId));
         const ok = avail.filter((c) => contactAvailable(c, weekday, startMin, durMin));
@@ -2104,10 +2104,10 @@
                     ${altHorseOptions(p ? p.alt_horse_id : null, null, p ? p.contact_id : null)}
                 </select>
                 <select class="pr-freq hidden" title="How often this rider comes. The two 'starts here' choices restart the fortnight from this lesson.">
-                    <option value="weekly" ${freq === 'biweekly' || freq === 'once' ? '' : 'selected'}>Every week</option>
-                    <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
-                    <option value="biweekly_on">Every 2nd week — on week starts here</option>
-                    <option value="biweekly_off">Every 2nd week — off week starts here</option>
+                    <option value="weekly" ${freq === 'biweekly' || freq === 'once' ? '' : 'selected'}>Weekly</option>
+                    <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Fortnightly</option>
+                    <option value="biweekly_on">Fortnightly — on week starts here</option>
+                    <option value="biweekly_off">Fortnightly — off week starts here</option>
                     <option value="once" ${freq === 'once' ? 'selected' : ''}>This day only</option>
                 </select>
                 ${withResched ? `<button type="button" class="secondary small row-resched" title="Can't make it — give a reschedule credit">${ICON_ROTATE}</button>` : ''}
@@ -3160,8 +3160,8 @@
             <div class="pick-row" data-kind="fxpart">
                 <select class="fp-contact">${contactOptions(p ? p.contact_id : null, '(pick rider)', null, true)}</select>
                 <select class="fp-freq" style="flex:0 0 128px">
-                    <option value="weekly" ${freq === 'weekly' ? 'selected' : ''}>Every week</option>
-                    <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Every 2nd week</option>
+                    <option value="weekly" ${freq === 'weekly' ? 'selected' : ''}>Weekly</option>
+                    <option value="biweekly" ${freq === 'biweekly' ? 'selected' : ''}>Fortnightly</option>
                 </select>
                 <input type="date" class="fp-anchor ${freq === 'biweekly' ? '' : 'hidden'}" style="flex:0 0 130px"
                        title="First week this rider comes" value="${esc(p && p.biweekly_anchor || '')}">
@@ -3812,21 +3812,30 @@
                 (!q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) &&
                 (!levels.size || levels.has(c.experience)) &&
                 (!role || (role === 'rider' ? isRider(c) : isParent(c))));
-            document.getElementById('contact-list').innerHTML = items.length ? items.map((c) => `
-                <div class="list-item" data-contact-id="${c.id}">
-                    <div class="avatar">${esc(c.name.trim()[0] || '?').toUpperCase()}</div>
-                    <div class="li-main">
-                        <div class="li-title">${esc(c.name)}${roleTags(c)}</div>
-                        <div class="li-sub">${contactSubLine(c)}</div>
-                    </div>
-                    <div class="fixed-slots">${fixedSlotsHtml(c)}</div>
-                    ${c.experience ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>` : ''}
-                    <div class="li-right">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</div>
-                    <button class="row-edit" data-edit-contact="${c.id}"
-                            title="Edit ${esc(c.name)}" aria-label="Edit ${esc(c.name)}">✏️</button>
-                    <button class="row-del" data-del-contact="${c.id}"
-                            title="Delete ${esc(c.name)}" aria-label="Delete ${esc(c.name)}">🗑</button>
-                </div>`).join('') : '<div class="card muted">No contacts found.</div>';
+            // One table line per contact, same style as the created invoices.
+            const levelChip = (c) => c.experience
+                ? `<span class="chip" style="background:color-mix(in srgb, ${LEVEL_COLORS[c.experience]} 26%, white);color:${LEVEL_COLORS[c.experience]}">${LEVEL_LABELS[c.experience]}</span>`
+                : '';
+            document.getElementById('contact-list').innerHTML = items.length ? `
+                <div class="card ct-card"><div class="table-wrap"><table class="plain ct-table">
+                    <tr class="ct-head"><th>Name</th><th>Pays / riders</th><th>Fixed lessons</th>
+                        <th>Level</th><th class="num">Rides</th><th></th></tr>
+                    ${items.map((c) => `
+                    <tr class="ct-row" data-contact-id="${c.id}">
+                        <td class="c-name"><b>${esc(c.name)}</b>${roleTags(c)}</td>
+                        <td class="c-sub muted">${contactSubLine(c)}</td>
+                        <td class="c-slots"><div class="fixed-slots">${fixedSlotsHtml(c)}</div></td>
+                        <td class="c-level">${levelChip(c)}</td>
+                        <td class="num nowrap muted c-rides">${c.ride_count} ride${c.ride_count === 1 ? '' : 's'}</td>
+                        <td class="nowrap c-act">
+                            <button type="button" class="icon-btn" data-edit-contact="${c.id}"
+                                    title="Edit ${esc(c.name)}" aria-label="Edit ${esc(c.name)}">✏️</button>
+                            <button type="button" class="icon-btn danger" data-del-contact="${c.id}"
+                                    title="Delete ${esc(c.name)}" aria-label="Delete ${esc(c.name)}">🗑</button>
+                        </td>
+                    </tr>`).join('')}
+                    <tr class="ct-foot"><td colspan="6">${items.length} contact${items.length === 1 ? '' : 's'}</td></tr>
+                </table></div></div>` : '<div class="card muted">No contacts found.</div>';
             document.querySelectorAll('[data-contact-id]').forEach((el) => {
                 el.addEventListener('click', () => { location.hash = '#/contacts/' + el.getAttribute('data-contact-id'); });
             });
@@ -5229,7 +5238,7 @@
                             ${st[0].toUpperCase() + st.slice(1)} <span class="inv-count" data-inv-count="${st}"></span>
                         </label>`).join('')}
                 </div>
-                <input type="search" id="inv-search" placeholder="Search name or number" value="${esc(p.q)}">
+                <input type="search" id="inv-search" placeholder="Search name, number or amount" value="${esc(p.q)}">
                 <div class="seg">
                     <button type="button" data-inv-view="list" class="${p.view === 'list' ? 'active' : ''}">List</button>
                     <button type="button" data-inv-view="payer" class="${p.view === 'payer' ? 'active' : ''}">By payer</button>
@@ -5287,8 +5296,11 @@
         if (!$t) return;
         const { show, view } = invList.prefs;
         const q = (invList.prefs.q || '').trim().toLowerCase();
-        const matches = invList.items.filter((i) => !q || [i.number, i.contact_name, i.rider_name]
-            .some((v) => String(v || '').toLowerCase().includes(q)));
+        // An amount matches too: "3600", "R 3 600", "3600,00" all find R 3600.00
+        const qAmount = /^r?\s*[\d\s.,]+$/.test(q) ? q.replace(/^r/, '').replace(/\s/g, '').replace(',', '.') : null;
+        const matches = invList.items.filter((i) => !q
+            || [i.number, i.contact_name, i.rider_name].some((v) => String(v || '').toLowerCase().includes(q))
+            || (qAmount && ((i.total_cents || 0) / 100).toFixed(2).includes(qAmount)));
         INVOICE_STATUSES.forEach((st) => {
             const el = document.querySelector(`[data-inv-count="${st}"]`);
             if (el) el.textContent = matches.filter((i) => i.status === st).length;
