@@ -6369,10 +6369,56 @@
     // ---------- Settings ----------
     // One row per livery cost: rename, re-price, or remove. Prices are per month
     // in full, except on a quarter share where they are split 50/50.
+    // The livery horses, with what each costs a month. Mirrors liveryLines() on
+    // the server: livery scaled by the share, standard charges in full except a
+    // quarter share (50/50), then the horse's own discount.
+    function drawLiveryHorses() {
+        const el = document.getElementById('set-livery-horses');
+        if (!el) return;
+        const inp = document.getElementById('biz-livery');
+        const base = inp ? (parseMoneyCents(inp.value) || 0) : (Number(state.settings.livery_price_cents) || 0);
+        const extras = (state.liveryExtras || []).filter((e) => e.active !== false)
+            .reduce((sum, e) => sum + (Number(e.price_cents) || 0), 0);
+        const horses = (state.horses || []).filter((h) => h.livery_share)
+            .sort((a, b) => (a.owner_name || '').localeCompare(b.owner_name || '') || a.name.localeCompare(b.name));
+        if (!horses.length) { el.innerHTML = '<div class="card muted">No livery horses. Set a horse\'s owner and share on the owner\'s contact.</div>'; return; }
+        const shareLabel = { 100: 'Full', 50: 'Half', 25: 'Quarter' };
+        let total = 0;
+        const rows = horses.map((h) => {
+            const livery = Math.round(base * h.livery_share / 100);
+            const std = h.livery_share === 25 ? Math.round(extras / 2) : extras;
+            const disc = Number(h.livery_discount_cents) || 0;
+            const month = livery + std - disc;
+            total += month;
+            const owner = state.contacts.find((c) => String(c.id) === String(h.owner_contact_id));
+            const own = ((owner && owner.monthly_charges) || []).reduce((sum, m) => sum + (Number(m.price_cents) || 0), 0);
+            return `<tr class="st-row${h.active ? '' : ' st-inactive'}" data-livery-horse="${h.id}">
+                <td class="st-name"><span class="horse-dot st-dot" style="background:${esc(h.color || '#6a6a66')}"></span><b>${esc(h.name)}</b></td>
+                <td class="nowrap">${esc(h.owner_name || '')}${own
+                    ? ` <span class="muted" title="Charges on the owner's own profile, billed once per owner">+ ${money(own)} own</span>` : ''}</td>
+                <td>${shareLabel[h.livery_share] || h.livery_share + '%'}</td>
+                <td class="num st-wide">${money(livery)}</td>
+                <td class="num st-wide">${money(std)}</td>
+                <td class="num st-wide">${disc ? '−' + money(disc) : '<span class="muted">—</span>'}</td>
+                <td class="num"><b>${money(month)}</b></td>
+            </tr>`;
+        });
+        el.innerHTML = `<div class="card ct-card"><div class="table-wrap"><table class="plain st-table">
+            <tr class="st-head"><th>Horse</th><th>Owner</th><th>Share</th><th class="num st-wide">Livery</th>
+                <th class="num st-wide">Standard charges</th><th class="num st-wide">Discount</th><th class="num">Per month</th></tr>
+            ${rows.join('')}
+            <tr class="st-foot"><td colspan="3">${horses.length} livery horse${horses.length === 1 ? '' : 's'}</td><td class="st-wide" colspan="3"></td>
+                <td class="num"><b>${money(total)}</b></td></tr>
+        </table></div></div>`;
+        el.querySelectorAll('[data-livery-horse]').forEach((row) => row.addEventListener('click', () =>
+            openHorseDialog(state.horses.find((h) => String(h.id) === row.getAttribute('data-livery-horse')))));
+    }
+
     function renderLiveryExtras() {
         const el = document.getElementById('livery-extras');
         if (!el) return;
         const list = state.liveryExtras || [];
+        drawLiveryHorses();
         if (!list.length) { el.innerHTML = '<div class="muted">None yet.</div>'; return; }
         el.innerHTML = list.map((e) => `
             <div class="pick-row" data-livery-extra="${e.id}">
@@ -6390,6 +6436,7 @@
                         price_cents: parseMoneyCents(row.querySelector('.lx-price').value) || 0
                     });
                     state.liveryExtras = (await api('GET', '/api/livery-extras')).extras;
+                    drawLiveryHorses();
                     toast('Saved.');
                 } catch (e) { toast(e.message, true); }
             };
@@ -6496,17 +6543,37 @@
 
             <section class="set-pane" data-pane="invoicing">
 
-            <h2>Business details (on invoices)</h2>
+            <h2>Business details</h2>
             <div class="card">
+                <div class="ride-sec">
+                <div class="ride-sec-title">🏠 Stable</div>
                 <label>Stable name</label>
                 <input id="biz-name" value="${esc(state.settings.business_name || '')}">
                 <label>Address / details</label>
                 <textarea id="biz-address">${esc(state.settings.business_address || '')}</textarea>
+                <div class="muted" style="margin:2px 0 0">Printed at the top of every invoice.</div>
+                </div>
+                <div class="ride-sec">
+                <div class="ride-sec-title">📞 Contact on invoices</div>
+                <label>Contact number</label>
+                ${phoneFieldHtml('biz-phone', state.settings.business_phone || '')}
+                <label>Contact email</label>
+                <input id="biz-email" type="email" value="${esc(state.settings.business_email || '')}">
+                </div>
+                <div class="ride-sec">
+                <div class="ride-sec-title">🏦 Banking details</div>
+                <label>Shown on every invoice, under the rides</label>
+                <textarea id="biz-bank" rows="5"
+                    placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
+                </div>
+                <div class="ride-sec">
+                <div class="ride-sec-title">🧾 Invoice footer</div>
+                <label>Text at the bottom of every invoice</label>
+                <textarea id="biz-footer" rows="3">${esc(state.settings.invoice_footer || '')}</textarea>
+                </div>
+                <div class="ride-sec">
+                <div class="ride-sec-title">🕘 Day &amp; currency</div>
                 <div class="form-row">
-                    <div>
-                        <label>Currency symbol</label>
-                        <input id="biz-currency" value="${esc(state.settings.currency || 'R')}">
-                    </div>
                     <div>
                         <label>Day starts</label>
                         <input type="time" id="biz-daystart" value="${esc(state.settings.day_start || '08:00')}">
@@ -6515,22 +6582,13 @@
                         <label>Day ends</label>
                         <input type="time" id="biz-dayend" value="${esc(state.settings.day_end || '17:00')}">
                     </div>
-                </div>
-                <div class="form-row">
                     <div>
-                        <label>Contact number (on invoices)</label>
-                        ${phoneFieldHtml('biz-phone', state.settings.business_phone || '')}
-                    </div>
-                    <div>
-                        <label>Contact email (on invoices)</label>
-                        <input id="biz-email" type="email" value="${esc(state.settings.business_email || '')}">
+                        <label>Currency</label>
+                        <input id="biz-currency" value="${esc(state.settings.currency || 'R')}">
                     </div>
                 </div>
-                <label>Banking details (shown on every invoice, under the rides)</label>
-                <textarea id="biz-bank" rows="5"
-                    placeholder="Bank: FNB&#10;Account name: Sweet Valley School of Horsemanship&#10;Account no: 1234567890&#10;Branch code: 250655&#10;Reference: the invoice number">${esc(state.settings.bank_details || '')}</textarea>
-                <label>Invoice footer text</label>
-                <textarea id="biz-footer" rows="3">${esc(state.settings.invoice_footer || '')}</textarea>
+                <div class="muted" style="margin:2px 0 0">The day's hours set the range of the ride grid and calendar.</div>
+                </div>
                 <div class="form-actions"><button id="biz-save">Save</button></div>
             </div>
             </section>` : ''}
@@ -6573,6 +6631,8 @@
                 </div>
                 <div class="form-actions"><button id="fees-save">Save</button></div>
             </div>
+            <h2 style="margin-top:22px">Livery horses</h2>
+            <div id="set-livery-horses"></div>
             </section>` : ''}
 
 
@@ -6757,6 +6817,7 @@
         const shareLabel = { 100: 'Full', 50: 'Half', 25: 'Quarter' };
 
         const drawHorses = () => {
+            drawLiveryHorses();
             document.getElementById('set-horses').innerHTML = settingsTable(
                 [{ label: 'Horse' }, { label: 'Owner' }, { label: 'Livery' }, { label: 'In lessons' },
                     { label: 'Notes', cls: 'st-notes' }, { label: 'Status' }],
@@ -6845,6 +6906,8 @@
         drawGuides();
         drawRideTypes();
         document.getElementById('horse-add').addEventListener('click', () => openHorseDialog(null));
+        const liveryInp = document.getElementById('biz-livery');
+        if (liveryInp) liveryInp.addEventListener('input', drawLiveryHorses);
         document.getElementById('guide-add').addEventListener('click', () => openGuideDialog(null));
         document.getElementById('ridetype-add').addEventListener('click', () => openRideTypeDialog(null));
         const copyBtn = document.getElementById('pub-copy');

@@ -1931,6 +1931,8 @@ table.st-table tr.st-foot td { border-bottom: none; color: var(--muted); }
 @media (max-width: 600px) {
     table.st-table th, table.st-table td { padding: 6px 5px; font-size: 13px; }
     table.st-table .st-notes { max-width: 140px; }
+    /* livery horses: the breakdown gives way so the monthly total stays on screen */
+    table.st-table .st-wide { display: none; }
 }
 
 /* A box within a section box (settings: the list of standard livery charges) */
