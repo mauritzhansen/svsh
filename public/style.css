@@ -141,7 +141,7 @@ input, select, textarea {
     color: var(--text);
 }
 
-textarea { min-height: 70px; resize: vertical; }
+textarea { min-height: 70px; resize: vertical; overflow-y: hidden; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--green); outline-offset: 0; border-color: var(--green); }
 
 .form-row { display: flex; gap: 10px; }
@@ -1911,3 +1911,57 @@ table.plain td.num { white-space: nowrap; }
 }
 .ov-unit { display: none; }
 @media (max-width: 600px) { .ov-unit { display: inline; } }
+
+/* ---- Settings lists (horses, instructors, ride types, users) as tables ---- */
+table.st-table .st-name { white-space: nowrap; }
+table.st-table .st-dot { width: 12px; height: 12px; display: inline-block; margin-right: 8px; vertical-align: -1px; }
+table.st-table .st-sub { font-size: 13.5px; }
+table.st-table .st-notes { max-width: 380px; }
+table.st-table .st-right { text-align: right; white-space: nowrap; }
+table.st-table tr.st-inactive .st-name b { color: var(--muted); font-weight: 600; }
+.chip.st-off { background: var(--blocked-bg); color: var(--muted); }
+#set-horses, #set-guides, #set-ridetypes, #set-users { margin-bottom: 8px; }
+@media (max-width: 600px) {
+    table.st-table tr.ct-row { grid-template-columns: 1fr auto; grid-template-areas: none; }
+    table.st-table .st-name { grid-column: 1; grid-row: 1; white-space: normal; }
+    table.st-table .st-right { grid-column: 2; grid-row: 1; }
+    table.st-table .st-sub { grid-column: 1 / -1; }
+    table.st-table td:empty { display: none; }
+}
+
+/* A box within a section box (settings: the list of standard livery charges) */
+.ride-sub {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px 10px; margin: 10px 0 4px;
+}
+.ride-sub > label:first-child { margin-top: 0; color: var(--text); }
+.ride-sub input { background-color: var(--bg); }
+.ride-sec textarea { display: block; }
+
+/* ---- Sideways-scrolling bars: fade + chevron where more is hidden ---- */
+.scroll-cue { position: relative; }
+.scroll-cue.more-r > .page-tabs, .scroll-cue.more-r > .month-pills {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+}
+.scroll-cue.more-l > .page-tabs, .scroll-cue.more-l > .month-pills {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 48px);
+    mask-image: linear-gradient(to right, transparent, #000 48px);
+}
+.scroll-cue.more-l.more-r > .page-tabs, .scroll-cue.more-l.more-r > .month-pills {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 48px), transparent);
+}
+.sc-arrow {
+    display: none;
+    position: absolute; top: 50%; transform: translateY(-50%);
+    width: 26px; height: 26px; padding: 0; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--card); color: var(--green-dark);
+    font-size: 18px; font-weight: 700; line-height: 1; box-shadow: var(--shadow);
+    cursor: pointer; z-index: 2;
+}
+.sc-arrow.sc-l { left: 2px; }
+.sc-arrow.sc-r { right: 2px; }
+.scroll-cue.more-l > .sc-l, .scroll-cue.more-r > .sc-r { display: flex; align-items: center; justify-content: center; }
+/* month pills carry a little bottom padding for the scrollbar; centre on the pills */
+.scroll-cue > .month-pills ~ .sc-arrow { top: calc(50% - 2px); }

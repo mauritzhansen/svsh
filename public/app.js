@@ -649,6 +649,65 @@
         renderCalendar();
     }
 
+    // ---------- Sideways-scrolling bars ----------
+    // Tab bars and month pills scroll sideways when they do not fit, which on
+    // a phone gives no sign that more sits off-screen. Each one gets faded
+    // edges and a chevron on whichever side has more; tapping the chevron
+    // scrolls that way. Bars are wrapped as they appear, wherever they are.
+    function centerInBar(btn) {
+        const bar = btn && btn.closest('.page-tabs, .month-pills');
+        if (!bar || bar.scrollWidth <= bar.clientWidth) return;
+        bar.scrollLeft = btn.offsetLeft - bar.offsetLeft - (bar.clientWidth - btn.offsetWidth) / 2;
+    }
+
+    function enhanceScrollBars() {
+        document.querySelectorAll('.page-tabs:not([data-scroll-cue]), .month-pills:not([data-scroll-cue])').forEach((bar) => {
+            bar.setAttribute('data-scroll-cue', '1');
+            const wrap = document.createElement('div');
+            wrap.className = 'scroll-cue';
+            bar.parentNode.insertBefore(wrap, bar);
+            wrap.appendChild(bar);
+            wrap.insertAdjacentHTML('beforeend',
+                '<button type="button" class="sc-arrow sc-l" tabindex="-1" aria-label="Scroll left">‹</button>' +
+                '<button type="button" class="sc-arrow sc-r" tabindex="-1" aria-label="Scroll right">›</button>');
+            const update = () => {
+                const max = bar.scrollWidth - bar.clientWidth;
+                wrap.classList.toggle('more-l', max > 2 && bar.scrollLeft > 2);
+                wrap.classList.toggle('more-r', max > 2 && bar.scrollLeft < max - 2);
+            };
+            const nudge = (dir) => bar.scrollBy({ left: dir * bar.clientWidth * 0.7, behavior: 'smooth' });
+            wrap.querySelector('.sc-l').addEventListener('click', () => nudge(-1));
+            wrap.querySelector('.sc-r').addEventListener('click', () => nudge(1));
+            bar.addEventListener('scroll', update, { passive: true });
+            if (window.ResizeObserver) new ResizeObserver(update).observe(bar);
+            // the open tab may start off-screen (e.g. Settings → Account)
+            centerInBar(bar.querySelector('.active'));
+            update();
+        });
+    }
+    // Text boxes grow with what is typed in them (banking details, notes, …),
+    // so nothing hides below a scrollbar. A box in a hidden tab has no
+    // height to measure; it is sized when its tab opens (autosizeIn).
+    function autosizeTextarea(ta) {
+        if (!ta.offsetParent) return;
+        const cs = getComputedStyle(ta);
+        const border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+        ta.style.height = 'auto';
+        ta.style.height = (ta.scrollHeight + border) + 'px';
+    }
+    function autosizeIn(root) {
+        (root || document).querySelectorAll('textarea').forEach(autosizeTextarea);
+    }
+    document.addEventListener('input', (e) => { if (e.target.tagName === 'TEXTAREA') autosizeTextarea(e.target); });
+    window.addEventListener('resize', () => autosizeIn());
+
+    let scrollCueQueued = false;
+    new MutationObserver(() => {
+        if (scrollCueQueued) return;
+        scrollCueQueued = true;
+        requestAnimationFrame(() => { scrollCueQueued = false; enhanceScrollBars(); autosizeIn(); });
+    }).observe(document.body, { childList: true, subtree: true });
+
     window.addEventListener('hashchange', route);
     document.querySelectorAll('#bottomnav [data-nav]').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -6034,7 +6093,7 @@
         };
         // four tabs do not fit a phone: the bar scrolls, so bring the open one into view
         const openRepTab = $view.querySelector('[data-rep-tab].active');
-        if (openRepTab) openRepTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        if (openRepTab) centerInBar(openRepTab);
         $view.querySelectorAll('[data-rep-tab]').forEach((b) => b.addEventListener('click', () => {
             state.reportTab = b.getAttribute('data-rep-tab');
             renderReports();
@@ -6376,10 +6435,11 @@
                 const on = b.getAttribute('data-set-tab') === key;
                 b.classList.toggle('active', on);
                 b.setAttribute('aria-selected', on ? 'true' : 'false');
-                if (on && remember) b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                if (on && remember) centerInBar(b);
             });
             document.querySelectorAll('.set-pane').forEach((p) =>
                 p.classList.toggle('hidden', p.getAttribute('data-pane') !== key));
+            autosizeIn($view);
             if (remember) {
                 try { localStorage.setItem('svsh.settingsTab', key); } catch (err) { /* not remembered */ }
             }
@@ -6400,14 +6460,14 @@
 
             <section class="set-pane" data-pane="horses">
             <h2>Horses</h2>
-            <div id="set-horses" class="settings-grid"></div>
+            <div id="set-horses"></div>
             <button class="secondary small" id="horse-add">＋ Add horse</button>
             </section>
 
             <section class="set-pane" data-pane="instructors">
 
             <h2>Instructors</h2>
-            <div id="set-guides" class="settings-grid"></div>
+            <div id="set-guides"></div>
             <button class="secondary small" id="guide-add">＋ Add instructor</button>
             </section>
 
@@ -6479,6 +6539,8 @@
             <section class="set-pane" data-pane="fees">
             <h2>Livery &amp; arena fees</h2>
             <div class="card">
+                <div class="ride-sec">
+                <div class="ride-sec-title">🏟 Arena fee</div>
                 <label>Arena fee per quarter (${esc(state.settings.currency || 'R')})</label>
                 <input id="biz-arena" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
@@ -6488,21 +6550,27 @@
                 <label>Arena fee explanation (printed on invoices that include the fee)</label>
                 <textarea id="biz-arena-note" rows="3"
                     placeholder="e.g. The arena fee is charged once a quarter and covers the upkeep of the arena, jumps and footing. It is not a lesson fee and is payable by all riders using the arena.">${esc(state.settings.arena_fee_note || '')}</textarea>
+                </div>
+                <div class="ride-sec">
+                <div class="ride-sec-title">🐎 Livery</div>
                 <label>Livery per month (${esc(state.settings.currency || 'R')})</label>
                 <input id="biz-livery" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
                        value="${state.settings.livery_price_cents ? (Number(state.settings.livery_price_cents) / 100).toFixed(2) : ''}">
                 <div class="muted" style="margin:2px 0 10px">Charged monthly per livery horse,
                    scaled to its full, half or quarter share.</div>
+                <div class="ride-sub">
                 <label>Standard monthly livery charges</label>
                 <div class="muted" style="margin:2px 0 6px">Bedding, feed and the like. Every
                    livery horse is charged all of these in full — except a quarter share, which
                    splits them 50/50. Charges for one customer only go on their own profile.</div>
                 <div id="livery-extras"></div>
                 <button type="button" class="secondary small" id="livery-extra-add">＋ Add a livery cost</button>
+                </div>
                 <label style="margin-top:10px">Livery explanation (printed on invoices that include livery)</label>
                 <textarea id="biz-livery-note" rows="2"
                     placeholder="e.g. Livery is charged monthly in advance and covers stabling, turnout and daily care.">${esc(state.settings.livery_note || '')}</textarea>
+                </div>
                 <div class="form-actions"><button id="fees-save">Save</button></div>
             </div>
             </section>` : ''}
@@ -6672,17 +6740,27 @@
                 saveTerm(inp.getAttribute('data-school'), inp.getAttribute('data-term'))));
         };
 
+        // Settings lists share the compact table used for contacts and invoices
+        const settingsTable = (head, rows, emptyText, noun) => rows.length
+            ? `<div class="card ct-card"><div class="table-wrap"><table class="plain ct-table st-table">
+                <tr class="ct-head">${head.map((h) => `<th${h.num ? ' class="num"' : ''}>${h.label}</th>`).join('')}</tr>
+                ${rows.join('')}
+                <tr class="ct-foot"><td colspan="${head.length}">${rows.length} ${noun}${rows.length === 1 ? '' : 's'}</td></tr>
+            </table></div></div>`
+            : `<div class="card muted">${emptyText}</div>`;
+        const inactiveTag = (on) => on ? '' : '<span class="chip st-off">inactive</span>';
+        const stDot = (color) => `<span class="horse-dot st-dot" style="background:${esc(color || '#6a6a66')}"></span>`;
+
         const drawHorses = () => {
-            document.getElementById('set-horses').innerHTML = [...state.horses]
-                .sort((a, b) => a.name.localeCompare(b.name)).map((h) => `
-                <div class="list-item" data-horse-id="${h.id}">
-                    <span class="horse-dot" style="background:${esc(h.color)};width:14px;height:14px"></span>
-                    <div class="li-main">
-                        <div class="li-title">${esc(h.name)}${h.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
-                        ${h.owner_name ? `<div class="li-sub">🏠 ${esc(h.owner_name)}'s own horse</div>` : ''}
-                        ${h.notes ? `<div class="li-sub">${esc(h.notes)}</div>` : ''}
-                    </div>
-                </div>`).join('') || '<div class="card muted">No horses yet.</div>';
+            document.getElementById('set-horses').innerHTML = settingsTable(
+                [{ label: 'Horse' }, { label: 'Owner' }, { label: 'Notes' }, { label: '' }],
+                [...state.horses].sort((a, b) => a.name.localeCompare(b.name)).map((h) => `
+                <tr class="ct-row${h.active ? '' : ' st-inactive'}" data-horse-id="${h.id}">
+                    <td class="st-name">${stDot(h.color)}<b>${esc(h.name)}</b></td>
+                    <td class="st-sub">${h.owner_name ? `🏠 ${esc(h.owner_name)}` : '<span class="muted">School horse</span>'}</td>
+                    <td class="st-sub st-notes muted">${esc(h.notes || '')}</td>
+                    <td class="st-right">${inactiveTag(h.active)}</td>
+                </tr>`), 'No horses yet.', 'horse');
             document.querySelectorAll('[data-horse-id]').forEach((el) => {
                 el.addEventListener('click', () => {
                     const horse = state.horses.find((h) => String(h.id) === el.getAttribute('data-horse-id'));
@@ -6691,14 +6769,15 @@
             });
         };
         const drawRideTypes = () => {
-            document.getElementById('set-ridetypes').innerHTML = state.rideTypes.map((t) => `
-                <div class="list-item" data-rt-id="${t.id}">
-                    <div class="li-main">
-                        <div class="li-title">${esc(t.name)}${t.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
-                        <div class="li-sub">${t.duration_min} min</div>
-                    </div>
-                    <div class="li-right">${money(t.price_cents)}</div>
-                </div>`).join('') || '<div class="card muted">No ride types yet.</div>';
+            document.getElementById('set-ridetypes').innerHTML = settingsTable(
+                [{ label: 'Ride type' }, { label: 'Length' }, { label: '' }, { label: 'Price', num: true }],
+                state.rideTypes.map((t) => `
+                <tr class="ct-row${t.active ? '' : ' st-inactive'}" data-rt-id="${t.id}">
+                    <td class="st-name"><b>${esc(t.name)}</b></td>
+                    <td class="st-sub nowrap muted">${t.duration_min} min</td>
+                    <td class="st-sub">${inactiveTag(t.active)}</td>
+                    <td class="num st-right"><b>${money(t.price_cents)}</b></td>
+                </tr>`), 'No ride types yet.', 'ride type');
             document.querySelectorAll('[data-rt-id]').forEach((el) => {
                 el.addEventListener('click', () => {
                     const rt = state.rideTypes.find((t) => String(t.id) === el.getAttribute('data-rt-id'));
@@ -6707,18 +6786,18 @@
             });
         };
         const drawGuides = () => {
-            document.getElementById('set-guides').innerHTML = [...state.guides]
-                .sort((a, b) => a.name.localeCompare(b.name)).map((g) => `
-                <div class="list-item" data-guide-id="${g.id}">
-                    <span class="horse-dot" style="background:${esc(g.color || '#6a6a66')};width:14px;height:14px"></span>
-                    <div class="li-main">
-                        <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}${g.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
-                        ${g.phone ? `<div class="li-sub">${esc(g.phone)}</div>` : ''}
-                        <div class="li-sub">${g.rate_cents != null
-                            ? money(g.rate_cents) + ' per lesson'
-                            : '<span class="no-parent">pay per lesson not set</span>'}</div>
-                    </div>
-                </div>`).join('') || '<div class="card muted">No instructors yet.</div>';
+            document.getElementById('set-guides').innerHTML = settingsTable(
+                [{ label: 'Instructor' }, { label: 'Role' }, { label: 'Phone' }, { label: 'Notes' }, { label: 'Pay per lesson', num: true }],
+                [...state.guides].sort((a, b) => a.name.localeCompare(b.name)).map((g) => `
+                <tr class="ct-row${g.active ? '' : ' st-inactive'}" data-guide-id="${g.id}">
+                    <td class="st-name">${stDot(g.color)}<b>${esc(g.name)}</b> ${inactiveTag(g.active)}</td>
+                    <td class="st-sub"><span class="chip role">${g.is_assistant ? 'Assistant' : 'Instructor'}</span></td>
+                    <td class="st-sub nowrap">${g.phone ? esc(g.phone) : ''}</td>
+                    <td class="st-sub st-notes muted">${esc(g.notes || '')}</td>
+                    <td class="num st-right">${g.rate_cents != null
+                        ? `<b>${money(g.rate_cents)}</b><span class="ov-unit muted"> per lesson</span>`
+                        : '<span class="no-parent"><span class="ov-unit">pay </span>not set</span>'}</td>
+                </tr>`), 'No instructors yet.', 'instructor');
             document.querySelectorAll('[data-guide-id]').forEach((el) => {
                 el.addEventListener('click', () => {
                     const guide = state.guides.find((g) => String(g.id) === el.getAttribute('data-guide-id'));
@@ -6789,14 +6868,15 @@
         });
 
         if (admin) {
-            document.getElementById('set-users').innerHTML = state.users.map((u) => `
-                <div class="list-item" data-user-id="${u.id}">
-                    <div class="li-main">
-                        <div class="li-title">${esc(u.display_name)}${u.active ? '' : ' <span class="muted">(inactive)</span>'}</div>
-                        <div class="li-sub">${esc(u.email)}</div>
-                    </div>
-                    <span class="chip role">${esc(u.role)}</span>
-                </div>`).join('');
+            document.getElementById('set-users').innerHTML = settingsTable(
+                [{ label: 'Name' }, { label: 'Email' }, { label: '' }, { label: 'Role', num: true }],
+                state.users.map((u) => `
+                <tr class="ct-row${u.active ? '' : ' st-inactive'}" data-user-id="${u.id}">
+                    <td class="st-name"><b>${esc(u.display_name)}</b></td>
+                    <td class="st-sub muted">${esc(u.email)}</td>
+                    <td class="st-sub">${inactiveTag(u.active)}</td>
+                    <td class="num st-right"><span class="chip role">${esc(u.role)}</span></td>
+                </tr>`), 'No users yet.', 'user');
             document.querySelectorAll('[data-user-id]').forEach((el) => {
                 el.addEventListener('click', () => {
                     const u = state.users.find((x) => String(x.id) === el.getAttribute('data-user-id'));
