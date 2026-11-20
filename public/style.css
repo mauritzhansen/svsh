@@ -1784,3 +1784,130 @@ table.ct-table tr.ct-foot td { border-bottom: none; color: var(--muted); }
     table.ct-table .c-act { grid-area: act; }
     table.ct-table tr.ct-foot, table.ct-table tr.ct-foot td { display: block; }
 }
+
+/* ---- Directory: same compact table as contacts ---- */
+table.dir-table tr.dir-click { cursor: pointer; }
+table.dir-table tr.dir-row:hover td { background: var(--bg); }
+table.dir-table tr.dir-group td {
+    font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); padding-top: 14px; border-bottom: 1px solid var(--border);
+}
+table.dir-table .d-name { white-space: nowrap; }
+table.dir-table .d-name .horse-dot { width: 11px; height: 11px; margin-right: 8px; vertical-align: -1px; display: inline-block; }
+table.dir-table .d-phone { font-size: 14px; }
+table.dir-table .d-email { font-size: 13px; }
+table.dir-table .d-notes { font-size: 13.5px; white-space: pre-line; min-width: 160px; max-width: 420px; }
+@media (max-width: 600px) {
+    table.dir-table tr.dir-row {
+        display: grid; grid-template-columns: 1fr auto; column-gap: 10px;
+        grid-template-areas: "name role" "phone phone" "notes notes";
+        padding: 8px 0; border-bottom: 1px solid var(--border);
+    }
+    table.dir-table tr.dir-row td { border: none; padding: 1px 0; min-width: 0; max-width: none; }
+    table.dir-table .d-name { grid-area: name; white-space: normal; }
+    table.dir-table .d-role { grid-area: role; }
+    table.dir-table .d-phone { grid-area: phone; white-space: normal; }
+    table.dir-table .d-notes { grid-area: notes; }
+    table.dir-table .d-notes.muted { display: none; }
+    table.dir-table tr.dir-group, table.dir-table tr.dir-group td,
+    table.dir-table tr.dir-empty, table.dir-table tr.dir-empty td { display: block; }
+}
+
+/* ---- Settings tabs: one bar, scrolls sideways on a phone ---- */
+.set-tabs { overflow-x: auto; scrollbar-width: none; margin-bottom: 14px; }
+.set-tabs::-webkit-scrollbar { display: none; }
+.set-tabs .page-tab { flex: 1 0 auto; padding: 8px 12px; }
+.set-pane > h2:first-child { margin-top: 4px; }
+@media (max-width: 600px) {
+    .set-tabs .page-tab { flex: 0 0 auto; font-size: 13px; padding: 8px 10px; }
+}
+
+/* ---- Ride dialog: each part in its own tinted box ---- */
+.ride-sec {
+    background: color-mix(in srgb, var(--bg) 70%, var(--border));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px 12px;
+    margin: 0 0 10px;
+}
+.ride-sec-title {
+    font-size: 12.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--green-dark); margin-bottom: 6px;
+}
+.ride-sec > label:first-of-type { margin-top: 0; }
+.ride-sec .form-row:last-child, .ride-sec > :last-child { margin-bottom: 0; }
+.ride-sec-hint { margin: 0 0 6px; font-size: 13px; }
+.ride-sec input, .ride-sec select, .ride-sec textarea { background-color: var(--card); }
+.ride-sec input:disabled, .ride-sec select:disabled { background-color: var(--bg); }
+@media (max-width: 480px) {
+    .ride-sec { padding: 8px 8px 10px; margin-left: -4px; margin-right: -4px; }
+}
+
+/* ---- Phone audit (390px) ---- */
+.nowrap { white-space: nowrap; }
+table.plain td.num { white-space: nowrap; }
+.no-parent { white-space: nowrap; }
+/* A tab bar wider than the screen scrolls instead of pushing tabs off it
+   (Reports has four; the last was unreachable on a phone). */
+.page-tabs { overflow-x: auto; scrollbar-width: none; }
+.page-tabs::-webkit-scrollbar { display: none; }
+.page-tab { flex: 1 0 auto; }
+/* Bigger touch targets on the day calendar */
+@media (max-width: 760px) {
+    body.cal-tab-rides .rider-horse { padding: 5px 9px; }
+    table.ridegrid th.horsecol .horse-block-btn { padding: 6px 0; }
+}
+@media (max-width: 480px) {
+    /* A phone number beside another field leaves both too narrow to read */
+    .form-row:has(.phone-field) { flex-wrap: wrap; }
+    .form-row:has(.phone-field) > div { flex: 1 1 100%; }
+    /* Interested rider: the name gets its own line */
+    .ik-row { flex-wrap: wrap; }
+    .ik-row .ik-name { flex: 1 1 100%; }
+    .ik-row .ik-age { flex: 0 0 70px !important; }
+    .ik-row .ik-level { flex: 1 1 0 !important; }
+    /* To-do quick add: the title on its own line */
+    .searchbar:has(#td-new-title) { flex-wrap: wrap; }
+    #td-new-title { flex: 1 1 100%; }
+    #td-new-date { flex: 1 1 0; min-width: 0; }
+    /* Created invoices: search takes the whole row */
+    #inv-search { flex: 1 1 100%; }
+    /* Rider rows keep to one line: drop the native arrow so the words fit */
+    .pick-row[data-kind="part"] select {
+        -webkit-appearance: none; appearance: none; background-image: none;
+        padding: 8px 5px; text-align: left;
+    }
+    .pick-row[data-kind="part"] .pr-freq { flex: 0 0 62px; }
+}
+@media (max-width: 600px) {
+    /* To-be-invoiced tables: who (and which days) on top, the numbers and the
+       button on a line underneath. Five columns squeezed the name to nothing. */
+    table.ov-table, table.ov-table tbody { display: block; }
+    table.ov-table tr.ov-head { display: none; }
+    table.ov-table tr.ov-row {
+        display: grid; grid-template-columns: auto 1fr auto auto; column-gap: 10px; align-items: center;
+        grid-template-areas: "who who who who" "terms rides total act";
+        padding: 9px 0; border-bottom: 1px solid var(--border);
+    }
+    table.ov-table tr.ov-row td { border: none; padding: 2px 0; min-width: 0; }
+    table.ov-table .ov-who { grid-area: who; font-weight: 600; }
+    table.ov-table .ov-who .rider-summary { font-weight: 400; }
+    table.ov-table .ov-terms { grid-area: terms; }
+    table.ov-table .ov-rides { grid-area: rides; text-align: left; color: var(--muted); }
+    table.ov-table .ov-total { grid-area: total; font-weight: 700; }
+    table.ov-table .ov-act { grid-area: act; }
+}
+@media (max-width: 480px) {
+    /* Contact form: livery and horse-preference rows */
+    .pick-row[data-livery-row], .pick-row[data-kind="ctpref"] { flex-wrap: wrap; }
+    .pick-row[data-livery-row] .lh-horse { flex: 1 1 100% !important; }
+    .pick-row[data-livery-row] .lh-share { flex: 1 1 0 !important; }
+    .pick-row[data-livery-row] .lh-discount { flex: 0 0 100px !important; }
+    .pick-row[data-kind="ctpref"] .cp-kind { flex: 0 0 104px !important; }
+    .pick-row[data-kind="ctpref"] .cp-horse { flex: 1 1 0; }
+    .pick-row[data-kind="ctpref"] .cp-reason { flex: 1 1 100%; order: 5; }
+    /* Wide report tables: tighter cells so six columns fit */
+    table.plain th, table.plain td { padding: 8px 6px; }
+}
+.ov-unit { display: none; }
+@media (max-width: 600px) { .ov-unit { display: inline; } }

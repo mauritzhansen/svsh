@@ -539,11 +539,22 @@
     // value that reaches a save.
     const NEW_RIDER = '__new';
     const newRiderOption = () => `<option value="${NEW_RIDER}">Add new rider…</option>`;
+    // A rider who was archived after being booked is no longer in
+    // state.contacts, so the picker had no option for them: it fell back to
+    // its first entry ("Add new rider…") and the ride could not be saved.
+    // Their names are remembered here as the rows are drawn.
+    const goneRiders = {};
+    const goneRiderOption = (selectedId) => {
+        const id = String(selectedId || '');
+        if (!id || !goneRiders[id] || state.contacts.some((c) => String(c.id) === id)) return '';
+        return `<option value="${esc(id)}" selected>${esc(goneRiders[id])} (archived)</option>`;
+    };
 
     function contactOptions(selectedId, emptyLabel, busy, ridersOnly, withNew) {
         const isSel = (c) => String(selectedId) === String(c.id);
         return (withNew ? newRiderOption() : '') +
             `<option value=""${selectedId ? '' : ' selected'}>${esc(emptyLabel || '')}</option>` +
+            goneRiderOption(selectedId) +
             state.contacts
                 .filter((c) => keepOption(c.id, selectedId, busy))
                 .filter((c) => !ridersOnly || c.is_rider || isSel(c))
@@ -2073,6 +2084,7 @@
         // picking "Add new rider" was not a change, so it fired no event at all.
         let html = newRiderOption()
             + `<option value=""${selectedId ? '' : ' selected'}>(open seat)</option>`
+            + goneRiderOption(selectedId)
             + ok.map((c) => opt(c, '')).join('');
         if (flagged.length) {
             html += `<optgroup label="⚠ Not usually available then">${flagged.map((c) => opt(c, '⚠ ')).join('')}</optgroup>`;
@@ -2093,6 +2105,7 @@
     // the series by the save.
     function participantRowHtml(p, withResched, freq) {
         const makeup = !!(p && p.credit_used);
+        if (p && p.contact_id && p.contact_name) goneRiders[String(p.contact_id)] = p.contact_name;
         return `
             <div class="pick-row" data-kind="part"${p && p.invoiced
                 ? ` data-invoiced="1" data-invoiced-cents="${p.invoiced_cents || 0}"` : ''}${makeup ? ' data-makeup="1"' : ''}>
@@ -2580,8 +2593,10 @@
                 off: cancelled-and-charged or rescheduled leave the invoice as it stands,
                 and cancelling without charge creates a refund on their next invoice.</div>` : ''}
             <fieldset style="border:none;margin:0;padding:0">
+            <div class="ride-sec">
+            <div class="ride-sec-title">🗓 When &amp; what</div>
             <label>Once-off or weekly? <span class="req">*</span></label>
-            <select id="ride-repeat" style="width:auto;min-width:240px;margin-bottom:14px">
+            <select id="ride-repeat" style="width:auto;min-width:240px">
                 <option value="" ${isEdit ? '' : 'selected'} disabled>— choose —</option>
                 <option value="once" ${isEdit && !ride.recurring_id ? 'selected' : ''}>Once off — this day only</option>
                 <option value="repeats" ${isEdit && ride.recurring_id ? 'selected' : ''}>🔁 Repeats every week (fixed ride)</option>
@@ -2607,14 +2622,21 @@
                            value="${isEdit && ride.duration_min ? ride.duration_min : ''}" placeholder="60">
                 </div>
             </div>
+            </div>
             ${defaults.addContactName ? `<p class="muted">⟳ Adding <b>${esc(defaults.addContactName)}</b> using a reschedule credit — the credit is used when you save.</p>` : ''}
-            <label>Riders &amp; horses</label>
-            ${isEdit ? '<p class="muted" style="margin:0 0 4px">✕ removes the rider · ⟳ reschedules (they get a credit for a new ride)</p>' : ''}
+            <div class="ride-sec">
+            <div class="ride-sec-title">🐴 Riders &amp; horses</div>
+            ${isEdit ? '<p class="muted ride-sec-hint">✕ removes the rider · ⟳ reschedules (they get a credit for a new ride)</p>' : ''}
             <div id="ride-parts"></div>
             <button type="button" class="secondary small" id="part-add">＋ Add rider</button>
-            <label>Instructors</label>
+            </div>
+            <div class="ride-sec">
+            <div class="ride-sec-title">🧑‍🏫 Instructors</div>
             <div id="ride-guides"></div>
             <button type="button" class="secondary small" id="guide-add">＋ Add instructor</button>
+            </div>
+            <div class="ride-sec">
+            <div class="ride-sec-title">📝 Notes &amp; place</div>
             <label>Notes (private — only visible here)</label>
             <input id="ride-notes" value="${esc(isEdit ? ride.notes || '' : '')}">
             <label>Instructor notes (shown on the ride and the instructor schedule)</label>
@@ -2622,6 +2644,7 @@
                    placeholder="e.g. Nolan on the lunge for the first 10 min">
             <label>Where</label>
             <select id="ride-venue">${venueOptions(isEdit ? (ride.venue || 'instructor') : 'instructor')}</select>
+            </div>
             </fieldset>
             <div class="form-warning" id="ride-resched-info"></div>
             <div class="form-warning" id="ride-warnings"></div>
@@ -3341,29 +3364,38 @@
         const draw = (filter) => {
             const q = (filter || '').toLowerCase();
             const match = (s) => !q || String(s || '').toLowerCase().includes(q);
-            const svc = entries.filter((e) => match(e.name) || match(e.category) || match(e.phone));
-            const instructors = state.guides.filter((g) => g.active && (match(g.name) || match(g.phone)));
-            const telLink = (p) => phoneLinks(p);
-            document.getElementById('dir-list').classList.remove('muted');
-            document.getElementById('dir-list').innerHTML = `
-                <h2>School contacts</h2>
-                ${svc.length ? svc.map((e) => `
-                    <div class="list-item" data-dir-id="${e.id}">
-                        <div class="li-main">
-                            <div class="li-title">${esc(e.name)}${e.category ? ` <span class="chip role">${esc(e.category)}</span>` : ''}</div>
-                            <div class="li-sub">${telLink(e.phone)}${e.phone && e.email ? ' · ' : ''}${esc(e.email || '')}</div>
-                            ${e.notes ? `<div class="li-sub">${esc(e.notes)}</div>` : ''}
-                        </div>
-                    </div>`).join('') : '<div class="card muted">No entries yet — add the vet, farrier, handyman…</div>'}
-                <h2>Instructors</h2>
-                ${instructors.map((g) => `
-                    <div class="list-item" data-dir-guide="${g.id}" style="${canInvoice() ? 'cursor:pointer' : ''}">
-                        <span class="horse-dot" style="background:${esc(g.color || '#6a6a66')};width:13px;height:13px"></span>
-                        <div class="li-main">
-                            <div class="li-title">${esc(g.name)}${g.is_assistant ? ' <span class="chip role">assistant</span>' : ''}</div>
-                            <div class="li-sub">${telLink(g.phone) || '<span class="muted">no number yet — tap to add</span>'}</div>
-                        </div>
-                    </div>`).join('')}`;
+            const svc = entries.filter((e) => match(e.name) || match(e.category) || match(e.phone) || match(e.email) || match(e.notes));
+            const instructors = state.guides.filter((g) => g.active && (match(g.name) || match(g.phone) || match(g.notes)
+                || match(g.is_assistant ? 'assistant' : 'instructor')));
+            const clickable = canInvoice() ? ' dir-click' : '';
+            const notesCell = (n) => n ? `<td class="d-notes">${esc(n)}</td>`
+                : '<td class="d-notes muted">—</td>';
+            const svcRows = svc.map((e) => `
+                    <tr class="dir-row${clickable}" data-dir-id="${e.id}">
+                        <td class="d-name"><b>${esc(e.name)}</b></td>
+                        <td class="d-role">${e.category ? `<span class="chip role">${esc(e.category)}</span>` : ''}</td>
+                        <td class="d-phone nowrap">${phoneLinks(e.phone) || '<span class="muted">—</span>'}${
+                            e.email ? `<div class="d-email"><a href="mailto:${esc(e.email)}" onclick="event.stopPropagation()">${esc(e.email)}</a></div>` : ''}</td>
+                        ${notesCell(e.notes)}
+                    </tr>`).join('');
+            const guideRows = instructors.map((g) => `
+                    <tr class="dir-row${clickable}" data-dir-guide="${g.id}">
+                        <td class="d-name"><span class="horse-dot" style="background:${esc(g.color || '#6a6a66')}"></span><b>${esc(g.name)}</b></td>
+                        <td class="d-role"><span class="chip role">${g.is_assistant ? 'Assistant' : 'Instructor'}</span></td>
+                        <td class="d-phone nowrap">${phoneLinks(g.phone) || '<span class="muted">no number yet</span>'}</td>
+                        ${notesCell(g.notes)}
+                    </tr>`).join('');
+            const $list = document.getElementById('dir-list');
+            $list.classList.remove('muted');
+            $list.innerHTML = `
+                <div class="card ct-card"><div class="table-wrap"><table class="plain ct-table dir-table">
+                    <tr class="ct-head"><th>Name</th><th>Role</th><th>Phone / email</th><th>Notes</th></tr>
+                    <tr class="dir-group"><td colspan="4">School contacts</td></tr>
+                    ${svcRows || `<tr class="dir-empty"><td colspan="4" class="muted">${q ? 'No matches.'
+                        : 'No entries yet — add the vet, farrier, handyman…'}</td></tr>`}
+                    <tr class="dir-group"><td colspan="4">Instructors</td></tr>
+                    ${guideRows || '<tr class="dir-empty"><td colspan="4" class="muted">No matches.</td></tr>'}
+                </table></div></div>`;
             if (canInvoice()) {
                 document.querySelectorAll('[data-dir-id]').forEach((el) => {
                     el.addEventListener('click', () => {
@@ -3549,7 +3581,7 @@
     function openIntakeDialog(withTabs) {
         const kidRow = () => `
             <div class="intake-kid" data-kind="intake-kid">
-                <div class="pick-row" style="margin-bottom:4px">
+                <div class="pick-row ik-row" style="margin-bottom:4px">
                     <input class="ik-name" placeholder="Rider name">
                     <input class="ik-age" type="number" inputmode="numeric" placeholder="Age" style="flex:0 0 74px">
                     <select class="ik-level" style="flex:0 0 130px">${levelOptions('')}</select>
@@ -3818,7 +3850,7 @@
                 : '';
             document.getElementById('contact-list').innerHTML = items.length ? `
                 <div class="card ct-card"><div class="table-wrap"><table class="plain ct-table">
-                    <tr class="ct-head"><th>Name</th><th>Pays / riders</th><th>Fixed lessons</th>
+                    <tr class="ct-head"><th>Name</th><th>Riders</th><th>Fixed lessons</th>
                         <th>Level</th><th class="num">Rides</th><th></th></tr>
                     ${items.map((c) => `
                     <tr class="ct-row" data-contact-id="${c.id}">
@@ -4580,7 +4612,7 @@
                     <label>Address (optional)</label>
                     <textarea id="np-address"></textarea>
                     <label>School <span class="req">*</span></label>
-                    <div class="muted" style="margin:-4px 0 6px">Term dates decide which lessons
+                    <div class="muted" style="margin:2px 0 6px">Term dates decide which lessons
                        are term-time. The riders this parent pays for follow it.</div>
                     <select id="np-school">
                         <option value="">(not set)</option>
@@ -4629,7 +4661,7 @@
                     ${state.schools.filter((s) => s.active || (contact && String(contact.school_id) === String(s.id)))
                         .map((s) => `<option value="${s.id}" ${contact && String(contact.school_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
                 </select>
-                <div class="muted" id="ct-school-note" style="margin:-4px 0 10px">
+                <div class="muted" id="ct-school-note" style="margin:2px 0 10px">
                     Per-term invoices use this school's term dates.
                 </div>
             </div>
@@ -4652,7 +4684,7 @@
                      expenses stay, because those do belong to the rider. -->
                 <div id="ct-livery-wrap">
                 <label style="margin-top:8px">Livery horses</label>
-                <div class="muted" style="margin:-4px 0 6px">A customer can stable more than one,
+                <div class="muted" style="margin:2px 0 6px">A customer can stable more than one,
                    each on its own share. The discount is a monthly amount off that horse's
                    livery fee — leave it blank for none.</div>
                 <div id="ct-livery-horses"></div>
@@ -4669,19 +4701,19 @@
                      a donation, anything billed every month, so it is offered to
                      every payer rather than only to livery customers. -->
                 <label style="margin-top:10px">Standard monthly charges</label>
-                <div class="muted" style="margin:-4px 0 6px">Billed every month, whether or not
+                <div class="muted" style="margin:2px 0 6px">Billed every month, whether or not
                    they have a horse on livery — a livery extra, a donation, a standing
                    arrangement. Name it so the invoice line reads sensibly.</div>
                 <div id="ct-monthly"></div>
                 <button type="button" class="secondary small" id="ct-monthly-add">＋ Add a monthly charge</button>
                 <label style="margin-top:10px">Lesson prices for this rider</label>
-                <div class="muted" style="margin:-4px 0 6px">A discounted or agreed rate for one
+                <div class="muted" style="margin:2px 0 6px">A discounted or agreed rate for one
                    ride type. It replaces the standard price for this rider only; every other
                    rider on the same lesson pays the usual price.</div>
                 <div id="ct-ridetypes"></div>
                 <button type="button" class="secondary small" id="ct-ridetype-add">＋ Add a lesson price</button>
                 <label style="margin-top:10px">One-off expenses &amp; discounts</label>
-                <div class="muted" style="margin:-4px 0 6px">A vet call, a bag of feed, or a
+                <div class="muted" style="margin:2px 0 6px">A vet call, a bag of feed, or a
                    discount off a month's lessons. Dated, and settled on the next invoice.</div>
                 <div id="ct-charges"></div>
                 ${contact ? '<button type="button" class="secondary small" id="ct-charge-add">＋ Add an expense or discount</button>'
@@ -4823,7 +4855,7 @@
                 <input id="ce-desc" autocomplete="off" placeholder="e.g. Vet call-out">
                 <label id="ce-amt-label">Amount (${esc(state.settings.currency || 'R')})</label>
                 <input id="ce-amt" type="number" inputmode="decimal" step="0.01" min="0">
-                <div class="muted" id="ce-hint" style="margin:-4px 0 4px"></div>
+                <div class="muted" id="ce-hint" style="margin:2px 0 4px"></div>
                 <div class="form-error"></div>
                 <div class="form-actions">
                     <button class="secondary" id="ce-cancel">Cancel</button>
@@ -4926,7 +4958,7 @@
                     <tr><th>Date</th><th>Time</th><th>Horse</th><th>Type</th><th class="num">Price</th><th></th></tr>
                     ${data.rides.map((r) => `
                         <tr${r.off_kind ? ' class="ride-off"' : ''}>
-                            <td><a href="#/calendar/${r.date}">${esc(fmtDay(r.date))}</a></td>
+                            <td class="nowrap"><a href="#/calendar/${r.date}">${esc(fmtDay(r.date))}</a></td>
                             <td>${hhmm(r.start_time)}</td>
                             <td>${r.off_kind
                                 ? `<span class="muted">${r.off_kind === 'rescheduled' ? '⟳ rescheduled' : '✕ cancelled late'}</span>`
@@ -5003,23 +5035,23 @@
         if (!$el) return;
         if (!rows.length) { $el.className = 'muted'; $el.innerHTML = esc(emptyText); return; }
         $el.className = '';
-        $el.innerHTML = `<div class="table-wrap"><table class="plain">
-            <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
+        $el.innerHTML = `<div class="table-wrap"><table class="plain ov-table">
+            <tr class="ov-head"><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
             ${rows.map((row) => `
-                <tr>
-                    <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
+                <tr class="ov-row">
+                    <td class="ov-who"><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
                         ${riderSummaryHtml(row)}</td>
-                    <td>${row.payment_terms
+                    <td class="ov-terms">${row.payment_terms
                         ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                         : '<span class="no-parent">not set</span>'}</td>
-                    <td class="num">${row.ride_count || (row.charge_count ? chargesCell(row) : hasStanding(row) ? standingCell(row) : 0)}${row.carried_over
+                    <td class="num ov-rides">${row.ride_count ? '<span class="ov-unit">rides </span>' : ''}${row.ride_count || (row.charge_count ? chargesCell(row) : hasStanding(row) ? standingCell(row) : 0)}${row.carried_over
                         ? ` <span class="carried" title="${row.term_ahead} term lesson${row.term_ahead === 1 ? '' : 's'} ahead · ${row.carried_over} ridden last month and not yet billed">${row.term_ahead}+${row.carried_over}</span>` : ''}${row.untyped_rides
                         ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}${row.older_unbilled
                         ? ` <span class="older-flag" title="No invoice created for ${missedMonths(row).join(', ')}. ${row.older_unbilled} unbilled lesson${row.older_unbilled === 1 ? '' : 's'} there (earliest ${fmtDay(row.older_from)}) — older than the one-month carry-over, so not on this invoice. Bill these with a custom date range.">⏳${row.older_unbilled}</span>` : ''}</td>
-                    <td class="num">${row.ride_count || row.charge_count || !hasStanding(row)
+                    <td class="num ov-total">${row.ride_count || row.charge_count || !hasStanding(row)
                         ? money(row.total_cents) : '<span class="muted">—</span>'}</td>
-                    <td class="num">${!row.payment_terms
-                        ? '<a class="btn secondary small" href="#/contacts/' + row.contact_id + '">Set terms</a>'
+                    <td class="num ov-act">${!row.payment_terms
+                        ? '<a class="btn secondary small nowrap" href="#/contacts/' + row.contact_id + '">Set terms</a>'
                         // A livery-only customer has no lessons but is still billable
                         : (row.ride_count || row.charge_count || hasStanding(row))
                         ? `<button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}"
@@ -5669,20 +5701,20 @@
                 $ov.innerHTML = 'No uninvoiced rides in this month.';
             } else {
                 $ov.classList.remove('muted');
-                $ov.innerHTML = `<div class="table-wrap"><table class="plain">
-                    <tr><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
+                $ov.innerHTML = `<div class="table-wrap"><table class="plain ov-table">
+                    <tr class="ov-head"><th>Contact</th><th>Pays</th><th class="num">Rides</th><th class="num">Total</th><th></th></tr>
                     ${arrears.map((row) => `
-                        <tr>
-                            <td><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
+                        <tr class="ov-row">
+                            <td class="ov-who"><a href="#/contacts/${row.contact_id}">${esc(row.name)}</a>
                                 ${riderSummaryHtml(row)}</td>
-                            <td>${row.payment_terms
+                            <td class="ov-terms">${row.payment_terms
                                 ? `<span class="terms-chip terms-${row.payment_terms}">${PAYMENT_TERMS[row.payment_terms]}</span>`
                                 : '<span class="no-parent">not set</span>'}</td>
-                            <td class="num">${row.ride_count || (hasStanding(row) ? standingCell(row) : 0)}${row.untyped_rides
+                            <td class="num ov-rides">${row.ride_count ? '<span class="ov-unit">rides </span>' : ''}${row.ride_count || (hasStanding(row) ? standingCell(row) : 0)}${row.untyped_rides
                                 ? ` <span class="untyped-flag" title="${row.untyped_rides} of these rides have no ride type, so they add nothing to the total">⚠${row.untyped_rides}</span>` : ''}</td>
-                            <td class="num">${row.ride_count || !hasStanding(row)
+                            <td class="num ov-total">${row.ride_count || !hasStanding(row)
                                 ? money(row.total_cents) : '<span class="muted">—</span>'}</td>
-                            <td class="num"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
+                            <td class="num ov-act"><button class="small" data-inv-contact="${row.contact_id}" data-inv-name="${esc(row.name)}">Create invoice</button></td>
                         </tr>`).join('')}
                 </table></div>`;
                 wireCreateInvoiceButtons($ov, arrRange);
@@ -5793,7 +5825,7 @@
             <div class="card" style="margin-top:12px">
                 <div class="searchbar" style="margin-bottom:0">
                     <input id="td-new-title" placeholder="New to-do…">
-                    <input type="date" id="td-new-date" style="flex:0 0 150px">
+                    <input type="date" id="td-new-date">
                     <button id="td-add">Add</button>
                 </div>
             </div>
@@ -6000,6 +6032,9 @@
             state.reportRange = range;
             renderReports();
         };
+        // four tabs do not fit a phone: the bar scrolls, so bring the open one into view
+        const openRepTab = $view.querySelector('[data-rep-tab].active');
+        if (openRepTab) openRepTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         $view.querySelectorAll('[data-rep-tab]').forEach((b) => b.addEventListener('click', () => {
             state.reportTab = b.getAttribute('data-rep-tab');
             renderReports();
@@ -6314,33 +6349,92 @@
         });
     }
 
+    // Settings is split into tabs; every pane is still built up front so the
+    // wiring below finds its elements, the tabs only show one at a time.
+    function settingsTabs() {
+        const tabs = [
+            { key: 'horses', label: '🐴 Horses' },
+            { key: 'instructors', label: '🧑‍🏫 Instructors' },
+            { key: 'schools', label: '🏫 Schools & terms' },
+            { key: 'ridetypes', label: '🏷 Ride types' }
+        ];
+        if (isAdmin()) tabs.push(
+            { key: 'users', label: '🔑 Users' },
+            { key: 'invoicing', label: '🧾 Business' },
+            { key: 'fees', label: '🐎 Livery & arena' });
+        tabs.push({ key: 'account', label: '👤 Account' });
+        return tabs;
+    }
+
+    function wireSettingsTabs() {
+        const keys = settingsTabs().map((t) => t.key);
+        let saved = null;
+        try { saved = localStorage.getItem('svsh.settingsTab'); } catch (err) { /* defaults are fine */ }
+        const show = (key, remember) => {
+            if (!keys.includes(key)) key = keys[0];
+            document.querySelectorAll('[data-set-tab]').forEach((b) => {
+                const on = b.getAttribute('data-set-tab') === key;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-selected', on ? 'true' : 'false');
+                if (on && remember) b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            });
+            document.querySelectorAll('.set-pane').forEach((p) =>
+                p.classList.toggle('hidden', p.getAttribute('data-pane') !== key));
+            if (remember) {
+                try { localStorage.setItem('svsh.settingsTab', key); } catch (err) { /* not remembered */ }
+            }
+        };
+        document.querySelectorAll('[data-set-tab]').forEach((b) =>
+            b.addEventListener('click', () => show(b.getAttribute('data-set-tab'), true)));
+        show(saved, false);
+    }
+
     async function renderSettings() {
         const admin = isAdmin();
         $view.innerHTML = `
             <h1>⚙️ Settings</h1>
+            <div class="page-tabs set-tabs" role="tablist">
+                ${settingsTabs().map((t) => `<button type="button" class="page-tab" role="tab"
+                    data-set-tab="${t.key}">${t.label}</button>`).join('')}
+            </div>
 
+            <section class="set-pane" data-pane="horses">
             <h2>Horses</h2>
             <div id="set-horses" class="settings-grid"></div>
             <button class="secondary small" id="horse-add">＋ Add horse</button>
+            </section>
+
+            <section class="set-pane" data-pane="instructors">
 
             <h2>Instructors</h2>
             <div id="set-guides" class="settings-grid"></div>
             <button class="secondary small" id="guide-add">＋ Add instructor</button>
+            </section>
+
+            <section class="set-pane" data-pane="schools">
 
             <h2>Schools &amp; term dates</h2>
             <p class="muted">Per-term invoices bill each rider for their own school's term,
                so the dates are kept per school.</p>
             <div id="set-schools"></div>
             <button class="secondary small" id="school-add">＋ Add school</button>
+            </section>
+
+            <section class="set-pane" data-pane="ridetypes">
 
             <h2>Ride types &amp; prices</h2>
             <div id="set-ridetypes"></div>
             <button class="secondary small" id="ridetype-add">＋ Add ride type</button>
+            </section>
 
             ${admin ? `
+            <section class="set-pane" data-pane="users">
             <h2>Users</h2>
             <div id="set-users"></div>
             <button class="secondary small" id="user-add">＋ Add user</button>
+            </section>
+
+            <section class="set-pane" data-pane="invoicing">
 
             <h2>Business details (on invoices)</h2>
             <div class="card">
@@ -6378,16 +6472,18 @@
                 <label>Invoice footer text</label>
                 <textarea id="biz-footer" rows="3">${esc(state.settings.invoice_footer || '')}</textarea>
                 <div class="form-actions"><button id="biz-save">Save</button></div>
-            </div>` : ''}
+            </div>
+            </section>` : ''}
 
             ${admin ? `
+            <section class="set-pane" data-pane="fees">
             <h2>Livery &amp; arena fees</h2>
             <div class="card">
                 <label>Arena fee per quarter (${esc(state.settings.currency || 'R')})</label>
                 <input id="biz-arena" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
                        value="${state.settings.arena_fee_cents ? (Number(state.settings.arena_fee_cents) / 100).toFixed(2) : ''}">
-                <div class="muted" style="margin:-4px 0 10px">Added once a quarter, on the invoice
+                <div class="muted" style="margin:2px 0 10px">Added once a quarter, on the invoice
                    covering January, April, July or October, for riders marked as paying it.</div>
                 <label>Arena fee explanation (printed on invoices that include the fee)</label>
                 <textarea id="biz-arena-note" rows="3"
@@ -6396,10 +6492,10 @@
                 <input id="biz-livery" type="number" inputmode="decimal" step="0.01" min="0"
                        placeholder="leave blank for none"
                        value="${state.settings.livery_price_cents ? (Number(state.settings.livery_price_cents) / 100).toFixed(2) : ''}">
-                <div class="muted" style="margin:-4px 0 10px">Charged monthly per livery horse,
+                <div class="muted" style="margin:2px 0 10px">Charged monthly per livery horse,
                    scaled to its full, half or quarter share.</div>
                 <label>Standard monthly livery charges</label>
-                <div class="muted" style="margin:-4px 0 6px">Bedding, feed and the like. Every
+                <div class="muted" style="margin:2px 0 6px">Bedding, feed and the like. Every
                    livery horse is charged all of these in full — except a quarter share, which
                    splits them 50/50. Charges for one customer only go on their own profile.</div>
                 <div id="livery-extras"></div>
@@ -6408,8 +6504,11 @@
                 <textarea id="biz-livery-note" rows="2"
                     placeholder="e.g. Livery is charged monthly in advance and covers stabling, turnout and daily care.">${esc(state.settings.livery_note || '')}</textarea>
                 <div class="form-actions"><button id="fees-save">Save</button></div>
-            </div>` : ''}
+            </div>
+            </section>` : ''}
 
+
+            <section class="set-pane" data-pane="account">
             ${admin ? `
             <h2>Instructor schedule link</h2>
             <div class="card">
@@ -6428,7 +6527,10 @@
             <div class="card" style="margin-top:18px">
                 Logged in as <b>${esc(state.user.display_name)}</b> <span class="chip role">${esc(state.user.role)}</span>
                 <div class="form-actions"><button class="secondary" id="logout-btn">Log out</button></div>
-            </div>`;
+            </div>
+            </section>`;
+        wireSettingsTabs();
+
 
         // Four years ahead, never behind: term dates are entered as schools
         // publish them, and a year that has passed is only clutter. The window
@@ -6850,7 +6952,7 @@
                    placeholder="not set"
                    value="${guide && guide.rate_cents != null ? (guide.rate_cents / 100).toFixed(2) : ''}">
             <label>Notes</label>
-            <input id="g-notes" value="${esc(guide ? guide.notes || '' : '')}">
+            <textarea id="g-notes" rows="2" placeholder="Anything helpers should know">${esc(guide ? guide.notes || '' : '')}</textarea>
             <label>Colour (dot on the calendar)</label>
             <input type="color" id="g-color" value="${esc(guide ? guide.color || '#6a6a66' : '#6a6a66')}" style="height:44px;padding:4px">
             ${guide ? `<label>Active</label>
