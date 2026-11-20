@@ -6740,26 +6740,35 @@
                 saveTerm(inp.getAttribute('data-school'), inp.getAttribute('data-term'))));
         };
 
-        // Settings lists share the compact table used for contacts and invoices
+        // Settings lists: thin, many-column tables like the invoice list. They stay
+        // real tables on phones too (the wrap scrolls sideways if needed).
         const settingsTable = (head, rows, emptyText, noun) => rows.length
-            ? `<div class="card ct-card"><div class="table-wrap"><table class="plain ct-table st-table">
-                <tr class="ct-head">${head.map((h) => `<th${h.num ? ' class="num"' : ''}>${h.label}</th>`).join('')}</tr>
+            ? `<div class="card ct-card"><div class="table-wrap"><table class="plain st-table">
+                <tr class="st-head">${head.map((h) => `<th${h.cls ? ` class="${h.cls}"` : ''}>${h.label}</th>`).join('')}</tr>
                 ${rows.join('')}
-                <tr class="ct-foot"><td colspan="${head.length}">${rows.length} ${noun}${rows.length === 1 ? '' : 's'}</td></tr>
+                <tr class="st-foot"><td colspan="${head.length}">${rows.length} ${noun}${rows.length === 1 ? '' : 's'}</td></tr>
             </table></div></div>`
             : `<div class="card muted">${emptyText}</div>`;
-        const inactiveTag = (on) => on ? '' : '<span class="chip st-off">inactive</span>';
+        const statusCell = (on) => `<td class="st-status">${on
+            ? '<span class="chip st-on">active</span>' : '<span class="chip st-off">inactive</span>'}</td>`;
+        const dash = '<span class="muted">—</span>';
+        const notesCell = (t) => `<td class="st-notes muted" title="${esc(t || '')}">${esc(t || '')}</td>`;
         const stDot = (color) => `<span class="horse-dot st-dot" style="background:${esc(color || '#6a6a66')}"></span>`;
+        const shareLabel = { 100: 'Full', 50: 'Half', 25: 'Quarter' };
 
         const drawHorses = () => {
             document.getElementById('set-horses').innerHTML = settingsTable(
-                [{ label: 'Horse' }, { label: 'Owner' }, { label: 'Notes' }, { label: '' }],
+                [{ label: 'Horse' }, { label: 'Owner' }, { label: 'Livery' }, { label: 'In lessons' },
+                    { label: 'Notes', cls: 'st-notes' }, { label: 'Status' }],
                 [...state.horses].sort((a, b) => a.name.localeCompare(b.name)).map((h) => `
-                <tr class="ct-row${h.active ? '' : ' st-inactive'}" data-horse-id="${h.id}">
+                <tr class="st-row${h.active ? '' : ' st-inactive'}" data-horse-id="${h.id}">
                     <td class="st-name">${stDot(h.color)}<b>${esc(h.name)}</b></td>
-                    <td class="st-sub">${h.owner_name ? `🏠 ${esc(h.owner_name)}` : '<span class="muted">School horse</span>'}</td>
-                    <td class="st-sub st-notes muted">${esc(h.notes || '')}</td>
-                    <td class="st-right">${inactiveTag(h.active)}</td>
+                    <td class="nowrap">${h.owner_name ? esc(h.owner_name) : '<span class="muted">School horse</span>'}</td>
+                    <td class="nowrap">${h.livery_share ? `${shareLabel[h.livery_share] || h.livery_share + '%'} share${
+                        h.livery_discount_cents ? ` <span class="muted">(−${money(h.livery_discount_cents)})</span>` : ''}` : dash}</td>
+                    <td>${!h.owner_name || h.shared_with_school ? 'Yes' : dash}</td>
+                    ${notesCell(h.notes)}
+                    ${statusCell(h.active)}
                 </tr>`), 'No horses yet.', 'horse');
             document.querySelectorAll('[data-horse-id]').forEach((el) => {
                 el.addEventListener('click', () => {
@@ -6770,13 +6779,15 @@
         };
         const drawRideTypes = () => {
             document.getElementById('set-ridetypes').innerHTML = settingsTable(
-                [{ label: 'Ride type' }, { label: 'Length' }, { label: '' }, { label: 'Price', num: true }],
+                [{ label: 'Ride type' }, { label: 'Length', cls: 'num' }, { label: 'Price', cls: 'num' },
+                    { label: 'Per hour', cls: 'num' }, { label: 'Status' }],
                 state.rideTypes.map((t) => `
-                <tr class="ct-row${t.active ? '' : ' st-inactive'}" data-rt-id="${t.id}">
+                <tr class="st-row${t.active ? '' : ' st-inactive'}" data-rt-id="${t.id}">
                     <td class="st-name"><b>${esc(t.name)}</b></td>
-                    <td class="st-sub nowrap muted">${t.duration_min} min</td>
-                    <td class="st-sub">${inactiveTag(t.active)}</td>
-                    <td class="num st-right"><b>${money(t.price_cents)}</b></td>
+                    <td class="num">${t.duration_min} min</td>
+                    <td class="num"><b>${money(t.price_cents)}</b></td>
+                    <td class="num muted">${t.duration_min ? money(Math.round(t.price_cents * 60 / t.duration_min)) : ''}</td>
+                    ${statusCell(t.active)}
                 </tr>`), 'No ride types yet.', 'ride type');
             document.querySelectorAll('[data-rt-id]').forEach((el) => {
                 el.addEventListener('click', () => {
@@ -6787,16 +6798,16 @@
         };
         const drawGuides = () => {
             document.getElementById('set-guides').innerHTML = settingsTable(
-                [{ label: 'Instructor' }, { label: 'Role' }, { label: 'Phone' }, { label: 'Notes' }, { label: 'Pay per lesson', num: true }],
+                [{ label: 'Instructor' }, { label: 'Role' }, { label: 'Phone' }, { label: 'Pay per lesson', cls: 'num' },
+                    { label: 'Notes', cls: 'st-notes' }, { label: 'Status' }],
                 [...state.guides].sort((a, b) => a.name.localeCompare(b.name)).map((g) => `
-                <tr class="ct-row${g.active ? '' : ' st-inactive'}" data-guide-id="${g.id}">
-                    <td class="st-name">${stDot(g.color)}<b>${esc(g.name)}</b> ${inactiveTag(g.active)}</td>
-                    <td class="st-sub"><span class="chip role">${g.is_assistant ? 'Assistant' : 'Instructor'}</span></td>
-                    <td class="st-sub nowrap">${g.phone ? esc(g.phone) : ''}</td>
-                    <td class="st-sub st-notes muted">${esc(g.notes || '')}</td>
-                    <td class="num st-right">${g.rate_cents != null
-                        ? `<b>${money(g.rate_cents)}</b><span class="ov-unit muted"> per lesson</span>`
-                        : '<span class="no-parent"><span class="ov-unit">pay </span>not set</span>'}</td>
+                <tr class="st-row${g.active ? '' : ' st-inactive'}" data-guide-id="${g.id}">
+                    <td class="st-name">${stDot(g.color)}<b>${esc(g.name)}</b></td>
+                    <td>${g.is_assistant ? 'Assistant' : 'Instructor'}</td>
+                    <td class="nowrap">${g.phone ? esc(g.phone) : dash}</td>
+                    <td class="num">${g.rate_cents != null ? `<b>${money(g.rate_cents)}</b>` : '<span class="no-parent">not set</span>'}</td>
+                    ${notesCell(g.notes)}
+                    ${statusCell(g.active)}
                 </tr>`), 'No instructors yet.', 'instructor');
             document.querySelectorAll('[data-guide-id]').forEach((el) => {
                 el.addEventListener('click', () => {
@@ -6869,13 +6880,13 @@
 
         if (admin) {
             document.getElementById('set-users').innerHTML = settingsTable(
-                [{ label: 'Name' }, { label: 'Email' }, { label: '' }, { label: 'Role', num: true }],
+                [{ label: 'Name' }, { label: 'Email' }, { label: 'Role' }, { label: 'Status' }],
                 state.users.map((u) => `
-                <tr class="ct-row${u.active ? '' : ' st-inactive'}" data-user-id="${u.id}">
+                <tr class="st-row${u.active ? '' : ' st-inactive'}" data-user-id="${u.id}">
                     <td class="st-name"><b>${esc(u.display_name)}</b></td>
-                    <td class="st-sub muted">${esc(u.email)}</td>
-                    <td class="st-sub">${inactiveTag(u.active)}</td>
-                    <td class="num st-right"><span class="chip role">${esc(u.role)}</span></td>
+                    <td class="nowrap">${esc(u.email)}</td>
+                    <td>${esc(u.role.charAt(0).toUpperCase() + u.role.slice(1))}</td>
+                    ${statusCell(u.active)}
                 </tr>`), 'No users yet.', 'user');
             document.querySelectorAll('[data-user-id]').forEach((el) => {
                 el.addEventListener('click', () => {

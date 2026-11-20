@@ -1912,21 +1912,25 @@ table.plain td.num { white-space: nowrap; }
 .ov-unit { display: none; }
 @media (max-width: 600px) { .ov-unit { display: inline; } }
 
-/* ---- Settings lists (horses, instructors, ride types, users) as tables ---- */
+/* ---- Settings lists (horses, instructors, ride types, users): thin tables like invoices ---- */
+table.st-table th, table.st-table td { padding: 6px 8px; vertical-align: middle; font-size: 13.5px; }
+table.st-table th { font-size: 12.5px; white-space: nowrap; }
+table.st-table tr.st-row { cursor: pointer; }
+table.st-table tr.st-row:hover td { background: var(--bg); }
 table.st-table .st-name { white-space: nowrap; }
-table.st-table .st-dot { width: 12px; height: 12px; display: inline-block; margin-right: 8px; vertical-align: -1px; }
-table.st-table .st-sub { font-size: 13.5px; }
-table.st-table .st-notes { max-width: 380px; }
-table.st-table .st-right { text-align: right; white-space: nowrap; }
-table.st-table tr.st-inactive .st-name b { color: var(--muted); font-weight: 600; }
+table.st-table .st-dot { width: 11px; height: 11px; display: inline-block; margin-right: 7px; vertical-align: -1px; }
+table.st-table .st-notes { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.st-table .st-status { width: 1%; white-space: nowrap; }
+table.st-table .chip { font-size: 11.5px; padding: 1px 7px; }
+table.st-table tr.st-inactive td:not(.st-status) { color: var(--muted); }
+table.st-table tr.st-inactive .st-name b { font-weight: 600; }
+table.st-table tr.st-foot td { border-bottom: none; color: var(--muted); }
+.chip.st-on { background: var(--open-bg); color: var(--open); }
 .chip.st-off { background: var(--blocked-bg); color: var(--muted); }
 #set-horses, #set-guides, #set-ridetypes, #set-users { margin-bottom: 8px; }
 @media (max-width: 600px) {
-    table.st-table tr.ct-row { grid-template-columns: 1fr auto; grid-template-areas: none; }
-    table.st-table .st-name { grid-column: 1; grid-row: 1; white-space: normal; }
-    table.st-table .st-right { grid-column: 2; grid-row: 1; }
-    table.st-table .st-sub { grid-column: 1 / -1; }
-    table.st-table td:empty { display: none; }
+    table.st-table th, table.st-table td { padding: 6px 5px; font-size: 13px; }
+    table.st-table .st-notes { max-width: 140px; }
 }
 
 /* A box within a section box (settings: the list of standard livery charges) */
